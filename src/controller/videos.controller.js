@@ -110,52 +110,77 @@ if (require.main === module) {
     });
 }
 
+import * as videoService from '../services/video.service.js';
+
 /**
- * GET /api/videos?limit=10&offset=0
- * Supports:
- *  - PostgreSQL via DATABASE_URL env (expects table `videos` with fields: title, thumbnail, duration, url, views)
- *  - fallback to backend/data/videos.json (array of video objects)
+ * GET /videos?limit=10&offset=0
+ * Returns paginated videos (default 10).
  */
 export async function getVideos(req, res) {
-  const limit = clamp(parseInt(req.query.limit || DEFAULT_LIMIT, 10) || DEFAULT_LIMIT, 1, 100);
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10) || 10, 1), 100);
   const offset = Math.max(parseInt(req.query.offset || '0', 10) || 0, 0);
 
   try {
-    // Try DB (Postgres) if DATABASE_URL present
-    if (process.env.DATABASE_URL) {
-      const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-      const q = `
-        SELECT title, thumbnail, duration, url, views
-        FROM videos
-        ORDER BY id DESC
-        LIMIT $1 OFFSET $2
-      `;
-      const result = await pool.query(q, [limit, offset]);
-      await pool.end();
+    // Prefer service layer if available
+    if (videoService && typeof videoService.list === 'function') {
+      const rows = await videoService.list({ limit, offset });
+
+      // Log what we got from the service for debugging
+      console.info(`[videos.controller] getVideos -> limit=${limit} offset=${offset} returned=${Array.isArray(rows) ? rows.length : 0}`);
+      console.debug('[videos.controller] getVideos -> rows sample:', Array.isArray(rows) ? rows.slice(0, 5) : rows);
+
       return res.json({
         success: true,
-        data: result.rows,
+        data: Array.isArray(rows) ? rows : [],
         limit,
         offset,
-        count: result.rows.length
+        count: Array.isArray(rows) ? rows.length : 0
       });
     }
 
-    // Fallback: JSON file in repo
-    const file = path.resolve(process.cwd(), 'backend', 'data', 'videos.json');
-    const raw = await fs.readFile(file, 'utf8');
-    const all = JSON.parse(raw);
-    const page = Array.isArray(all) ? all.slice(offset, offset + limit) : [];
-    return res.json({
-      success: true,
-      data: page,
-      limit,
-      offset,
-      total: Array.isArray(all) ? all.length : 0
-    });
+    // If service doesn't expose list, try common names
+    if (videoService && typeof videoService.fetchAll === 'function') {
+      const all = await videoService.fetchAll();
+      const page = Array.isArray(all) ? all.slice(offset, offset + limit) : [];
+
+      // Log fallback data
+      console.info(`[videos.controller] getVideos (fallback fetchAll) -> limit=${limit} offset=${offset} pageCount=${page.length} total=${Array.isArray(all) ? all.length : 'unknown'}`);
+      console.debug('[videos.controller] getVideos -> page sample:', Array.isArray(page) ? page.slice(0, 5) : page);
+
+      return res.json({ success: true, data: page, limit, offset, total: Array.isArray(all) ? all.length : undefined, count: page.length });
+    }
+
+    // Fallback: no service method found
+    console.warn('[videos.controller] getVideos -> videos service missing expected methods (list/fetchAll)');
+    return res.status(501).json({ success: false, message: 'videos service not implemented' });
   } catch (err) {
-    console.error('getVideos error:', err);
+    console.error('[videos.controller] getVideos error', err);
     return res.status(500).json({ success: false, message: 'Failed to fetch videos' });
   }
 }
+
+export async function fetchVideos({ page = 1, limit = 10 } = {}) {
+  const offset = Math.max((page - 1) * limit, 0);
+  const url = `${API_BASE}/videos?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`;
+
+  try {
+    const { status, body } = await fetchJson(url);
+    if (status >= 400) throw new Error('Fetch videos failed ' + status);
+    // Normalize: backend returns { success, data }
+    const arr = Array.isArray(body) ? body : (body && body.data ? body.data : []);
+    return Array.isArray(arr) ? arr : [];
+  } catch (err) {
+    console.error('videoService.fetchVideos error', err);
+    throw err;
+  }
+}
+
+export { fetchVideos };
+
+export default {
+  searchVideos,
+  getTrending,
+  downloadVideo,
+  getVideoById,
+  fetchVideos,
+};

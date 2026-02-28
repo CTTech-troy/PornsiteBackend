@@ -1,0 +1,239 @@
+/**
+ * Secure video upload & publish: Supabase Storage + Firebase RTDB.
+ * Consent required; only consentGiven === true sets isLive. Public feed returns only isLive === true.
+ */
+import { rtdb } from '../config/firebase.js';
+import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import crypto from 'crypto';
+
+const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
+
+function videosRef() {
+  return rtdb.ref('videos');
+}
+function likesRef() {
+  return rtdb.ref('likes');
+}
+function commentsRef() {
+  return rtdb.ref('comments');
+}
+
+/**
+ * Upload video to Supabase Storage and save metadata to RTDB.
+ * req.uid from auth middleware; req.file from multer; body: title, description, consentGiven.
+ */
+export async function uploadAndPublish(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const file = req.file;
+    const title = (req.body?.title || '').trim();
+    const description = (req.body?.description || '').trim();
+    const consentGiven = req.body?.consentGiven === true || req.body?.consentGiven === 'true';
+
+    if (!title) return res.status(400).json({ success: false, message: 'Title is required' });
+    if (!description) return res.status(400).json({ success: false, message: 'Description is required' });
+    if (!file) return res.status(400).json({ success: false, message: 'Video file is required' });
+    if (req.body?.consentGiven === undefined && req.body?.consentGiven !== false)
+      return res.status(400).json({ success: false, message: 'You must answer the consent question' });
+
+    const videoId = crypto.randomUUID();
+    const timestamp = Date.now();
+    const safeName = (file.originalname || 'video').replace(/[^a-zA-Z0-9.-]/g, '_');
+    const storagePath = `${uid}/${timestamp}-${safeName}`;
+
+    let videoUrl = null;
+    if (isSupabaseConfigured()) {
+      const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, file.mimetype || 'video/mp4');
+      videoUrl = getPublicUrl(VIDEO_BUCKET, data.path) || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${VIDEO_BUCKET}/${storagePath}`;
+    } else {
+      return res.status(503).json({ success: false, message: 'Storage not configured' });
+    }
+
+    const isLive = consentGiven === true;
+    const metadata = {
+      title,
+      description,
+      videoUrl,
+      streamUrl: videoUrl, // direct playable URL for HTML5 player
+      userId: uid,
+      consentQuestion: CONSENT_QUESTION,
+      consentGiven,
+      isLive,
+      totalLikes: 0,
+      totalComments: 0,
+      createdAt: Date.now(),
+    };
+
+    await videosRef().child(videoId).set(metadata);
+    return res.status(201).json({
+      success: true,
+      videoId,
+      videoUrl,
+      isLive,
+      message: isLive ? 'Video published' : 'Video saved as draft (consent not given)',
+    });
+  } catch (err) {
+    console.error('videoPublish.uploadAndPublish error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Upload failed' });
+  }
+}
+
+/**
+ * Public feed: only videos where isLive === true.
+ */
+export async function getPublicVideos(req, res) {
+  try {
+    const snap = await videosRef().once('value');
+    const val = snap.val();
+    const list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
+    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return res.json({ success: true, data: list });
+  } catch (err) {
+    console.error('videoPublish.getPublicVideos error', err?.message || err);
+    return res.status(500).json({ success: false, data: [] });
+  }
+}
+
+/**
+ * Get one video by id. Only return if isLive or request is from owner (optional).
+ */
+export async function getVideoById(req, res) {
+  try {
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    const snap = await videosRef().child(videoId).once('value');
+    const data = snap.val();
+    if (!data) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (data.isLive !== true) return res.status(404).json({ success: false, message: 'Video not available' });
+    return res.json({ success: true, data: { ...data, videoId } });
+  } catch (err) {
+    console.error('videoPublish.getVideoById error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+/**
+ * Like: only if isLive. Prevent duplicate (likes/videoId/uid = true).
+ */
+export async function likeVideo(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+
+    const videoSnap = await videosRef().child(videoId).once('value');
+    const video = videoSnap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.isLive !== true) return res.status(400).json({ success: false, message: 'Video is not live' });
+
+    const likeSnap = await likesRef().child(videoId).child(uid).once('value');
+    if (likeSnap.val()) return res.json({ success: true, liked: true, totalLikes: video.totalLikes || 0 });
+
+    await likesRef().child(videoId).child(uid).set(true);
+    const newTotal = (video.totalLikes || 0) + 1;
+    await videosRef().child(videoId).child('totalLikes').set(newTotal);
+    return res.json({ success: true, liked: true, totalLikes: newTotal });
+  } catch (err) {
+    console.error('videoPublish.likeVideo error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+/**
+ * Unlike.
+ */
+export async function unlikeVideo(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+
+    const videoSnap = await videosRef().child(videoId).once('value');
+    const video = videoSnap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+
+    await likesRef().child(videoId).child(uid).remove();
+    const newTotal = Math.max(0, (video.totalLikes || 0) - 1);
+    await videosRef().child(videoId).child('totalLikes').set(newTotal);
+    return res.json({ success: true, liked: false, totalLikes: newTotal });
+  } catch (err) {
+    console.error('videoPublish.unlikeVideo error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+/**
+ * Add comment. Only if isLive.
+ */
+export async function addComment(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { videoId } = req.params;
+    const text = (req.body?.text || '').trim();
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!text) return res.status(400).json({ success: false, message: 'Comment text is required' });
+
+    const videoSnap = await videosRef().child(videoId).once('value');
+    const video = videoSnap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.isLive !== true) return res.status(400).json({ success: false, message: 'Video is not live' });
+
+    const commentId = crypto.randomUUID();
+    const comment = {
+      userId: uid,
+      text,
+      createdAt: Date.now(),
+    };
+    await commentsRef().child(videoId).child(commentId).set(comment);
+    const newTotal = (video.totalComments || 0) + 1;
+    await videosRef().child(videoId).child('totalComments').set(newTotal);
+    return res.status(201).json({ success: true, comment: { ...comment, commentId } });
+  } catch (err) {
+    console.error('videoPublish.addComment error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+/**
+ * Get comments for a video (public, only if video isLive).
+ */
+export async function getComments(req, res) {
+  try {
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+
+    const videoSnap = await videosRef().child(videoId).once('value');
+    const video = videoSnap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.isLive !== true) return res.status(404).json({ success: false, message: 'Video not available' });
+
+    const snap = await commentsRef().child(videoId).once('value');
+    const val = snap.val();
+    const list = !val ? [] : Object.entries(val).map(([id, c]) => ({ ...c, commentId: id })).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    return res.json({ success: true, data: list });
+  } catch (err) {
+    console.error('videoPublish.getComments error', err?.message || err);
+    return res.status(500).json({ success: false, data: [] });
+  }
+}
+
+/**
+ * Check if current user liked a video (for UI state).
+ */
+export async function getLikeStatus(req, res) {
+  try {
+    const uid = req.uid;
+    const { videoId } = req.params;
+    if (!uid) return res.json({ success: true, liked: false });
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    const snap = await likesRef().child(videoId).child(uid).once('value');
+    return res.json({ success: true, liked: !!snap.val() });
+  } catch (err) {
+    return res.json({ success: true, liked: false });
+  }
+}

@@ -4,9 +4,15 @@ import dotenv from 'dotenv';
 import authRouter from './src/router/auth.route.js';
 import videosRouter from './src/router/videos.route.js';
 import liveRouter from './src/router/live.route.js';
+import giftRouter from './src/router/gift.route.js';
+import usersRouter from './src/router/users.route.js';
+import creatorsRouter from './src/router/creators.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
+import * as giftCtrl from './src/controller/gift.controller.js';
 import { auth } from './src/config/firebase.js';
-import { supabase } from './src/config/supabase.js';
+import { supabase, ensureBuckets } from './src/config/supabase.js';
+import { syncCacheToSupabase } from './src/config/live-cache.js';
+import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 
 dotenv.config();
 
@@ -28,39 +34,69 @@ app.use('/api/auth', authRouter);
 app.use('/api/videos', videosRouter);
 // Live routes
 app.use('/api/live', liveRouter);
+// Gift catalog
+app.use('/api/gifts', giftRouter);
+// Users (public profile, follow)
+app.use('/api/users', usersRouter);
+// Creators (leaderboard + profile + videos)
+app.use('/api/creators', creatorsRouter);
 
 const PORT = process.env.PORT || 5000;
 
+const STARTUP_CHECK_TIMEOUT_MS = 3500;
+let supabaseWarned = false;
+
 async function checkConnections() {
-  // Firebase check
-  try {
-    // guard Firebase check with a short timeout to avoid long startup stalls
-    const fbCheck = auth.listUsers(1);
-    const fbRes = await Promise.race([
-      fbCheck,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Firebase check timed out')), 5000))
-    ]);
-    if (fbRes) console.log('✅ Firebase: connected (auth reachable)');
-  } catch (err) {
-    console.error('❌ Firebase: connection failed —', err && err.message ? err.message : err);
-  }
-  try {
-    // Run a short supabase query and guard with timeout
-    const supPromise = supabase.from('users').select('id').limit(1);
-    const supRes = await Promise.race([
-      supPromise,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Supabase check timed out')), 5000))
-    ]);
-    // supRes may be an object with error property
-    if (supRes && !supRes.error) {
-      console.log('✅ Supabase: connected (query executed)');
-    } else if (supRes && supRes.error) {
-      console.warn('⚠️ Supabase: query returned an error —', supRes.error.message || supRes.error);
-    } else {
-      console.warn('⚠️ Supabase: unexpected response from check', supRes);
+  const hasFirebase = process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (hasFirebase) {
+    try {
+      const fbRes = await Promise.race([
+        auth.listUsers(1),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Firebase check timed out')), STARTUP_CHECK_TIMEOUT_MS))
+      ]);
+      if (fbRes) console.log('✅ Firebase: connected (auth reachable)');
+    } catch (err) {
+      console.warn('⚠️ Firebase: connection failed (auth may still work) —', err?.message || err);
     }
-  } catch (err) {
-    console.error('❌ Supabase: connection failed —', err && err.message ? err.message : err);
+  }
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const keyLooksAnon = supabaseKey && !supabaseKey.startsWith('eyJ') && (supabaseKey.includes('publishable') || supabaseKey.includes('anon'));
+
+  if (supabaseUrl && supabaseKey) {
+    if (!supabaseWarned) {
+      if (keyLooksAnon) {
+        supabaseWarned = true;
+        console.warn('⚠️ Supabase: Use the secret "service_role" key (Dashboard → Settings → API) for Storage and DB.');
+      } else {
+        const url = supabaseUrl;
+        if (url && (url.includes('/rest/v1') || !url.startsWith('https://') || url.endsWith('/'))) {
+          supabaseWarned = true;
+          console.warn('⚠️ Supabase: SUPABASE_URL should be https://YOUR_REF.supabase.co (no path, no trailing slash).');
+        }
+      }
+    }
+    if (!keyLooksAnon) {
+      try {
+        const supRes = await Promise.race([
+          supabase.from('lives').select('id').limit(1),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('Supabase check timed out')), STARTUP_CHECK_TIMEOUT_MS))
+        ]);
+        if (supRes && !supRes.error) console.log('✅ Supabase: connected');
+        else if (supRes?.error) {
+          const msg = supRes.error?.message || String(supRes.error);
+          if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
+            console.warn('⚠️ Supabase:', msg);
+          }
+        }
+      } catch (err) {
+        const msg = err?.message || String(err);
+        if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
+          console.warn('⚠️ Supabase:', msg);
+        }
+      }
+    }
   }
 }
 
@@ -127,13 +163,24 @@ try {
     }
   });
 
-  socket.on('gift-live', async ({ liveId, senderId, giftType, amount }) => {
+  socket.on('gift-live', async ({ liveId, senderId, giftType, quantity }) => {
     try {
+      const giftDef = giftCtrl.getGift(giftType);
+      if (!giftDef) {
+        socket.emit('error', { message: 'Unknown gift type' });
+        return;
+      }
+      const qty = Math.max(1, Number(quantity) || 1);
+      const amount = +(giftDef.price * qty).toFixed(2);
       const gift = await liveCtrl.sendGift(liveId, senderId, giftType, amount);
       const live = await liveCtrl.getLive(liveId);
-      io.to(liveId).emit('new-gift', { gift, totalGiftsAmount: live?.total_gifts_amount || 0 });
+      io.to(liveId).emit('new-gift', {
+        gift: { ...giftDef, quantity: qty, amount, record: gift },
+        totalGiftsAmount: live?.total_gifts_amount || 0
+      });
     } catch (err) {
       console.error('gift-live error', err && err.message ? err.message : err);
+      socket.emit('error', { message: String(err?.message || err) });
     }
   });
 
@@ -158,6 +205,15 @@ try {
     }
   });
 
+  socket.on('resume-live', async ({ liveId }) => {
+    try {
+      await liveCtrl.resumeLive(liveId);
+      io.to(liveId).emit('live-resumed', { liveId });
+    } catch (err) {
+      console.error('resume-live error', err && err.message ? err.message : err);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
   });
@@ -175,4 +231,11 @@ try {
 server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   await checkConnections();
+  ensureBuckets().then(() => {}).catch(() => {});
+  syncCacheToSupabase().catch(() => {});
+  syncRtdbToSupabase().catch(() => {});
+  setInterval(() => {
+    syncCacheToSupabase().catch(() => {});
+    syncRtdbToSupabase().catch(() => {});
+  }, 60 * 1000);
 });

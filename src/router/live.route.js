@@ -3,15 +3,35 @@ import * as liveCtrl from '../controller/live.controller.js';
 
 const router = express.Router();
 
-// POST /api/live/create { hostId }
+// POST /api/live/create { hostId, hostDisplayName? }
 router.post('/create', async (req, res) => {
-  const { hostId } = req.body || {};
+  const { hostId, hostDisplayName } = req.body || {};
   if (!hostId) return res.status(400).json({ ok: false, error: 'missing hostId' });
   try {
-    const live = await liveCtrl.createLive(hostId);
+    const live = await liveCtrl.createLive(hostId, hostDisplayName);
     res.json({ ok: true, data: live });
   } catch (err) {
-    console.error('live.create error', err && err.message ? err.message : err);
+    const msg = err?.message || err?.error_description || String(err);
+    console.error('live.create error', msg);
+    if (msg.includes('not configured') || msg.includes('Supabase')) {
+      return res.status(503).json({ ok: false, error: 'Live streaming is not available (database not configured)' });
+    }
+    if (msg.includes('already have an active live')) {
+      return res.status(409).json({ ok: false, error: msg });
+    }
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// GET /api/live/my-active?hostId=... (must be before /:id)
+router.get('/my-active', async (req, res) => {
+  const hostId = req.query.hostId;
+  if (!hostId) return res.status(400).json({ ok: false, error: 'missing hostId' });
+  try {
+    const live = await liveCtrl.getMyActiveLive(hostId);
+    res.json({ ok: true, data: live });
+  } catch (err) {
+    console.error('live.my-active error', err && err.message ? err.message : err);
     res.status(500).json({ ok: false, error: err && err.message ? err.message : String(err) });
   }
 });
@@ -36,6 +56,18 @@ router.post('/:id/pause', async (req, res) => {
     res.json({ ok: true, data: d });
   } catch (err) {
     console.error('live.pause error', err && err.message ? err.message : err);
+    res.status(500).json({ ok: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// GET /api/live?status=live (list active lives)
+router.get('/', async (req, res) => {
+  const status = req.query.status || 'live';
+  try {
+    const list = await liveCtrl.listLives(status);
+    res.json({ ok: true, data: list });
+  } catch (err) {
+    console.error('live.list error', err && err.message ? err.message : err);
     res.status(500).json({ ok: false, error: err && err.message ? err.message : String(err) });
   }
 });

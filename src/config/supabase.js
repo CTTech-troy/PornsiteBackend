@@ -5,6 +5,8 @@ import fs from 'fs';
 dotenv.config();
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
+/** S3-compatible endpoint (e.g. for AWS SDK): SUPABASE_STORAGE_S3_URL */
+const SUPABASE_STORAGE_S3_URL = process.env.SUPABASE_STORAGE_S3_URL || (SUPABASE_URL ? `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/s3` : '');
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // service-role key for server
 const IMAGE_BUCKET = process.env.SUPABASE_IMAGE_BUCKET || 'images';
 const VIDEO_BUCKET = process.env.SUPABASE_VIDEO_BUCKET || 'videos';
@@ -69,4 +71,28 @@ function getPublicUrl(bucket, path) {
   }
 }
 
-export { supabase, isConfigured, uploadFileToBucket, getPublicUrl, IMAGE_BUCKET, VIDEO_BUCKET };
+/**
+ * Ensure storage buckets exist (public for reading). Call once on app start if desired.
+ * Silently skips on RLS, network, or missing-permission errors (create buckets in Dashboard if needed).
+ */
+async function ensureBuckets() {
+  if (!isConfigured()) return;
+  for (const bucket of [VIDEO_BUCKET, IMAGE_BUCKET]) {
+    try {
+      const { error } = await supabase.storage.createBucket(bucket, { public: true });
+      if (error && error.message !== 'The resource already exists') {
+        const msg = error.message || '';
+        if (!/row-level security|RLS|policy|fetch failed/i.test(msg)) {
+          console.warn(`Supabase bucket "${bucket}" create:`, msg);
+        }
+      }
+    } catch (err) {
+      const msg = err?.message || String(err);
+      if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
+        console.warn(`Supabase bucket "${bucket}" create:`, msg);
+      }
+    }
+  }
+}
+
+export { supabase, isConfigured, uploadFileToBucket, getPublicUrl, ensureBuckets, IMAGE_BUCKET, VIDEO_BUCKET, SUPABASE_STORAGE_S3_URL };

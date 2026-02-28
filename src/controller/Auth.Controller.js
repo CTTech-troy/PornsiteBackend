@@ -1,6 +1,7 @@
 import { auth, db, rtdb } from '../config/firebase.js';
 import { supabase } from '../config/supabase.js';
-import { insertUser, insertCreatorApplication, updateUserCreatorStatus, insertMedia } from '../config/dbFallback.js';
+import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
+import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
 import { upsertCreator } from './creator.controller.js';
 import fetch from 'node-fetch';
@@ -244,50 +245,62 @@ export async function applyCreator(req, res) {
     // Attach attachments list to application data
     if (attachments.length) applicationData.attachments = attachments;
 
-    // store application in Supabase table 'creator_applications'
+    // Encrypt sensitive fields before storing (do not log or expose PII)
+    const dataToStore = encryptApplicationData({ ...applicationData });
+
+    // Store application with status 'pending' until admin approves
     const payload = {
       id: uuidv4(),
       user_id: uid,
-      data: applicationData || {},
+      data: dataToStore,
       status: 'pending',
       created_at: new Date().toISOString(),
     };
     try {
-      const appRes = await insertCreatorApplication(payload);
-      console.log('insertCreatorApplication result:', appRes && appRes.source ? appRes.source : appRes);
+      await insertCreatorApplication(payload);
     } catch (err) {
-      console.error('Failed to persist creator application:', err && err.message ? err.message : err);
+      console.error('Failed to persist creator application');
+      return res.status(500).json({ success: false, message: 'Failed to save application' });
     }
 
-    // mark Firestore user as pending
-    await db.collection('users').doc(uid).set({ creatorStatus: 'pending', creatorApplication: payload }, { merge: true });
+    // Save creator details on the user record and set verified = pending (Supabase + RTDB)
+    try {
+      await updateUserWithCreatorApplication(uid, dataToStore);
+    } catch (err) {
+      console.warn('Update user with creator application:', err?.message || err);
+    }
 
-    // Also ensure RTDB has a creators entry linked to the user with verified:false
+    // Firestore: save user details and verified = pending
+    await db.collection('users').doc(uid).set({
+      creatorStatus: 'pending',
+      creatorApplicationId: payload.id,
+      creator_application: dataToStore,
+      verified: 'pending',
+    }, { merge: true });
+
+    // RTDB: store reference only; sensitive data is in encrypted payload in DB
     try {
       await rtdb.ref(`creators/${uid}`).set({
         user_id: uid,
-        profile: applicationData || {},
         verified: false,
         application_id: payload.id,
+        status: 'pending',
         created_at: new Date().toISOString(),
       });
-      // also write a quick pointer under users/{uid}/creatorApplication for RTDB consumers
-      await rtdb.ref(`users/${uid}/creatorApplication`).set(payload);
       await rtdb.ref(`users/${uid}/creatorStatus`).set('pending');
     } catch (rtdbErr) {
-      console.warn('Failed to write creator record to RTDB:', rtdbErr && rtdbErr.message ? rtdbErr.message : rtdbErr);
+      console.warn('RTDB creator record:', rtdbErr?.message || rtdbErr);
     }
 
-    // Try to upsert a creators row in Supabase so Supabase and RTDB/Firestore are aligned
+    // Supabase creators row (no PII in profile)
     try {
-      const creatorProfile = { verified: false, profile: applicationData || {}, applied_at: new Date().toISOString() };
-      const up = await upsertCreator(uid, creatorProfile);
-      console.log('upsertCreator result:', up && up.id ? up.id : up);
+      const creatorProfile = { verified: false, profile: {}, applied_at: new Date().toISOString() };
+      await upsertCreator(uid, creatorProfile);
     } catch (upErr) {
-      console.warn('Failed to upsert creator in Supabase:', upErr && upErr.message ? upErr.message : upErr);
+      console.warn('Supabase upsert creator:', upErr?.message || upErr);
     }
 
-    // Notify admin webhook if configured
+    // Admin webhook: do not send user data (PII)
     try {
       const webhook = process.env.ADMIN_WEBHOOK_URL;
       if (webhook) {
@@ -295,27 +308,21 @@ export async function applyCreator(req, res) {
           event: 'creator_application_submitted',
           application_id: payload.id,
           user_id: uid,
-          profile: applicationData || {},
           submitted_at: payload.created_at,
         };
-        // fire-and-forget, but log response for diagnostics
-        const whRes = await fetch(webhook, {
+        await fetch(webhook, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payloadForAdmin),
           timeout: 5000
         });
-        console.log('Admin webhook delivered, status=', whRes.status);
       }
     } catch (whErr) {
-      console.warn('Admin webhook failed:', whErr && whErr.message ? whErr.message : whErr);
+      console.warn('Admin webhook failed');
     }
 
     return res.status(200).json({ success: true, message: 'Application submitted' });
   } catch (err) {
-    // If multer/body-parser threw a payload-too-large error it usually won't reach here,
-    // but be defensive: map common indicators to 413.
-    console.error('applyCreator error', err);
     if (err && (err.code === 'LIMIT_FILE_SIZE' || err.type === 'entity.too.large' || err.status === 413)) {
       return res.status(413).json({ success: false, message: 'Payload too large' });
     }
@@ -331,20 +338,17 @@ export async function approveCreator(req, res) {
     if (adminSecret !== process.env.ADMIN_SECRET) return res.status(401).json({ success: false, message: 'Not authorized' });
     if (!user_id) return res.status(400).json({ success: false, message: 'user_id required' });
 
-    // update Supabase users table
     try {
-      const upd = await updateUserCreatorStatus(user_id, approve);
-      console.log('updateUserCreatorStatus result:', upd && upd.source ? upd.source : upd);
+      await updateUserCreatorStatus(user_id, approve);
     } catch (err) {
-      console.error('Failed to update user creator status in fallback DB:', err && err.message ? err.message : err);
+      console.warn('Fallback DB update creator status:', err?.message || err);
     }
 
-    // update Firestore user record
+    // Firestore: admin confirmed — set approved so user gets creator features
     await db.collection('users').doc(user_id).set({ creatorStatus: approve ? 'approved' : 'rejected' }, { merge: true });
 
     return res.status(200).json({ success: true, message: 'Creator status updated' });
   } catch (err) {
-    console.error('approveCreator error', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 }
@@ -442,7 +446,24 @@ export async function login(req, res) {
     const userDoc = await db.collection('users').doc(uid).get();
     const userData = userDoc.exists ? userDoc.data() : {};
 
-    console.log(`Login successful for uid=${uid} email=${cleanEmail}`);
+    // Creator privileges only if approved by admin (DB is source of truth)
+    try {
+      const { creator, creatorStatus: dbCreatorStatus } = await getUserCreatorStatus(uid);
+      userData.creator = !!creator;
+      userData.creatorStatus = dbCreatorStatus || 'none';
+    } catch (e) {
+      userData.creator = false;
+      userData.creatorStatus = 'none';
+    }
+
+    // Return a custom token so the frontend can sign in with Firebase client and get idToken for apply-creator etc.
+    let token;
+    try {
+      token = await auth.createCustomToken(uid);
+    } catch (tokenErr) {
+      console.warn('Login: could not create custom token', tokenErr?.message || tokenErr);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -450,6 +471,7 @@ export async function login(req, res) {
       email: cleanEmail,
       displayName: userRecord.displayName || userData.name || cleanEmail.split('@')[0],
       emailVerified: true,
+      ...(token && { token }),
       userData: {
         ...userData,
         email: cleanEmail,
@@ -517,9 +539,16 @@ export async function google(req, res) {
     }, { merge: true });
 
     console.log(`Upserted Firestore user for Google sign-in: uid=${uid}`);
-    // Fetch updated user data
     const userDoc = await db.collection('users').doc(uid).get();
-    const userData = userDoc.data();
+    const userData = userDoc.exists ? userDoc.data() : {};
+    try {
+      const { creator, creatorStatus: dbCreatorStatus } = await getUserCreatorStatus(uid);
+      userData.creator = !!creator;
+      userData.creatorStatus = dbCreatorStatus || 'none';
+    } catch (e) {
+      userData.creator = false;
+      userData.creatorStatus = 'none';
+    }
 
     return res.status(200).json({
       success: true,
