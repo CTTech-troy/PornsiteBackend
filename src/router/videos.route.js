@@ -9,6 +9,7 @@ import * as trending from '../controller/trending.controller.js';
 import * as homeFeed from '../controller/homeFeed.controller.js';
 import * as streamCtrl from '../controller/stream.controller.js';
 import { requireAuth } from '../middleware/authFirebase.js';
+import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB
