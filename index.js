@@ -7,6 +7,7 @@ import liveRouter from './src/router/live.route.js';
 import giftRouter from './src/router/gift.route.js';
 import usersRouter from './src/router/users.route.js';
 import creatorsRouter from './src/router/creators.route.js';
+import pornhubRouter from './src/router/pornhubRoutes.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
 import { auth } from './src/config/firebase.js';
@@ -32,6 +33,8 @@ app.get('/', (req, res) => {
 app.use('/api/auth', authRouter);
 // Videos proxy routes
 app.use('/api/videos', videosRouter);
+// Pornhub scraper routes
+app.use('/api/pornhub', pornhubRouter);
 // Live routes
 app.use('/api/live', liveRouter);
 // Gift catalog

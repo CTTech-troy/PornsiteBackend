@@ -5,6 +5,9 @@ import { getVideosPaginated, getVideoById as getFeedVideoById } from '../control
 import * as videoPublish from '../controller/videoPublish.controller.js';
 import * as videoInteractions from '../controller/videoInteractions.controller.js';
 import * as search from '../controller/search.controller.js';
+import * as trending from '../controller/trending.controller.js';
+import * as homeFeed from '../controller/homeFeed.controller.js';
+import * as streamCtrl from '../controller/stream.controller.js';
 import { requireAuth } from '../middleware/authFirebase.js';
 
 const router = express.Router();
@@ -27,6 +30,9 @@ router.get('/', async (req, res) => {
 // POST /api/videos/upload — multipart: video file; body: title, description, consentGiven
 router.post('/upload', requireAuth, upload.single('video'), videoPublish.uploadAndPublish);
 
+// ——— TikTok-style: Supabase Storage + Postgres (feed, upload, likes, views, comments) ———
+router.use('/tiktok', tiktokVideoRouter);
+
 // GET /api/videos/public — public feed (only isLive === true)
 router.get('/public', videoPublish.getPublicVideos);
 // GET /api/videos/public/:videoId
@@ -46,6 +52,12 @@ router.post('/public/:videoId/comments', requireAuth, videoPublish.addComment);
 router.get('/search/pornstar', search.searchPornstars);
 // GET /api/videos/search?q=...&page=1&filter=relevance — RapidAPI video search
 router.get('/search', search.searchVideos);
+
+// GET /api/videos/trending?page=1 — RapidAPI pornhub-api-xnxx trending
+router.get('/trending', trending.getTrending);
+
+// GET /api/videos/home-feed?page=1&q=hot&pages=3 — xnxx search, multiple pages at once for home
+router.get('/home-feed', homeFeed.getHomeFeed);
 
 // GET /api/videos/pornstars?limit=100
 router.get('/pornstars', async (req, res) => {
@@ -80,6 +92,11 @@ router.get('/:id', async (req, res) => {
     console.error('get video by id error', err?.message || err);
     return res.status(500).json({ error: err?.message || 'Failed' });
   }
+});
+
+// GET /api/videos/stream/:id — return playable stream URL when available
+router.get('/stream/:id', async (req, res) => {
+  return streamCtrl.getStreamUrl(req, res);
 });
 
 export default router;

@@ -30,7 +30,7 @@ if (typeof globalThis.fetch === 'undefined') {
     console.warn('Either upgrade Node to v18+ or `npm install node-fetch@2` in backend to provide a fetch polyfill.');
   }
 }
-
+ 
 const supabase = createClient(SUPABASE_URL || '', SUPABASE_KEY || '', {
   auth: { autoRefreshToken: false },
   global: {

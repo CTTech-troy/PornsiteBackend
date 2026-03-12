@@ -1,7 +1,9 @@
 /**
  * Creators: list (from pornstars API, sorted by rankingScore) and detail (from scraper API).
+ * Fallback: pornhub-api-xnxx search when scraper returns 429 or fails.
  */
 import { fetchPornstars } from './star.controller.js';
+import { xnxxSearch } from './xnxxSearchFallback.js';
 
 const SCRAPER_CACHE = new Map();
 const SCRAPER_CACHE_TTL = 10 * 60 * 1000; // 10 min
@@ -54,8 +56,28 @@ export async function getCreatorsList(req, res) {
   }
 }
 
+/** Slug to search query: "abella-danger" -> "abella danger" */
+function slugToQuery(slug) {
+  if (!slug || typeof slug !== 'string') return '';
+  return slug.replace(/-/g, ' ').trim() || slug;
+}
+
+function mapXnxxVideoToCreatorVideo(v, i) {
+  const thumb = v.thumb ?? v.thumbnail ?? v.thumbnailUrl ?? v.poster ?? v.thumb_url ?? (v.thumbs && v.thumbs[0]?.src) ?? '';
+  const thumbStr = typeof thumb === 'string' ? thumb : (thumb?.src ?? thumb?.url ?? '');
+  return {
+    id: v.video_id ?? v.id ?? v.key ?? v.url ?? `v-${i}`,
+    title: v.title || v.title_clean || v.name || 'Video',
+    thumbnail: thumbStr,
+    duration: v.duration ?? v.length ?? 0,
+    views: v.views ?? v.views_count ?? 0,
+    url: v.url ?? v.video_url ?? v.link ?? '',
+  };
+}
+
 /**
  * GET creator by slug: fetch profile + videos from scraper API.
+ * On 429 or failure: use pornhub-api-xnxx search with slug as query and return synthetic profile.
  */
 export async function getCreatorBySlug(req, res) {
   const slug = (req.params.slug || '').trim();
@@ -93,7 +115,44 @@ export async function getCreatorBySlug(req, res) {
     clearTimeout(timeoutId);
 
     if (!resFetch.ok) {
-      if (resFetch.status === 429) return res.status(429).json({ success: false, error: 'Rate limit exceeded' });
+      if (resFetch.status === 429) {
+        if (cached && cached.data) {
+          return res.status(200).json({ success: true, data: cached.data, _cached: true, _rateLimited: true });
+        }
+        const fallbackVideos = await xnxxSearch(slugToQuery(slug), 1);
+        if (fallbackVideos.length > 0) {
+          const displayName = slugToQuery(slug).replace(/\b\w/g, (c) => c.toUpperCase());
+          const data = {
+            id: slug,
+            slug,
+            name: displayName,
+            avatar: '',
+            bio: '',
+            videosCount: fallbackVideos.length,
+            videos: fallbackVideos.map(mapXnxxVideoToCreatorVideo),
+            _fallback: 'xnxx-search',
+          };
+          SCRAPER_CACHE.set(cacheKey, { ts: Date.now(), data });
+          return res.status(200).json({ success: true, data });
+        }
+        return res.status(429).json({ success: false, error: 'Rate limit exceeded' });
+      }
+      const fallbackVideos = await xnxxSearch(slugToQuery(slug), 1);
+      if (fallbackVideos.length > 0) {
+        const displayName = slugToQuery(slug).replace(/\b\w/g, (c) => c.toUpperCase());
+        const data = {
+          id: slug,
+          slug,
+          name: displayName,
+          avatar: '',
+          bio: '',
+          videosCount: fallbackVideos.length,
+          videos: fallbackVideos.map(mapXnxxVideoToCreatorVideo),
+          _fallback: 'xnxx-search',
+        };
+        SCRAPER_CACHE.set(cacheKey, { ts: Date.now(), data });
+        return res.status(200).json({ success: true, data });
+      }
       return res.status(resFetch.status).json({ success: false, error: 'Scraper request failed' });
     }
 
@@ -124,7 +183,37 @@ export async function getCreatorBySlug(req, res) {
   } catch (err) {
     clearTimeout(timeoutId);
     if (err?.name === 'AbortError') {
+      const fallbackVideos = await xnxxSearch(slugToQuery(slug), 1);
+      if (fallbackVideos.length > 0) {
+        const displayName = slugToQuery(slug).replace(/\b\w/g, (c) => c.toUpperCase());
+        const data = {
+          id: slug,
+          slug,
+          name: displayName,
+          avatar: '',
+          bio: '',
+          videosCount: fallbackVideos.length,
+          videos: fallbackVideos.map(mapXnxxVideoToCreatorVideo),
+          _fallback: 'xnxx-search',
+        };
+        return res.status(200).json({ success: true, data });
+      }
       return res.status(504).json({ success: false, error: 'Scraper timeout' });
+    }
+    const fallbackVideos = await xnxxSearch(slugToQuery(slug), 1).catch(() => []);
+    if (fallbackVideos.length > 0) {
+      const displayName = slugToQuery(slug).replace(/\b\w/g, (c) => c.toUpperCase());
+      const data = {
+        id: slug,
+        slug,
+        name: displayName,
+        avatar: '',
+        bio: '',
+        videosCount: fallbackVideos.length,
+        videos: fallbackVideos.map(mapXnxxVideoToCreatorVideo),
+        _fallback: 'xnxx-search',
+      };
+      return res.status(200).json({ success: true, data });
     }
     console.error('creators.getCreatorBySlug', err?.message || err);
     return res.status(500).json({ success: false, error: err?.message || 'Failed' });

@@ -1,9 +1,9 @@
 /**
  * Video and pornstar search via RapidAPI Pornhub Scraper.
- * GET /api/videos/search?q=...&page=1&filter=relevance
- * GET /api/videos/search/pornstar?q=...&page=1
+ * Fallback: pornhub-api-xnxx POST /api/search when primary returns 429 or fails.
  */
 import dotenv from 'dotenv';
+import { xnxxSearch } from './xnxxSearchFallback.js';
 
 dotenv.config();
 
@@ -53,6 +53,29 @@ function extractVideoList(body) {
   return Array.isArray(arr) ? arr : [];
 }
 
+function normalizeXnxxItem(item, index) {
+  const id = toStableVideoId(item?.id ?? item?.video_id ?? item?.url ?? item?.viewkey ?? `v-${index}`);
+  const videoUrl = item?.video_url ?? item?.url ?? item?.link ?? item?.videoUrl ?? '';
+  const thumb = item?.thumb ?? item?.thumbnail ?? item?.thumbnailUrl ?? item?.poster ?? item?.thumb_url ?? (item?.thumbs && item.thumbs[0]?.src);
+  const thumbnailUrl = typeof thumb === 'string' ? thumb : (thumb?.src ?? thumb?.url ?? '');
+  const duration = typeof item?.duration === 'number' ? item.duration : parseFloat(item?.duration) || 0;
+  return {
+    id: String(id),
+    videoUrl: String(videoUrl || ''),
+    thumbnailUrl: String(thumbnailUrl || ''),
+    thumbnail: String(thumbnailUrl || ''),
+    duration: Number(duration) || 0,
+    title: item?.title ?? item?.title_clean ?? item?.name ?? '',
+    channel: item?.channel ?? item?.uploader ?? item?.creator ?? item?.pornstar?.[0] ?? '',
+    views: item?.views ?? item?.views_count ?? 0,
+  };
+}
+
+async function tryXnxxSearchFallback(q, page) {
+  const rawList = await xnxxSearch(q, page);
+  return rawList.map((item, i) => normalizeXnxxItem(item, i));
+}
+
 /**
  * Search videos — GET /api/videos/search?q=Eva%20Elfie&filter=relevance&page=1
  */
@@ -89,6 +112,17 @@ export async function searchVideos(req, res) {
     } catch {
       body = text;
     }
+    if (resp.status === 429 || !resp.ok) {
+      const fallbackList = await tryXnxxSearchFallback(q, page);
+      if (fallbackList.length > 0) {
+        const list = fallbackList.filter((item) => item.title && String(item.title).trim() !== '');
+        const total = list.length;
+        const totalPages = Math.max(1, Math.ceil(total / 20));
+        return res.json({ data: list, total, page, totalPages, _fallback: 'xnxx-search' });
+      }
+      if (resp.status === 429) return res.status(429).json({ data: [], total: 0, page, totalPages: 0, error: 'Rate limit exceeded' });
+      return res.status(resp.status).json({ data: [], total: 0, page, totalPages: 0, error: 'Search failed' });
+    }
     const rawList = extractVideoList(body);
     const list = rawList
       .map((item, i) => normalizeVideoItem(item, i, `v-${i}`))
@@ -98,9 +132,12 @@ export async function searchVideos(req, res) {
     return res.json({ data: list, total, page, totalPages });
   } catch (err) {
     clearTimeout(timeoutId);
-    if (typeof process !== 'undefined' && !process.env.__searchVideoWarned) {
-      process.env.__searchVideoWarned = '1';
-      console.warn('Search videos error (will return empty):', err?.message || err);
+    const fallbackList = await tryXnxxSearchFallback(q, page).catch(() => []);
+    if (fallbackList.length > 0) {
+      const list = fallbackList.filter((item) => item.title && String(item.title).trim() !== '');
+      const total = list.length;
+      const totalPages = Math.max(1, Math.ceil(total / 20));
+      return res.json({ data: list, total, page, totalPages, _fallback: 'xnxx-search' });
     }
     return res.status(200).json({ data: [], total: 0, page, totalPages: 0 });
   }

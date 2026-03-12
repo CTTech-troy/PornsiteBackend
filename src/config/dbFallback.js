@@ -6,7 +6,7 @@ function supabaseConfigured() {
 }
 
 /** Quick check: is Supabase reachable right now? */
-async function isSupabaseReachable() {
+async function isSupabaseReachable() { 
   if (!supabaseConfigured()) return false;
   try {
     const { error } = await supabase.from('users').select('id').limit(1);

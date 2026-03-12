@@ -9,7 +9,7 @@ function isSupabaseUnreachable(err) {
 
 async function createLive(hostId, hostDisplayName = null) {
   const existing = await getMyActiveLive(hostId);
-  if (existing) throw new Error('You already have an active live. End it before starting a new one.');
+  if (existing) throw new Error('You must end your current live stream before starting another.');
   if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('lives').insert([{
@@ -20,7 +20,7 @@ async function createLive(hostId, hostDisplayName = null) {
       if (error) throw error;
       return data;
     } catch (err) {
-      if (err?.message?.includes('already have an active live')) throw err;
+      if (err?.message?.includes('must end your current live')) throw err;
       if (isSupabaseUnreachable(err)) {
         await liveCache.syncCacheToSupabase();
         const cached = await liveCache.createInCache(hostId, hostDisplayName);
@@ -119,7 +119,10 @@ async function listLives(status = 'live') {
       if (isSupabaseUnreachable(err)) {
         liveCache.syncCacheToSupabase().catch(() => {});
         const list = await liveCache.listFromCache(status);
-        const rows = list.map(({ _fromCache, ...row }) => row);
+        const rows = list.map((row) => {
+          const { _fromCache, ...rest } = row;
+          return rest;
+        });
         const hostIds = [...new Set(rows.map((r) => r.host_id).filter(Boolean))];
         const profiles = await Promise.all(hostIds.map((id) => getPublicProfile(id).then((p) => ({ id, displayName: p?.displayName })).catch(() => ({ id, displayName: null }))));
         const nameByHost = Object.fromEntries(profiles.map((p) => [p.id, p.displayName]));
@@ -131,7 +134,10 @@ async function listLives(status = 'live') {
     }
   }
   const list = await liveCache.listFromCache(status);
-  const rows = list.map(({ _fromCache, ...row }) => row);
+  const rows = list.map((row) => {
+    const { _fromCache, ...rest } = row;
+    return rest;
+  });
   const hostIds = [...new Set(rows.map((r) => r.host_id).filter(Boolean))];
   const profiles = await Promise.all(hostIds.map((id) => getPublicProfile(id).then((p) => ({ id, displayName: p?.displayName })).catch(() => ({ id, displayName: null }))));
   const nameByHost = Object.fromEntries(profiles.map((p) => [p.id, p.displayName]));
@@ -154,30 +160,89 @@ async function endLive(liveId) {
 
   if (!isConfigured()) throw new Error('Supabase not configured');
   const hostId = live.host_id;
-  const { error: walletErr } = await supabase.from('wallets').upsert({ owner_id: hostId }, { onConflict: 'owner_id' });
-  if (walletErr) throw walletErr;
-  const { data: w2, error: w2err } = await supabase.from('wallets').select('*').eq('owner_id', hostId).maybeSingle();
-  if (w2err) throw w2err;
-  if (w2) {
-    const newBal = Number(w2.balance || 0) + hostShare;
-    const { error: up } = await supabase.from('wallets').update({ balance: newBal, updated_at: now }).eq('owner_id', hostId);
-    if (up) throw up;
-  } else {
-    const { error: ins } = await supabase.from('wallets').insert([{ owner_id: hostId, balance: hostShare }]);
-    if (ins) throw ins;
+  try {
+    // Ensure wallet exists and credit host share (no upsert — wallets may not have UNIQUE on owner_id)
+    const { data: w2, error: w2err } = await supabase.from('wallets').select('*').eq('owner_id', hostId).maybeSingle();
+    if (w2err) throw w2err;
+    if (w2) {
+      const newBal = Number(w2.balance || 0) + hostShare;
+      const { error: up } = await supabase.from('wallets').update({ balance: newBal, updated_at: now }).eq('owner_id', hostId);
+      if (up) throw up;
+    } else {
+      const { error: ins } = await supabase.from('wallets').insert([{ owner_id: hostId, balance: hostShare }]);
+      if (ins) throw ins;
+    }
+    if (companyShare > 0) {
+      await supabase.from('transactions').insert([{
+        owner_id: 'company',
+        type: 'company_commission',
+        amount: companyShare,
+        balance_after: companyShare,
+        meta: { live_id: liveId, host_id: hostId }
+      }]);
+    }
+    const { error: endErr } = await supabase.from('lives').update({ status: 'ended', ended_at: now }).eq('id', liveId);
+    if (endErr) throw endErr;
+    return { total, companyShare, hostShare };
+  } catch (err) {
+    // If Supabase is unreachable, fall back to RTDB cache so the live is marked ended.
+    if (isSupabaseUnreachable(err)) {
+      try {
+        await liveCache.updateInCache(liveId, { status: 'ended', ended_at: now });
+        return { total, companyShare, hostShare, _fallback: 'cache' };
+      } catch (cacheErr) {
+        // If cache update also fails, prefer returning the original error
+        throw err;
+      }
+    }
+    throw err;
   }
-  if (companyShare > 0) {
-    await supabase.from('transactions').insert([{
-      owner_id: 'company',
-      type: 'company_commission',
-      amount: companyShare,
-      balance_after: companyShare,
-      meta: { live_id: liveId, host_id: hostId }
-    }]);
+}
+
+/**
+ * End all active (live + paused) sessions from both Supabase and cache.
+ * Returns array of { id, payout } or { id, error }.
+ */
+async function endAllActiveLives() {
+  const seen = new Set();
+  const ids = [];
+
+  if (isConfigured()) {
+    try {
+      const liveList = await listLives('live');
+      const pausedList = await listLives('paused');
+      [...(Array.isArray(liveList) ? liveList : []), ...(Array.isArray(pausedList) ? pausedList : [])].forEach((item) => {
+        const id = item?.id ?? item?.live_id;
+        if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+      });
+    } catch (e) {
+      console.warn('endAllActiveLives list from Supabase:', e?.message || e);
+    }
   }
-  const { error: endErr } = await supabase.from('lives').update({ status: 'ended', ended_at: now }).eq('id', liveId);
-  if (endErr) throw endErr;
-  return { total, companyShare, hostShare };
+
+  if (liveCache.isRtdbAvailable && liveCache.isRtdbAvailable()) {
+    try {
+      const cacheLive = await liveCache.listFromCache('live');
+      const cachePaused = await liveCache.listFromCache('paused');
+      [...(Array.isArray(cacheLive) ? cacheLive : []), ...(Array.isArray(cachePaused) ? cachePaused : [])].forEach((row) => {
+        const id = row?.id ?? row?.live_id;
+        if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+      });
+    } catch (e) {
+      console.warn('endAllActiveLives list from cache:', e?.message || e);
+    }
+  }
+
+  const results = [];
+  for (const id of ids) {
+    try {
+      const payout = await endLive(id);
+      results.push({ id, payout });
+    } catch (err) {
+      results.push({ id, error: err?.message ?? String(err) });
+    }
+  }
+  return results;
 }
 
 async function pauseLive(liveId) {
@@ -290,6 +355,7 @@ export {
   getMyActiveLive,
   listLives,
   endLive,
+  endAllActiveLives,
   pauseLive,
   resumeLive,
   joinLive,

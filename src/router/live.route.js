@@ -3,6 +3,21 @@ import * as liveCtrl from '../controller/live.controller.js';
 
 const router = express.Router();
 
+// Admin: cancel all active lives (protected by ADMIN_SECRET env)
+router.post('/cancel-all', async (req, res) => {
+  const secret = req.headers['x-admin-secret'] || req.query.adminSecret || req.body?.adminSecret;
+  if (!process.env.ADMIN_SECRET || String(secret) !== String(process.env.ADMIN_SECRET)) {
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  }
+  try {
+    const results = await liveCtrl.endAllActiveLives();
+    return res.json({ ok: true, cancelled: results.length, results });
+  } catch (err) {
+    console.error('cancel-all error', err && err.message ? err.message : err);
+    return res.status(500).json({ ok: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
 // POST /api/live/create { hostId, hostDisplayName? }
 router.post('/create', async (req, res) => {
   const { hostId, hostDisplayName } = req.body || {};
@@ -16,7 +31,7 @@ router.post('/create', async (req, res) => {
     if (msg.includes('not configured') || msg.includes('Supabase')) {
       return res.status(503).json({ ok: false, error: 'Live streaming is not available (database not configured)' });
     }
-    if (msg.includes('already have an active live')) {
+    if (msg.includes('must end your current live')) {
       return res.status(409).json({ ok: false, error: msg });
     }
     res.status(500).json({ ok: false, error: msg });
