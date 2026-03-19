@@ -7,6 +7,7 @@ import * as videoInteractions from '../controller/videoInteractions.controller.j
 import * as search from '../controller/search.controller.js';
 import * as trending from '../controller/trending.controller.js';
 import * as homeFeed from '../controller/homeFeed.controller.js';
+import * as todaysSelection from '../controller/todaysSelection.controller.js';
 import * as streamCtrl from '../controller/stream.controller.js';
 import { requireAuth } from '../middleware/authFirebase.js';
 import tiktokVideoRouter from './tiktokVideo.route.js';
@@ -76,6 +77,9 @@ router.get('/trending', trending.getTrending);
 
 // GET /api/videos/home-feed?page=1&q=hot&pages=3 — xnxx search, multiple pages at once for home
 router.get('/home-feed', homeFeed.getHomeFeed);
+
+// GET /api/videos/todays-selection — RapidAPI xnxx-api today's selection (server-side key)
+router.get('/todays-selection', todaysSelection.getTodaysSelection);
 
 // GET /api/videos/pornstars?limit=100
 router.get('/pornstars', async (req, res) => {
