@@ -5,6 +5,7 @@
  */
 import dotenv from 'dotenv';
 import { rtdb } from '../config/firebase.js';
+import { lookupHomeFeedRow } from '../config/homeFeedCache.js';
 
 dotenv.config();
 
@@ -82,18 +83,37 @@ function toStableVideoId(raw) {
   return s || raw;
 }
 
+/** Parse duration from API: number (seconds) or string "M:SS" / "H:MM:SS" → seconds. */
+function parseDurationToSeconds(val) {
+  if (val == null || val === '') return 0;
+  const n = Number(val);
+  if (!Number.isNaN(n) && n >= 0) return Math.floor(n);
+  const s = String(val).trim();
+  const parts = s.split(':').map(Number);
+  if (parts.length === 2 && parts.every((p) => !Number.isNaN(p))) {
+    const [m, sec] = parts;
+    return Math.max(0, Math.floor(m) * 60 + Math.floor(sec));
+  }
+  if (parts.length === 3 && parts.every((p) => !Number.isNaN(p))) {
+    const [h, m, sec] = parts;
+    return Math.max(0, Math.floor(h) * 3600 + Math.floor(m) * 60 + Math.floor(sec));
+  }
+  return 0;
+}
+
 function normalizeVideo(item, index, fallbackId) {
   let id = item?.id ?? item?.video_id ?? item?.url ?? fallbackId ?? `v-${index}`;
   id = toStableVideoId(id);
   const videoUrl = item?.videoUrl ?? item?.video_url ?? item?.url ?? item?.download_url ?? item?.mp4?.[0] ?? '';
   const thumbnailUrl = item?.thumbnailUrl ?? item?.thumbnail ?? item?.thumb ?? item?.thumbnail_url ?? '';
-  const duration = typeof item?.duration === 'number' ? item.duration : parseFloat(item?.duration) || 0;
+  const durationSeconds = parseDurationToSeconds(item?.duration);
+  const duration = durationSeconds > 0 ? durationSeconds : (typeof item?.duration === 'number' ? item.duration : parseFloat(item?.duration) || 0);
   const createdAt = item?.createdAt ?? item?.created_at ?? item?.date ?? new Date().toISOString();
   return {
     id: String(id),
     videoUrl: String(videoUrl || ''),
     thumbnailUrl: String(thumbnailUrl || ''),
-    duration: Number(duration) || 0,
+    duration: Math.max(0, Number(duration) || durationSeconds),
     createdAt,
     title: item?.title ?? item?.title_clean ?? '',
     channel: item?.channel ?? item?.uploader ?? item?.channel_name ?? '',
@@ -258,6 +278,23 @@ export async function getVideoById(id) {
   if (!video) {
     video = items.find((item) => toStableVideoId(item.id) === videoId);
   }
+
+  if (!video) {
+    const hf = lookupHomeFeedRow(videoId);
+    if (hf) {
+      video = {
+        id: String(hf.id),
+        videoUrl: String(hf.videoSrc || hf.url || ''),
+        thumbnailUrl: String(hf.thumbnail || ''),
+        duration: Number(hf.durationSeconds) || 0,
+        createdAt: new Date().toISOString(),
+        title: hf.title || '',
+        channel: hf.channel || '',
+        views: hf.views ?? 0,
+      };
+    }
+  }
+
   if (!video) return null;
 
   try {

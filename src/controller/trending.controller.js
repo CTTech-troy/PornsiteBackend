@@ -3,6 +3,8 @@
  * GET /api/videos/trending?page=1
  * Fallback: pornhub2 v2/search?search=trending if xnxx returns empty.
  */
+import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
+
 const TRENDING_HOST = process.env.RAPIDAPI_TRENDING_HOST || 'pornhub-api-xnxx.p.rapidapi.com';
 const TRENDING_KEY = process.env.RAPIDAPI_TRENDING_KEY || process.env.RAPIDAPI_KEY || '';
 const FALLBACK_HOST = process.env.RAPIDAPI_VIDEO_HOST || process.env.RAPIDAPI_HOST || 'pornhub2.p.rapidapi.com';
@@ -49,6 +51,15 @@ function extractVideosFromResponse(data) {
   return Array.isArray(list) ? list : [];
 }
 
+/** API may return duration as duration, length, runtime, or duration_formatted. */
+function getDurationSeconds(v) {
+  if (!v || typeof v !== 'object') return 0;
+  const raw = v.duration ?? v.length ?? v.runtime ?? v.duration_formatted ?? v.duration_sec;
+  const sec = parseDurationToSeconds(raw);
+  if (sec > 0) return sec;
+  return parseDurationToSeconds(v.duration) || Number(v.duration) || 0;
+}
+
 function mapToCard(v, index) {
   if (!v || typeof v !== 'object') return null;
   const title = v.title || v.title_clean || v.name || v.video_title || 'Video';
@@ -71,8 +82,8 @@ function mapToCard(v, index) {
     channel: v.channel ?? v.uploader ?? v.creator ?? v.uploader_name ?? (v.pornstars && (Array.isArray(v.pornstars) ? v.pornstars[0] : v.pornstars)) ?? 'Creator',
     views: v.views ?? v.views_count ?? v.view_count ?? 0,
     thumbnail: thumbStr,
-    duration: formatDuration(v.duration),
-    durationSeconds: parseDurationToSeconds(v.duration) || Number(v.duration) || 0,
+    duration: formatDuration(getDurationSeconds(v)),
+    durationSeconds: getDurationSeconds(v),
     avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(String(v.video_id || v.id || title)).slice(0, 50)}`,
     videoSrc: v.url ?? v.video_url ?? v.link ?? v.video_link ?? '',
     likes: v.rating ?? '0',
@@ -89,7 +100,7 @@ function isConfigured() {
   );
 }
 
-/** Fetch from pornhub2 v2/search?search=trending as fallback */
+/** Fetch from pornhub2 v2/search?search=trending as fallback (never throws). */
 async function fetchPornhub2Trending(page) {
   if (!FALLBACK_KEY || FALLBACK_KEY.length < 10) return [];
   const url = `https://${FALLBACK_HOST}/v2/search?${new URLSearchParams({
@@ -99,19 +110,25 @@ async function fetchPornhub2Trending(page) {
     ordering: 'newest',
     thumbsize: 'small',
   })}`;
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { 'x-rapidapi-key': FALLBACK_KEY, 'x-rapidapi-host': FALLBACK_HOST },
-  });
-  if (!res.ok) return [];
-  const raw = await res.text();
-  let data;
   try {
-    data = JSON.parse(raw);
-  } catch {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'x-rapidapi-key': FALLBACK_KEY, 'x-rapidapi-host': FALLBACK_HOST },
+    });
+    if (!res.ok) return [];
+    const raw = await res.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    return extractVideosFromResponse(data);
+  } catch (err) {
+    const msg = err?.cause?.message || err?.message || String(err);
+    console.warn('[Video API] Trending fallback (pornhub2) unavailable:', msg);
     return [];
   }
-  return extractVideosFromResponse(data);
 }
 
 /**
@@ -154,19 +171,33 @@ export async function getTrending(req, res) {
       list = await fetchPornhub2Trending(page);
     }
     const items = list.map((v, i) => mapToCard(v, i)).filter(Boolean);
+    ingestHomeFeedVideos(items);
+    items.forEach((card, i) => {
+      if (!card.videoSrc || typeof card.videoSrc !== 'string' || !card.videoSrc.startsWith('http')) {
+        console.warn('[Video API] Trending video missing or invalid video_url:', { id: card.id, index: i });
+      }
+    });
     const hasMore = items.length >= 20;
+    console.log('Video API Response: trending', { page, count: items.length, hasMore });
     return res.json({ success: true, data: items, hasMore });
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
     if (err?.name === 'AbortError') {
       const fallbackList = await fetchPornhub2Trending(page);
       const items = fallbackList.map((v, i) => mapToCard(v, i)).filter(Boolean);
+      ingestHomeFeedVideos(items);
       return res.json({ success: true, data: items, hasMore: items.length >= 20, _fallback: 'pornhub2' });
     }
-    const fallbackList = await fetchPornhub2Trending(page).catch(() => []);
+    const fallbackList = await fetchPornhub2Trending(page);
     const items = fallbackList.map((v, i) => mapToCard(v, i)).filter(Boolean);
+    ingestHomeFeedVideos(items);
     if (items.length > 0) return res.json({ success: true, data: items, hasMore: items.length >= 20, _fallback: 'pornhub2' });
-    console.error('trending.controller getTrending:', err?.message || err);
-    return res.status(500).json({ success: false, data: [], hasMore: false, error: err?.message || 'Failed' });
+    console.warn('trending.controller getTrending:', err?.message || err);
+    return res.json({
+      success: true,
+      data: [],
+      hasMore: false,
+      _warning: 'Trending upstream unavailable',
+    });
   }
 }

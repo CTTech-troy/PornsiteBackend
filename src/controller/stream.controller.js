@@ -1,4 +1,5 @@
 import { rtdb } from '../config/firebase.js';
+import { lookupHomeFeedRow } from '../config/homeFeedCache.js';
 import { getVideoById as getFeedVideoById } from './videoFeed.controller.js';
 
 /**
@@ -16,7 +17,7 @@ export async function getStreamUrl(req, res) {
       const snap = await rtdb.ref(`videos/${id}`).once('value');
       const val = snap.val();
       if (val) {
-        const candidate = val.streamUrl || val.videoUrl || val.video_url || val.stream_url || null;
+        const candidate = val.streamUrl || val.videoUrl || val.video_url || val.stream_url || val.storage_url || null;
         if (candidate) return res.json({ url: String(candidate) });
       }
     } catch (err) {
@@ -33,6 +34,17 @@ export async function getStreamUrl(req, res) {
       }
     } catch (err) {
       console.warn('stream.controller feed lookup failed:', err?.message || err);
+    }
+
+    // 3) Recent home-feed rows (xnxx search cards — not in videoFeed cache)
+    try {
+      const hf = lookupHomeFeedRow(id);
+      const play = hf && (hf.videoSrc || hf.url);
+      if (play && String(play).startsWith('http')) {
+        return res.json({ url: String(play) });
+      }
+    } catch (err) {
+      console.warn('stream.controller home-feed lookup failed:', err?.message || err);
     }
 
     return res.status(404).json({ error: 'No playable stream found' });

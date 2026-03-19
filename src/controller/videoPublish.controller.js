@@ -3,7 +3,8 @@
  * Consent required; only consentGiven === true sets isLive. Public feed returns only isLive === true.
  */
 import { rtdb } from '../config/firebase.js';
-import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
+import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import crypto from 'crypto';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
@@ -38,6 +39,13 @@ export async function uploadAndPublish(req, res) {
     if (req.body?.consentGiven === undefined && req.body?.consentGiven !== false)
       return res.status(400).json({ success: false, message: 'You must answer the consent question' });
 
+    const rawDur = req.body?.durationSeconds ?? req.body?.duration;
+    let durationSeconds = 0;
+    if (rawDur != null && String(rawDur).trim() !== '') {
+      const n = parseInt(String(rawDur), 10);
+      if (!Number.isNaN(n) && n >= 0) durationSeconds = Math.min(n, 86400 * 48);
+    }
+
     const videoId = crypto.randomUUID();
     const timestamp = Date.now();
     const safeName = (file.originalname || 'video').replace(/[^a-zA-Z0-9.-]/g, '_');
@@ -51,13 +59,28 @@ export async function uploadAndPublish(req, res) {
       return res.status(503).json({ success: false, message: 'Storage not configured' });
     }
 
+    let thumbnailUrl = null;
+    const thumbFile = req.thumbnailFile;
+    if (thumbFile?.buffer?.length > 0 && isSupabaseConfigured()) {
+      const thumbPath = `${uid}/${timestamp}-thumb.jpg`;
+      const thumbData = await uploadFileToBucket(IMAGE_BUCKET, thumbPath, thumbFile, thumbFile.mimetype || 'image/jpeg');
+      thumbnailUrl = getPublicUrl(IMAGE_BUCKET, thumbData.path)
+        || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${IMAGE_BUCKET}/${thumbPath}`;
+    }
+
+    const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
+
     const isLive = consentGiven === true;
     const metadata = {
       title,
       description,
       videoUrl,
       streamUrl: videoUrl, // direct playable URL for HTML5 player
+      thumbnailUrl,
+      durationSeconds,
       userId: uid,
+      creatorDisplayName: creatorDisplayName || null,
+      creatorAvatarUrl: creatorAvatarUrl || null,
       consentQuestion: CONSENT_QUESTION,
       consentGiven,
       isLive,
@@ -71,6 +94,8 @@ export async function uploadAndPublish(req, res) {
       success: true,
       videoId,
       videoUrl,
+      thumbnailUrl,
+      durationSeconds,
       isLive,
       message: isLive ? 'Video published' : 'Video saved as draft (consent not given)',
     });
@@ -89,7 +114,8 @@ export async function getPublicVideos(req, res) {
     const val = snap.val();
     const list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
     list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    return res.json({ success: true, data: list });
+    const enriched = await Promise.all(list.map((v) => mergeCreatorIntoPublicVideo(v)));
+    return res.json({ success: true, data: enriched });
   } catch (err) {
     console.error('videoPublish.getPublicVideos error', err?.message || err);
     return res.status(500).json({ success: false, data: [] });
@@ -107,7 +133,8 @@ export async function getVideoById(req, res) {
     const data = snap.val();
     if (!data) return res.status(404).json({ success: false, message: 'Video not found' });
     if (data.isLive !== true) return res.status(404).json({ success: false, message: 'Video not available' });
-    return res.json({ success: true, data: { ...data, videoId } });
+    const merged = await mergeCreatorIntoPublicVideo({ ...data, videoId });
+    return res.json({ success: true, data: merged });
   } catch (err) {
     console.error('videoPublish.getVideoById error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });

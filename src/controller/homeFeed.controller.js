@@ -4,6 +4,7 @@
  * Fetches multiple pages at once so the client can display many videos initially.
  */
 import { xnxxSearch } from './xnxxSearchFallback.js';
+import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 
 function parseDurationToSeconds(val) {
   if (val == null || val === '') return 0;
@@ -20,6 +21,15 @@ function parseDurationToSeconds(val) {
     return Math.max(0, Math.floor(h) * 3600 + Math.floor(m) * 60 + Math.floor(sec));
   }
   return 0;
+}
+
+/** API may return duration as duration, length, runtime, or duration_formatted. */
+function getDurationSeconds(v) {
+  if (!v || typeof v !== 'object') return 0;
+  const raw = v.duration ?? v.length ?? v.runtime ?? v.duration_formatted ?? v.duration_sec;
+  const sec = parseDurationToSeconds(raw);
+  if (sec > 0) return sec;
+  return parseDurationToSeconds(v.duration) || Number(v.duration) || 0;
 }
 
 function formatDuration(seconds) {
@@ -43,8 +53,8 @@ function mapToCard(v, index) {
     channel: v.channel ?? v.uploader ?? v.creator ?? v.uploader_name ?? (v.pornstars && (Array.isArray(v.pornstars) ? v.pornstars[0] : v.pornstars)) ?? 'Creator',
     views: v.views ?? v.views_count ?? v.view_count ?? 0,
     thumbnail: thumbStr,
-    duration: formatDuration(v.duration),
-    durationSeconds: parseDurationToSeconds(v.duration) || Number(v.duration) || 0,
+    duration: formatDuration(getDurationSeconds(v)),
+    durationSeconds: getDurationSeconds(v),
     avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(String(v.video_id || v.id || title)).slice(0, 50)}`,
     videoSrc: v.url ?? v.video_url ?? v.link ?? v.video_link ?? '',
     likes: v.rating ?? '0',
@@ -80,6 +90,9 @@ export async function getHomeFeed(req, res) {
       const v = list[i];
       const card = mapToCard(v, merged.length);
       if (!card) continue;
+      if (!card.videoSrc || typeof card.videoSrc !== 'string' || !card.videoSrc.startsWith('http')) {
+        console.warn('[Video API] Home-feed video missing or invalid video_url:', { id: card.id, index: merged.length });
+      }
       const id = card.id;
       if (seenIds.has(id)) continue;
       seenIds.add(id);
@@ -89,6 +102,9 @@ export async function getHomeFeed(req, res) {
 
   const hasMore = merged.length >= PER_PAGE_ESTIMATE * pagesCount;
   const nextPage = page + pagesCount;
+  console.log('Video API Response: home-feed', { page, q, count: merged.length, hasMore });
+
+  ingestHomeFeedVideos(merged);
 
   return res.json({
     success: true,

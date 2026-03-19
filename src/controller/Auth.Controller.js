@@ -5,6 +5,7 @@ import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
 import { upsertCreator } from './creator.controller.js';
 import fetch from 'node-fetch';
+import { mintSessionToken, resolveUidFromBearerToken } from '../utils/sessionToken.js';
 
 export async function signup(req, res) {
   try {
@@ -69,13 +70,29 @@ export async function signup(req, res) {
     }
 
     // Create a custom token so client can sign in immediately
+    const sessionToken = mintSessionToken(uid, email.trim().toLowerCase());
     try {
       const customToken = await auth.createCustomToken(uid);
       console.log(`Created custom token for uid=${uid} on signup`);
-      return res.status(201).json({ success: true, uid, email: email.trim().toLowerCase(), displayName: name.trim(), emailVerified: userRecord.emailVerified || false, token: customToken });
+      return res.status(201).json({
+        success: true,
+        uid,
+        email: email.trim().toLowerCase(),
+        displayName: name.trim(),
+        emailVerified: userRecord.emailVerified || false,
+        token: customToken,
+        ...(sessionToken && { sessionToken }),
+      });
     } catch (tokenErr) {
       console.error('Failed to create custom token on signup:', tokenErr && tokenErr.message ? tokenErr.message : tokenErr);
-      return res.status(201).json({ success: true, uid, email: email.trim().toLowerCase(), displayName: name.trim(), emailVerified: userRecord.emailVerified || false });
+      return res.status(201).json({
+        success: true,
+        uid,
+        email: email.trim().toLowerCase(),
+        displayName: name.trim(),
+        emailVerified: userRecord.emailVerified || false,
+        ...(sessionToken && { sessionToken }),
+      });
     }
   } catch (error) {
     console.error('Signup error:', error);
@@ -157,14 +174,25 @@ export async function submitAgeConsent(req, res) {
       console.error('Failed to persist lightweight user during age-consent:', err && err.message ? err.message : err);
     }
 
-    // After age consent, create a Firebase custom token so the client can sign in immediately.
+    const sessionToken = mintSessionToken(uid, userRecord.email || '');
     try {
       const customToken = await auth.createCustomToken(uid);
       console.log(`Created custom token for uid=${uid}`);
-      return res.status(200).json({ success: true, message: 'Age consent recorded and account completed', uid, token: customToken });
+      return res.status(200).json({
+        success: true,
+        message: 'Age consent recorded and account completed',
+        uid,
+        token: customToken,
+        ...(sessionToken && { sessionToken }),
+      });
     } catch (tokenErr) {
       console.error('Failed to create custom token during age-consent:', tokenErr && tokenErr.message ? tokenErr.message : tokenErr);
-      return res.status(200).json({ success: true, message: 'Age consent recorded and account completed', uid });
+      return res.status(200).json({
+        success: true,
+        message: 'Age consent recorded and account completed',
+        uid,
+        ...(sessionToken && { sessionToken }),
+      });
     }
   } catch (err) {
     console.error('submitAgeConsent error', err);
@@ -175,19 +203,15 @@ export async function submitAgeConsent(req, res) {
 // User applies to become creator
 export async function applyCreator(req, res) {
   try {
-    // Require authentication via Firebase ID token in Authorization header
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
-    const idToken = authHeader.slice(7);
-    let decoded;
-    try {
-      decoded = await auth.verifyIdToken(idToken);
-    } catch (err) {
+    const bearer = authHeader.slice(7);
+    const uid = await resolveUidFromBearerToken(bearer);
+    if (!uid) {
       return res.status(401).json({ success: false, message: 'Invalid or expired token' });
     }
-    const uid = decoded.uid;
 
     // Support both JSON body and multipart/form-data (fields + files).
     // If client uses multipart, form fields will be strings; `applicationData` may be JSON string.
@@ -464,6 +488,7 @@ export async function login(req, res) {
       console.warn('Login: could not create custom token', tokenErr?.message || tokenErr);
     }
 
+    const sessionToken = mintSessionToken(uid, cleanEmail);
     return res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -472,6 +497,7 @@ export async function login(req, res) {
       displayName: userRecord.displayName || userData.name || cleanEmail.split('@')[0],
       emailVerified: true,
       ...(token && { token }),
+      ...(sessionToken && { sessionToken }),
       userData: {
         ...userData,
         email: cleanEmail,
@@ -550,6 +576,14 @@ export async function google(req, res) {
       userData.creatorStatus = 'none';
     }
 
+    let googleCustomToken;
+    try {
+      googleCustomToken = await auth.createCustomToken(uid);
+    } catch (e) {
+      console.warn('Google login: custom token failed', e?.message || e);
+    }
+    const sessionToken = mintSessionToken(uid, cleanEmail);
+
     return res.status(200).json({
       success: true,
       message: 'Google login successful',
@@ -557,6 +591,8 @@ export async function google(req, res) {
       email: cleanEmail,
       displayName: name,
       emailVerified: true,
+      ...(googleCustomToken && { token: googleCustomToken }),
+      ...(sessionToken && { sessionToken }),
       userData,
     });
   } catch (error) {

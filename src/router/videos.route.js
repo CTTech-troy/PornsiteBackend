@@ -13,6 +13,23 @@ import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB
+const uploadVideoWithThumb = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 },
+}).fields([
+  { name: 'video', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 },
+]);
+
+function attachPublishFiles(req, res, next) {
+  uploadVideoWithThumb(req, res, (err) => {
+    if (err) return next(err);
+    const files = req.files || {};
+    req.file = files.video?.[0];
+    req.thumbnailFile = files.thumbnail?.[0];
+    next();
+  });
+}
 
 // GET /api/videos?page=1&limit=20 — paginated feed for home
 router.get('/', async (req, res) => {
@@ -29,7 +46,7 @@ router.get('/', async (req, res) => {
 
 // ——— Secure upload & publish (Supabase Storage + RTDB), consent required ———
 // POST /api/videos/upload — multipart: video file; body: title, description, consentGiven
-router.post('/upload', requireAuth, upload.single('video'), videoPublish.uploadAndPublish);
+router.post('/upload', requireAuth, attachPublishFiles, videoPublish.uploadAndPublish);
 
 // ——— TikTok-style: Supabase Storage + Postgres (feed, upload, likes, views, comments) ———
 router.use('/tiktok', tiktokVideoRouter);
