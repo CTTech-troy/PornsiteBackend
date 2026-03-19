@@ -67,15 +67,15 @@ router.get('/public/:videoId/like-status', videoPublish.getLikeStatus);
 // POST /api/videos/public/:videoId/comments
 router.post('/public/:videoId/comments', requireAuth, videoPublish.addComment);
 
-// GET /api/videos/search/pornstar?q=...&page=1 — RapidAPI pornstar search
+// GET /api/videos/search/pornstar?q=...&page=1 — stub (empty; xnxx-api has no pornstar route)
 router.get('/search/pornstar', search.searchPornstars);
-// GET /api/videos/search?q=...&page=1&filter=relevance — RapidAPI video search
+// GET /api/videos/search?q=...&page=1&filter=relevance — RapidAPI xnxx-api
 router.get('/search', search.searchVideos);
 
-// GET /api/videos/trending?page=1 — RapidAPI pornhub-api-xnxx trending
+// GET /api/videos/trending?page=1 — RapidAPI xnxx-api GET /xn/best
 router.get('/trending', trending.getTrending);
 
-// GET /api/videos/home-feed?page=1&q=hot&pages=3 — xnxx search, multiple pages at once for home
+// GET /api/videos/home-feed?page=1&pages=3 — RapidAPI xnxx-api GET /xn/best (merged pages)
 router.get('/home-feed', homeFeed.getHomeFeed);
 
 // GET /api/videos/todays-selection — RapidAPI xnxx-api today's selection (server-side key)
