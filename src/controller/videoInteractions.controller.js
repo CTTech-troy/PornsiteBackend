@@ -133,10 +133,13 @@ export async function addComment(req, res) {
     if (!isValidPathSegment(videoId)) return res.status(400).json({ error: 'videoId required' });
     if (!text) return res.status(400).json({ error: 'Comment text is required' });
 
+    const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
+
     const { totalComments } = await ensureVideoRef(videoId);
     const commentId = crypto.randomUUID();
     const comment = {
       userId: uid,
+      authorName,
       text,
       createdAt: Date.now(),
     };

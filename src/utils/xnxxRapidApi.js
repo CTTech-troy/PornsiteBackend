@@ -1,6 +1,8 @@
 /**
- * RapidAPI xnxx-api (xnxx-api.p.rapidapi.com) — shared fetch + mapping for /xn/best, /xn/todays-selection, etc.
- * Configure RAPIDAPI_XNXX_API_KEY (or RAPIDAPI_XNXX_KEY / RAPIDAPI_KEY) in backend .env.
+ * RapidAPI xnxx-api (xnxx-api.p.rapidapi.com) — /xn/best, /xn/search, /xn/todays-selection.
+ * Keys: RAPIDAPI_XNXX_API_KEY or RAPIDAPI_KEY.
+ * Search fallback: porn-xnxx-api.p.rapidapi.com POST /search (same key usually).
+ * Env: RAPIDAPI_PORN_XNXX_HOST, RAPIDAPI_PORN_XNXX_SEARCH_PATH, SEARCH_CACHE_MS (default 120000), SEARCH_FALLBACK_ON_EMPTY.
  */
 export function getXnxxCredentials() {
   const key =
@@ -139,13 +141,68 @@ export async function fetchXnxxBestPage(page = 1) {
   }
 }
 
+function getPornXnxxFallbackCredentials() {
+  const key =
+    process.env.RAPIDAPI_PORN_XNXX_API_KEY ||
+    process.env.RAPIDAPI_XNXX_API_KEY ||
+    process.env.RAPIDAPI_KEY ||
+    '';
+  const host = process.env.RAPIDAPI_PORN_XNXX_HOST || 'porn-xnxx-api.p.rapidapi.com';
+  return { key, host };
+}
+
+function shouldTrySearchFallback(primary) {
+  if (!primary) return true;
+  if (primary.ok && primary.items?.length > 0) return false;
+  if (process.env.SEARCH_FALLBACK_ON_EMPTY === '1' && primary.ok && (!primary.items || primary.items.length === 0)) {
+    return true;
+  }
+  return !primary.ok;
+}
+
 /**
- * GET https://{host}/xn/todays-selection (no page)
+ * POST https://{host}/search — RapidAPI porn-xnxx-api (fallback when primary xnxx-api is down).
+ * Body: JSON { q, page? } — override path via RAPIDAPI_PORN_XNXX_SEARCH_PATH (default /search).
  */
-/**
- * GET https://{host}/xn/search?q=&page= (path overridable via RAPIDAPI_XNXX_SEARCH_PATH)
- */
-export async function fetchXnxxSearch(query, page = 1, filter = 'relevance') {
+async function fetchPornXnxxSearchPost(query, page = 1) {
+  const { key, host } = getPornXnxxFallbackCredentials();
+  if (!key || key.length < 10) {
+    return { ok: false, items: [], raw: null };
+  }
+  const path = process.env.RAPIDAPI_PORN_XNXX_SEARCH_PATH || '/search';
+  const url = `https://${host}${path.startsWith('/') ? path : `/${path}`}`;
+  const q = String(query || '').trim() || 'a';
+  const p = Math.max(1, parseInt(String(page), 10) || 1);
+  const body = { q: q, page: p };
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'x-rapidapi-key': key,
+        'x-rapidapi-host': host,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { ok: false, status: res.status, items: [], raw: text };
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return { ok: false, items: [], raw: text };
+    }
+    const list = extractVideosFromXnxxResponse(data);
+    const items = list.map((v, i) => mapRawToHomeCard(v, i)).filter(Boolean);
+    return { ok: true, items, raw: data, source: 'fallback' };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err), items: [], raw: null };
+  }
+}
+
+async function fetchXnxxSearchPrimary(query, page = 1, filter = 'relevance') {
   const { key, host } = getXnxxCredentials();
   if (!isXnxxApiConfigured()) {
     return { ok: false, error: 'not_configured', items: [], raw: null };
@@ -176,10 +233,105 @@ export async function fetchXnxxSearch(query, page = 1, filter = 'relevance') {
     }
     const list = extractVideosFromXnxxResponse(data);
     const items = list.map((v, i) => mapRawToHomeCard(v, i)).filter(Boolean);
-    return { ok: true, items, raw: data };
+    return { ok: true, items, raw: data, source: 'primary' };
   } catch (err) {
     return { ok: false, error: err?.message || String(err), items: [], raw: null };
   }
+}
+
+const searchCache = new Map();
+const searchInFlight = new Map();
+
+function searchCacheKey(q, page, filter) {
+  return `${String(q).trim()}\t${page}\t${filter}`;
+}
+
+function getSearchCacheTtlMs() {
+  const n = Number(process.env.SEARCH_CACHE_MS);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return 120_000;
+}
+
+/**
+ * GET primary (xnxx-api /xn/search), then POST fallback (porn-xnxx-api /search) if needed.
+ * Same query+page+filter: one upstream chain at a time; optional TTL cache (SEARCH_CACHE_MS, default 120s).
+ */
+export async function fetchXnxxSearch(query, page = 1, filter = 'relevance') {
+  if (!isXnxxApiConfigured()) {
+    return { ok: false, error: 'not_configured', items: [], raw: null };
+  }
+  const q = String(query || '').trim() || 'a';
+  const p = Math.max(1, parseInt(String(page), 10) || 1);
+  const f =
+    filter === 'relevance' || filter === 'newest' || filter === 'mostviewed' ? filter : 'relevance';
+  const key = searchCacheKey(q, p, f);
+  const ttl = getSearchCacheTtlMs();
+
+  if (ttl > 0) {
+    const hit = searchCache.get(key);
+    if (hit && Date.now() - hit.ts < ttl) {
+      return { ...hit.payload, cached: true };
+    }
+  }
+
+  const existingFlight = searchInFlight.get(key);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
+  const runPromise = new Promise((resolve) => {
+    (async () => {
+      try {
+        const primary = await fetchXnxxSearchPrimary(q, p, f);
+        if (primary.ok && primary.items?.length > 0) {
+          if (ttl > 0) {
+            searchCache.set(key, { ts: Date.now(), payload: { ...primary } });
+          }
+          resolve(primary);
+          return;
+        }
+        if (shouldTrySearchFallback(primary)) {
+          const fb = await fetchPornXnxxSearchPost(q, p);
+          if (fb.ok && fb.items?.length > 0) {
+            if (ttl > 0) {
+              searchCache.set(key, { ts: Date.now(), payload: { ...fb } });
+            }
+            resolve(fb);
+            return;
+          }
+          if (primary.ok && ttl > 0) {
+            searchCache.set(key, { ts: Date.now(), payload: { ...primary } });
+          }
+          resolve(primary.items?.length > 0 ? primary : fb);
+          return;
+        }
+        if (primary.ok && ttl > 0) {
+          searchCache.set(key, { ts: Date.now(), payload: { ...primary } });
+        }
+        resolve(primary);
+      } catch (e) {
+        resolve({ ok: false, error: e?.message || String(e), items: [], raw: null });
+      }
+    })();
+  });
+
+  searchInFlight.set(key, runPromise);
+  try {
+    return await runPromise;
+  } finally {
+    searchInFlight.delete(key);
+  }
+}
+
+const todaysSelectionCache = {
+  items: null,
+  ts: 0,
+};
+
+function getTodaysSelectionTtlMs() {
+  const n = Number(process.env.TODAYS_SELECTION_CACHE_MS);
+  if (Number.isFinite(n) && n >= 30_000) return n;
+  return 5 * 60 * 1000;
 }
 
 export async function fetchXnxxTodaysSelection() {
@@ -187,6 +339,12 @@ export async function fetchXnxxTodaysSelection() {
   if (!isXnxxApiConfigured()) {
     return { ok: false, error: 'not_configured', items: [] };
   }
+  const ttl = getTodaysSelectionTtlMs();
+  const now = Date.now();
+  if (Array.isArray(todaysSelectionCache.items) && now - todaysSelectionCache.ts < ttl) {
+    return { ok: true, items: todaysSelectionCache.items, raw: null, cached: true };
+  }
+
   const url = `https://${host}/xn/todays-selection`;
   try {
     const res = await fetch(url, {
@@ -198,7 +356,12 @@ export async function fetchXnxxTodaysSelection() {
       },
     });
     const text = await res.text();
-    if (!res.ok) return { ok: false, status: res.status, items: [], raw: text };
+    if (!res.ok) {
+      if (res.status === 429 && Array.isArray(todaysSelectionCache.items) && todaysSelectionCache.items.length > 0) {
+        return { ok: true, items: todaysSelectionCache.items, raw: text, stale: true };
+      }
+      return { ok: false, status: res.status, items: [], raw: text };
+    }
     let data;
     try {
       data = JSON.parse(text);
@@ -207,8 +370,15 @@ export async function fetchXnxxTodaysSelection() {
     }
     const list = extractVideosFromXnxxResponse(data);
     const items = list.map((v, i) => mapRawToHomeCard(v, i)).filter(Boolean);
+    if (items.length > 0) {
+      todaysSelectionCache.items = items;
+      todaysSelectionCache.ts = Date.now();
+    }
     return { ok: true, items, raw: data };
   } catch (err) {
+    if (Array.isArray(todaysSelectionCache.items) && todaysSelectionCache.items.length > 0) {
+      return { ok: true, items: todaysSelectionCache.items, stale: true, error: err?.message || String(err) };
+    }
     return { ok: false, error: err?.message || String(err), items: [] };
   }
 }

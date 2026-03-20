@@ -205,6 +205,8 @@ export async function addComment(req, res) {
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
     if (!text) return res.status(400).json({ success: false, message: 'Comment text is required' });
 
+    const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
+
     const videoSnap = await videosRef().child(videoId).once('value');
     const video = videoSnap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -213,6 +215,7 @@ export async function addComment(req, res) {
     const commentId = crypto.randomUUID();
     const comment = {
       userId: uid,
+      authorName,
       text,
       createdAt: Date.now(),
     };

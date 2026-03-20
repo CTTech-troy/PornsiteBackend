@@ -69,7 +69,7 @@ router.post('/public/:videoId/comments', requireAuth, videoPublish.addComment);
 
 // GET /api/videos/search/pornstar?q=...&page=1 — stub (empty; xnxx-api has no pornstar route)
 router.get('/search/pornstar', search.searchPornstars);
-// GET /api/videos/search?q=...&page=1&filter=relevance — RapidAPI xnxx-api
+// GET /api/videos/search?q=...&page=1&filter=relevance — xnxx-api GET /xn/search, fallback porn-xnxx-api POST /search
 router.get('/search', search.searchVideos);
 
 // GET /api/videos/trending?page=1 — RapidAPI xnxx-api GET /xn/best
