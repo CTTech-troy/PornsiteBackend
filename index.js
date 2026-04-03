@@ -1,8 +1,8 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
 import authRouter from './src/router/auth.route.js';
 import videosRouter from './src/router/videos.route.js';
 import liveRouter from './src/router/live.route.js';
@@ -16,10 +16,9 @@ import * as giftCtrl from './src/controller/gift.controller.js';
 import { ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
+import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
 import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
-
-dotenv.config();
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
@@ -252,6 +251,7 @@ try {
 
 server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  printFirebaseStartupSummary();
   await checkConnections();
   ensureBuckets().then(() => {}).catch(() => {});
   syncCacheToSupabase().catch(() => {});

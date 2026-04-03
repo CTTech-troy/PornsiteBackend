@@ -1,5 +1,7 @@
 import { supabase, isConfigured } from './supabase.js';
-import { rtdb } from './firebase.js';
+import { getFirebaseRtdb, isFirebaseReady } from './firebase.js';
+
+let syncSkipLogged = false;
 
 function isUuidLike(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
@@ -27,7 +29,10 @@ async function insertUser(user) {
     }
   }
 
-  // RTDB fallback: write under /users/{id}
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('User save failed: Firebase Realtime Database is not available.');
+  }
   try {
     const id = user.id || user.id === 0 ? user.id : (user.id = user.id || (user.uid || Date.now().toString()));
     await rtdb.ref(`users/${id}`).set(user);
@@ -49,6 +54,10 @@ async function insertCreatorApplication(payload) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Creator application save failed: Firebase Realtime Database is not available.');
+  }
   try {
     await rtdb.ref(`creator_applications/${payload.id}`).set(payload);
     return { source: 'rtdb', data: payload };
@@ -66,6 +75,10 @@ async function getUserCreatorStatus(userId) {
     } catch (err) {
       // ignore
     }
+  }
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    return { creator: false, creatorStatus: 'none' };
   }
   try {
     const snap = await rtdb.ref(`users/${userId}`).once('value');
@@ -97,6 +110,10 @@ async function updateUserCreatorStatus(userId, approve) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Update failed: Firebase Realtime Database is not available.');
+  }
   try {
     await rtdb.ref(`users/${userId}/creator`).set(!!approve);
     await rtdb.ref(`users/${userId}/creatorStatus`).set(approve ? 'approved' : 'rejected');
@@ -123,6 +140,10 @@ async function updateUserWithCreatorApplication(userId, creatorApplicationData) 
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Update failed: Firebase Realtime Database is not available.');
+  }
   try {
     await rtdb.ref(`users/${userId}/creator_application`).set(creatorApplicationData || {});
     await rtdb.ref(`users/${userId}/verified`).set('pending');
@@ -145,6 +166,10 @@ async function insertMedia(metadata) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Media save failed: Firebase Realtime Database is not available.');
+  }
   try {
     const id = metadata.id || Date.now().toString();
     await rtdb.ref(`media/${id}`).set(metadata);
@@ -170,6 +195,8 @@ async function getPublicProfile(userId) {
       console.warn('Supabase getPublicProfile failed:', err && err.message ? err.message : err);
     }
   }
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return null;
   try {
     const snap = await rtdb.ref(`users/${rawId}`).once('value');
     const val = snap.val();
@@ -200,6 +227,10 @@ async function incrementFollow(userId) {
       }
     }
   }
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Follow update failed: Firebase Realtime Database is not available.');
+  }
   try {
     const ref = rtdb.ref(`users/${userId}/followers`);
     const snap = await ref.once('value');
@@ -218,9 +249,15 @@ async function incrementFollow(userId) {
  */
 async function syncRtdbToSupabase() {
   if (!isConfigured()) return { users: 0, creator_applications: 0, media: 0 };
-  const hasRtdb = Boolean(process.env.FIREBASE_DATABASE_URL);
-  if (!hasRtdb) return { users: 0, creator_applications: 0, media: 0 };
+  if (!isFirebaseReady || !getFirebaseRtdb()) {
+    if (!syncSkipLogged) {
+      syncSkipLogged = true;
+      console.warn('[syncRtdbToSupabase] Disabled: Firebase Admin is inactive — RTDB sync will not run.');
+    }
+    return { users: 0, creator_applications: 0, media: 0 };
+  }
 
+  const rtdb = getFirebaseRtdb();
   const ok = await isSupabaseReachable();
   if (!ok) return { users: 0, creator_applications: 0, media: 0 };
 
@@ -299,6 +336,8 @@ async function getMediaByUser(userId) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return [];
   try {
     const snap = await rtdb.ref('media').orderByChild('user_id').equalTo(userId).once('value');
     const val = snap.val();

@@ -58,7 +58,7 @@ export async function signInWithPassword(email, password) {
     const err = new Error(mapIdentityToolkitMessage(rawMsg));
     err.code = rawMsg;
     err.status = res.status;
-    if (process.env.NODE_ENV === 'development') {
+    if (process.env.NODE_ENV === 'development' && rawMsg !== 'INVALID_LOGIN_CREDENTIALS') {
       console.warn('[firebaseAuthRest] signInWithPassword failed:', rawMsg);
     }
     throw err;

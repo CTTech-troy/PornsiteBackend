@@ -2,21 +2,25 @@
  * Secure video upload & publish: Supabase Storage + Firebase RTDB.
  * Consent required; only consentGiven === true sets isLive. Public feed returns only isLive === true.
  */
-import { rtdb } from '../config/firebase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import crypto from 'crypto';
+import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 
 function videosRef() {
-  return rtdb.ref('videos');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('videos') : null;
 }
 function likesRef() {
-  return rtdb.ref('likes');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('likes') : null;
 }
 function commentsRef() {
-  return rtdb.ref('comments');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('comments') : null;
 }
 
 /**
@@ -48,13 +52,19 @@ export async function uploadAndPublish(req, res) {
 
     const videoId = crypto.randomUUID();
     const timestamp = Date.now();
-    const safeName = (file.originalname || 'video').replace(/[^a-zA-Z0-9.-]/g, '_');
+    const safeName = ensureVideoFilenameForStorage(file.originalname, file.mimetype);
     const storagePath = `${uid}/${timestamp}-${safeName}`;
+    const contentType = resolveVideoContentType(file.mimetype, safeName);
 
     let videoUrl = null;
     if (isSupabaseConfigured()) {
-      const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, file.mimetype || 'video/mp4');
-      videoUrl = getPublicUrl(VIDEO_BUCKET, data.path) || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${VIDEO_BUCKET}/${storagePath}`;
+      const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, contentType);
+      const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, '');
+      videoUrl =
+        getPublicUrl(VIDEO_BUCKET, data.path) ||
+        (baseUrl
+          ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${data.path.split('/').map(encodeURIComponent).join('/')}`
+          : null);
     } else {
       return res.status(503).json({ success: false, message: 'Storage not configured' });
     }
@@ -89,6 +99,10 @@ export async function uploadAndPublish(req, res) {
       createdAt: Date.now(),
     };
 
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video metadata storage is temporarily unavailable.' });
+    }
+
     await videosRef().child(videoId).set(metadata);
     return res.status(201).json({
       success: true,
@@ -110,6 +124,9 @@ export async function uploadAndPublish(req, res) {
  */
 export async function getPublicVideos(req, res) {
   try {
+    if (!videosRef()) {
+      return res.json({ success: true, data: [] });
+    }
     const snap = await videosRef().once('value');
     const val = snap.val();
     const list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
@@ -127,6 +144,9 @@ export async function getPublicVideos(req, res) {
  */
 export async function getVideoById(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video feed is temporarily unavailable.' });
+    }
     const { videoId } = req.params;
     const requesterUid = req.uid;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
@@ -149,6 +169,9 @@ export async function getVideoById(req, res) {
 
 export async function deleteVideo(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -169,6 +192,9 @@ export async function deleteVideo(req, res) {
 
 export async function updateVideo(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -206,6 +232,9 @@ export async function updateVideo(req, res) {
 
 export async function setVideoDraft(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -232,6 +261,9 @@ export async function setVideoDraft(req, res) {
  */
 export async function likeVideo(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -260,6 +292,9 @@ export async function likeVideo(req, res) {
  */
 export async function unlikeVideo(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -284,6 +319,9 @@ export async function unlikeVideo(req, res) {
  */
 export async function addComment(req, res) {
   try {
+    if (!videosRef() || !commentsRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -320,6 +358,9 @@ export async function addComment(req, res) {
  */
 export async function getComments(req, res) {
   try {
+    if (!videosRef() || !commentsRef()) {
+      return res.json({ success: true, data: [] });
+    }
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
 
@@ -343,6 +384,9 @@ export async function getComments(req, res) {
  */
 export async function getLikeStatus(req, res) {
   try {
+    if (!likesRef()) {
+      return res.json({ success: true, liked: false });
+    }
     const uid = req.uid;
     const { videoId } = req.params;
     if (!uid) return res.json({ success: true, liked: false });

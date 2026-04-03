@@ -3,17 +3,18 @@
  * When Supabase is back, sync pushes cache to Supabase and clears RTDB.
  */
 import { supabase, isConfigured as isSupabaseConfigured } from './supabase.js';
-import { rtdb } from './firebase.js';
+import { getFirebaseRtdb, isFirebaseAdminReady } from './firebase.js';
 import crypto from 'crypto';
 
 const CACHE_PATH = 'lives_cache';
 
 function isRtdbAvailable() {
-  return Boolean(process.env.FIREBASE_DATABASE_URL);
+  return isFirebaseAdminReady && Boolean(getFirebaseRtdb());
 }
 
 function cacheRef() {
   if (!isRtdbAvailable()) return null;
+  const rtdb = getFirebaseRtdb();
   try {
     return rtdb.ref(CACHE_PATH);
   } catch (err) {

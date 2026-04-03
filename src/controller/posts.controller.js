@@ -1,8 +1,9 @@
-import { rtdb } from '../config/firebase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 import { mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 
 function videosRef() {
-  return rtdb.ref('videos');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('videos') : null;
 }
 
 /**
@@ -12,6 +13,9 @@ function videosRef() {
  */
 export async function listPosts(req, res) {
   try {
+    if (!videosRef()) {
+      return res.json({ success: true, data: [] });
+    }
     const userId = String(req.query.userId || '').trim();
     if (!userId) {
       return res.status(400).json({ success: false, message: 'userId required', data: [] });

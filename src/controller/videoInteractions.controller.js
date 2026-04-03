@@ -4,16 +4,19 @@
  * Ensures external ref exists (externalId, totalLikes, totalComments) when missing.
  */
 import crypto from 'crypto';
-import { rtdb } from '../config/firebase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 
 function videosRef() {
-  return rtdb.ref('videos');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('videos') : null;
 }
 function likesRef() {
-  return rtdb.ref('likes');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('likes') : null;
 }
 function commentsRef() {
-  return rtdb.ref('comments');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('comments') : null;
 }
 
 const INVALID_PATH_CHARS = /[.#$\[\]]/;
@@ -25,7 +28,11 @@ async function ensureVideoRef(videoId) {
   if (!isValidPathSegment(videoId)) {
     throw new Error('invalid videoId');
   }
-  const ref = videosRef().child(videoId);
+  const root = videosRef();
+  if (!root) {
+    throw new Error('RTDB_UNAVAILABLE');
+  }
+  const ref = root.child(videoId);
   const snap = await ref.once('value');
   const val = snap.val();
   if (!val) {
@@ -37,6 +44,9 @@ async function ensureVideoRef(videoId) {
 
 export async function getLikeStatus(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.json({ liked: false, totalLikes: 0, totalComments: 0 });
+    }
     const uid = req.uid;
     const { videoId } = req.params;
     if (!isValidPathSegment(videoId)) {
@@ -63,6 +73,9 @@ export async function getLikeStatus(req, res) {
 
 export async function likeVideo(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid || !isValidPathSegment(uid)) return res.status(401).json({ error: 'Authentication required' });
     const { videoId } = req.params;
@@ -82,6 +95,9 @@ export async function likeVideo(req, res) {
     await videosRef().child(videoId).child('totalLikes').set(newTotal);
     return res.json({ liked: true, totalLikes: newTotal });
   } catch (err) {
+    if (err?.message === 'RTDB_UNAVAILABLE') {
+      return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
+    }
     console.error('videoInteractions.likeVideo', err?.message || err);
     return res.status(500).json({ error: err?.message || 'Failed' });
   }
@@ -89,6 +105,9 @@ export async function likeVideo(req, res) {
 
 export async function unlikeVideo(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid || !isValidPathSegment(uid)) return res.status(401).json({ error: 'Authentication required' });
     const { videoId } = req.params;
@@ -110,6 +129,9 @@ export async function unlikeVideo(req, res) {
 
 export async function getComments(req, res) {
   try {
+    if (!videosRef() || !commentsRef()) {
+      return res.json({ data: [] });
+    }
     const { videoId } = req.params;
     if (!isValidPathSegment(videoId)) return res.status(400).json({ error: 'videoId required' });
 
@@ -126,6 +148,9 @@ export async function getComments(req, res) {
 
 export async function addComment(req, res) {
   try {
+    if (!videosRef() || !commentsRef()) {
+      return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid || !isValidPathSegment(uid)) return res.status(401).json({ error: 'Authentication required' });
     const { videoId } = req.params;

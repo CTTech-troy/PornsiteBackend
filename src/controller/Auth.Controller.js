@@ -1,4 +1,4 @@
-import { auth, db, rtdb } from '../config/firebase.js';
+import { getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { supabase, isConfigured } from '../config/supabase.js';
 import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
 import { encryptApplicationData } from '../config/encrypt.js';
@@ -9,6 +9,7 @@ import { mintSessionToken, resolveUidFromBearerToken } from '../utils/sessionTok
 import { createLoginTimer, createSignupTimer } from '../utils/authLoginTiming.js';
 import { recordAuth } from '../utils/authMetrics.js';
 import { signInWithPassword as firebaseRestSignIn } from '../services/firebaseAuthRestService.js';
+import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 
 export async function signup(req, res) {
   const mark = createSignupTimer();
@@ -26,6 +27,13 @@ export async function signup(req, res) {
     if (!password || password.length < 8) {
       recordAuth('signupFail');
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+    }
+
+    const auth = getFirebaseAuth();
+    const db = getFirebaseDb();
+    if (!auth || !db) {
+      recordAuth('signupFail');
+      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
     const userRecord = await auth.createUser({
@@ -110,6 +118,11 @@ export async function submitAgeConsent(req, res) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
     const idToken = authHeader.slice(7);
+    const auth = getFirebaseAuth();
+    const db = getFirebaseDb();
+    if (!auth || !db) {
+      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
+    }
     let decoded;
     try {
       decoded = await auth.verifyIdToken(idToken);
@@ -291,26 +304,30 @@ export async function applyCreator(req, res) {
       console.warn('Update user with creator application:', err?.message || err);
     }
 
-    // Firestore: save user details and verified = pending
-    await db.collection('users').doc(uid).set({
-      creatorStatus: 'pending',
-      creatorApplicationId: payload.id,
-      creator_application: dataToStore,
-      verified: 'pending',
-    }, { merge: true });
+    const db = getFirebaseDb();
+    const rtdb = getFirebaseRtdb();
+    if (db) {
+      await db.collection('users').doc(uid).set({
+        creatorStatus: 'pending',
+        creatorApplicationId: payload.id,
+        creator_application: dataToStore,
+        verified: 'pending',
+      }, { merge: true });
+    }
 
-    // RTDB: store reference only; sensitive data is in encrypted payload in DB
-    try {
-      await rtdb.ref(`creators/${uid}`).set({
-        user_id: uid,
-        verified: false,
-        application_id: payload.id,
-        status: 'pending',
-        created_at: new Date().toISOString(),
-      });
-      await rtdb.ref(`users/${uid}/creatorStatus`).set('pending');
-    } catch (rtdbErr) {
-      console.warn('RTDB creator record:', rtdbErr?.message || rtdbErr);
+    if (rtdb) {
+      try {
+        await rtdb.ref(`creators/${uid}`).set({
+          user_id: uid,
+          verified: false,
+          application_id: payload.id,
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        });
+        await rtdb.ref(`users/${uid}/creatorStatus`).set('pending');
+      } catch (rtdbErr) {
+        console.warn('RTDB creator record:', rtdbErr?.message || rtdbErr);
+      }
     }
 
     // Supabase creators row (no PII in profile)
@@ -365,8 +382,10 @@ export async function approveCreator(req, res) {
       console.warn('Fallback DB update creator status:', err?.message || err);
     }
 
-    // Firestore: admin confirmed — set approved so user gets creator features
-    await db.collection('users').doc(user_id).set({ creatorStatus: approve ? 'approved' : 'rejected' }, { merge: true });
+    const db = getFirebaseDb();
+    if (db) {
+      await db.collection('users').doc(user_id).set({ creatorStatus: approve ? 'approved' : 'rejected' }, { merge: true });
+    }
 
     return res.status(200).json({ success: true, message: 'Creator status updated' });
   } catch (err) {
@@ -386,12 +405,26 @@ export async function uploadMedia(req, res) {
     }
 
     const bucket = type === 'image' ? (process.env.SUPABASE_IMAGE_BUCKET || 'images') : (process.env.SUPABASE_VIDEO_BUCKET || 'videos');
-    const filename = `${uid}/${Date.now()}_${file.originalname}`;
+    const safeBase =
+      type === 'image'
+        ? String(file.originalname || 'image')
+            .trim()
+            .replace(/\\/g, '/')
+            .split('/')
+            .pop()
+            .replace(/[^a-zA-Z0-9._-]/g, '_') || 'image.jpg'
+        : ensureVideoFilenameForStorage(file.originalname, file.mimetype);
+    const filename = `${uid}/${Date.now()}_${safeBase}`;
+    const contentType =
+      type === 'image'
+        ? file.mimetype || 'image/jpeg'
+        : resolveVideoContentType(file.mimetype, safeBase);
 
-    const { data, error } = await supabase.storage.from(bucket).upload(filename, file.buffer, { contentType: file.mimetype });
+    const { data, error } = await supabase.storage.from(bucket).upload(filename, file.buffer, { contentType });
     if (error) throw error;
 
-    const publicUrl = `${(process.env.SUPABASE_URL || '').replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
+    const encodedPath = data.path.split('/').map(encodeURIComponent).join('/');
+    const publicUrl = `${(process.env.SUPABASE_URL || '').replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodedPath}`;
 
     // store media metadata in Supabase or RTDB fallback
     try {
@@ -428,6 +461,11 @@ export async function me(req, res) {
     const uid = await resolveUidFromBearerToken(bearer);
     if (!uid) {
       return res.status(401).json({ success: false, message: 'Invalid or expired session' });
+    }
+
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
     const [userRecord, creatorPack] = await Promise.all([auth.getUser(uid), getUserCreatorStatus(uid)]);
@@ -497,6 +535,12 @@ export async function login(req, res) {
         success: false,
         message: 'Email and password are required.',
       });
+    }
+
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      recordAuth('loginFail');
+      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
     let decoded;
@@ -578,6 +622,12 @@ export async function google(req, res) {
 
     if (!email || !email.trim()) {
       return res.status(400).json({ success: false, message: 'Email is required.' });
+    }
+
+    const auth = getFirebaseAuth();
+    const db = getFirebaseDb();
+    if (!auth || !db) {
+      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
     const cleanEmail = email.trim().toLowerCase();
