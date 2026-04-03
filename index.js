@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
+import helmet from 'helmet';
 import dotenv from 'dotenv';
 import authRouter from './src/router/auth.route.js';
 import videosRouter from './src/router/videos.route.js';
@@ -7,26 +9,54 @@ import liveRouter from './src/router/live.route.js';
 import giftRouter from './src/router/gift.route.js';
 import usersRouter from './src/router/users.route.js';
 import creatorsRouter from './src/router/creators.route.js';
+import postsRouter from './src/router/posts.route.js';
 import pornhubRouter from './src/router/pornhubRoutes.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
-import { auth } from './src/config/firebase.js';
 import { supabase, ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
+import { pingServices } from './src/utils/servicePing.js';
 
 dotenv.config();
 
 const app = express();
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
 
-// Middleware
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+app.use(compression());
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode`);
 
 app.get('/', (req, res) => {
   res.send('API running on port 5000');
+});
+
+app.get('/api/health/services', async (req, res) => {
+  try {
+    const { firebase, supabase } = await pingServices();
+    res.json({
+      firebase: {
+        active: firebase.status === 'active',
+        status: firebase.status,
+        detail: firebase.detail
+      },
+      supabase: {
+        active: supabase.status === 'active',
+        status: supabase.status,
+        detail: supabase.detail
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
 });
 
 // Auth routes
@@ -43,64 +73,46 @@ app.use('/api/gifts', giftRouter);
 app.use('/api/users', usersRouter);
 // Creators (leaderboard + profile + videos)
 app.use('/api/creators', creatorsRouter);
+// User posts (RTDB + Supabase Storage; same persistence as /api/videos/upload)
+app.use('/api/posts', postsRouter);
 
 const PORT = process.env.PORT || 5000;
 
-const STARTUP_CHECK_TIMEOUT_MS = 3500;
 let supabaseWarned = false;
 
-async function checkConnections() {
-  const hasFirebase = process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (hasFirebase) {
-    try {
-      const fbRes = await Promise.race([
-        auth.listUsers(1),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('Firebase check timed out')), STARTUP_CHECK_TIMEOUT_MS))
-      ]);
-      if (fbRes) console.log('✅ Firebase: connected (auth reachable)');
-    } catch (err) {
-      console.warn('⚠️ Firebase: connection failed (auth may still work) —', err?.message || err);
-    }
+function logServicePing(result) {
+  const label = result.id === 'firebase' ? 'Firebase' : 'Supabase';
+  if (result.status === 'active') {
+    console.log(`✅ ${label}: active — ${result.detail}`);
+  } else if (result.status === 'not_configured') {
+    console.log(`ℹ️ ${label}: not configured — ${result.detail}`);
+  } else {
+    console.warn(`⚠️ ${label}: inactive — ${result.detail}`);
   }
+}
 
+async function checkConnections() {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const keyLooksAnon = supabaseKey && !supabaseKey.startsWith('eyJ') && (supabaseKey.includes('publishable') || supabaseKey.includes('anon'));
+  const keyLooksAnon =
+    supabaseKey && !supabaseKey.startsWith('eyJ') && (supabaseKey.includes('publishable') || supabaseKey.includes('anon'));
 
-  if (supabaseUrl && supabaseKey) {
-    if (!supabaseWarned) {
-      if (keyLooksAnon) {
+  if (supabaseUrl && supabaseKey && !supabaseWarned) {
+    if (keyLooksAnon) {
+      supabaseWarned = true;
+      console.warn('⚠️ Supabase: Use the secret "service_role" key (Dashboard → Settings → API) for Storage and DB.');
+    } else {
+      const url = supabaseUrl;
+      if (url && (url.includes('/rest/v1') || !url.startsWith('https://') || url.endsWith('/'))) {
         supabaseWarned = true;
-        console.warn('⚠️ Supabase: Use the secret "service_role" key (Dashboard → Settings → API) for Storage and DB.');
-      } else {
-        const url = supabaseUrl;
-        if (url && (url.includes('/rest/v1') || !url.startsWith('https://') || url.endsWith('/'))) {
-          supabaseWarned = true;
-          console.warn('⚠️ Supabase: SUPABASE_URL should be https://YOUR_REF.supabase.co (no path, no trailing slash).');
-        }
-      }
-    }
-    if (!keyLooksAnon) {
-      try {
-        const supRes = await Promise.race([
-          supabase.from('lives').select('id').limit(1),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('Supabase check timed out')), STARTUP_CHECK_TIMEOUT_MS))
-        ]);
-        if (supRes && !supRes.error) console.log('✅ Supabase: connected');
-        else if (supRes?.error) {
-          const msg = supRes.error?.message || String(supRes.error);
-          if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
-            console.warn('⚠️ Supabase:', msg);
-          }
-        }
-      } catch (err) {
-        const msg = err?.message || String(err);
-        if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
-          console.warn('⚠️ Supabase:', msg);
-        }
+        console.warn('⚠️ Supabase: SUPABASE_URL should be https://YOUR_REF.supabase.co (no path, no trailing slash).');
       }
     }
   }
+
+  const { firebase, supabase } = await pingServices();
+  logServicePing(firebase);
+  logServicePing(supabase);
 }
 
 // Create HTTP server and attach socket.io (dynamic import with graceful fallback)
@@ -121,7 +133,6 @@ try {
 
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
-  console.log('Socket connected:', socket.id);
 
   socket.on('join-live', async ({ liveId, userId }) => {
     try {

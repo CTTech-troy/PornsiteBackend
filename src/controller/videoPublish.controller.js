@@ -128,15 +128,101 @@ export async function getPublicVideos(req, res) {
 export async function getVideoById(req, res) {
   try {
     const { videoId } = req.params;
+    const requesterUid = req.uid;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
     const snap = await videosRef().child(videoId).once('value');
     const data = snap.val();
     if (!data) return res.status(404).json({ success: false, message: 'Video not found' });
-    if (data.isLive !== true) return res.status(404).json({ success: false, message: 'Video not available' });
+    if (data.isLive !== true) {
+      const isOwner = requesterUid && data.userId === requesterUid;
+      if (!isOwner) {
+        return res.status(404).json({ success: false, message: 'Video not available' });
+      }
+    }
     const merged = await mergeCreatorIntoPublicVideo({ ...data, videoId });
     return res.json({ success: true, data: merged });
   } catch (err) {
     console.error('videoPublish.getVideoById error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+export async function deleteVideo(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    const snap = await videosRef().child(videoId).once('value');
+    const video = snap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.userId !== uid) return res.status(403).json({ success: false, message: 'Forbidden' });
+    await videosRef().child(videoId).remove();
+    await likesRef().child(videoId).remove();
+    await commentsRef().child(videoId).remove();
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('videoPublish.deleteVideo error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+export async function updateVideo(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    const titleRaw = req.body?.title;
+    const descriptionRaw = req.body?.description;
+    const snap = await videosRef().child(videoId).once('value');
+    const video = snap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.userId !== uid) return res.status(403).json({ success: false, message: 'Forbidden' });
+    const updates = {};
+    if (titleRaw !== undefined) {
+      const title = String(titleRaw).trim();
+      if (!title) return res.status(400).json({ success: false, message: 'Title cannot be empty' });
+      updates.title = title;
+    }
+    if (descriptionRaw !== undefined) {
+      updates.description = String(descriptionRaw).trim();
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'No updates provided' });
+    }
+    await videosRef().child(videoId).update(updates);
+    const merged = await mergeCreatorIntoPublicVideo({
+      ...video,
+      ...updates,
+      videoId,
+    });
+    return res.json({ success: true, data: merged });
+  } catch (err) {
+    console.error('videoPublish.updateVideo error', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+  }
+}
+
+export async function setVideoDraft(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    const snap = await videosRef().child(videoId).once('value');
+    const video = snap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.userId !== uid) return res.status(403).json({ success: false, message: 'Forbidden' });
+    await videosRef().child(videoId).child('isLive').set(false);
+    const merged = await mergeCreatorIntoPublicVideo({
+      ...video,
+      isLive: false,
+      videoId,
+    });
+    return res.json({ success: true, data: merged });
+  } catch (err) {
+    console.error('videoPublish.setVideoDraft error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });
   }
 }

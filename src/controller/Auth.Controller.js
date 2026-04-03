@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { upsertCreator } from './creator.controller.js';
 import fetch from 'node-fetch';
 import { mintSessionToken, resolveUidFromBearerToken } from '../utils/sessionToken.js';
+import { verifyFirebasePassword } from '../utils/firebasePasswordVerify.js';
 
 export async function signup(req, res) {
   try {
@@ -32,15 +33,22 @@ export async function signup(req, res) {
     });
 
     const uid = userRecord.uid;
+    const emailNorm = email.trim().toLowerCase();
 
-    console.log(`New Firebase Auth user created: uid=${uid} email=${email.trim().toLowerCase()}`);
+    const userPayload = {
+      id: uid,
+      username: name.trim().replace(/\s+/g, '_').toLowerCase(),
+      creator: false,
+      created_at: new Date().toISOString(),
+    };
 
-    // Create initial Firestore user metadata immediately so the app can show profile
-    try {
-      await db.collection('users').doc(uid).set({
+    void db
+      .collection('users')
+      .doc(uid)
+      .set({
         uid,
         name: name.trim(),
-        email: email.trim().toLowerCase(),
+        email: emailNorm,
         displayName: name.trim(),
         emailVerified: userRecord.emailVerified || false,
         createdAt: new Date().toISOString(),
@@ -49,51 +57,32 @@ export async function signup(req, res) {
         avatar: userRecord.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}`,
         followers: 0,
         following: 0,
+      })
+      .catch((dbErr) => {
+        console.error('Firestore user stub on signup:', dbErr?.message || dbErr);
       });
-      console.log(`Created Firestore stub user for uid=${uid}`);
-    } catch (dbErr) {
-      console.error('Failed to create Firestore user stub on signup:', dbErr && dbErr.message ? dbErr.message : dbErr);
-    }
 
-    // Persist lightweight user in Supabase or RTDB fallback
-    try {
-      const userPayload = {
-        id: uid,
-        username: name.trim().replace(/\s+/g, '_').toLowerCase(),
-        creator: false,
-        created_at: new Date().toISOString(),
-      };
-      const insertRes = await insertUser(userPayload);
-      console.log('insertUser result on signup:', insertRes && insertRes.source ? insertRes.source : insertRes);
-    } catch (err) {
-      console.error('Failed to persist lightweight user on signup:', err && err.message ? err.message : err);
-    }
+    void insertUser(userPayload).catch((err) => {
+      console.error('insertUser on signup:', err?.message || err);
+    });
 
-    // Create a custom token so client can sign in immediately
-    const sessionToken = mintSessionToken(uid, email.trim().toLowerCase());
+    const sessionToken = mintSessionToken(uid, emailNorm);
+    let customToken;
     try {
-      const customToken = await auth.createCustomToken(uid);
-      console.log(`Created custom token for uid=${uid} on signup`);
-      return res.status(201).json({
-        success: true,
-        uid,
-        email: email.trim().toLowerCase(),
-        displayName: name.trim(),
-        emailVerified: userRecord.emailVerified || false,
-        token: customToken,
-        ...(sessionToken && { sessionToken }),
-      });
+      customToken = await auth.createCustomToken(uid);
     } catch (tokenErr) {
-      console.error('Failed to create custom token on signup:', tokenErr && tokenErr.message ? tokenErr.message : tokenErr);
-      return res.status(201).json({
-        success: true,
-        uid,
-        email: email.trim().toLowerCase(),
-        displayName: name.trim(),
-        emailVerified: userRecord.emailVerified || false,
-        ...(sessionToken && { sessionToken }),
-      });
+      console.error('createCustomToken on signup:', tokenErr?.message || tokenErr);
     }
+
+    return res.status(201).json({
+      success: true,
+      uid,
+      email: emailNorm,
+      displayName: name.trim(),
+      emailVerified: userRecord.emailVerified || false,
+      ...(customToken && { token: customToken }),
+      ...(sessionToken && { sessionToken }),
+    });
   } catch (error) {
     console.error('Signup error:', error);
 
@@ -460,32 +449,41 @@ export async function login(req, res) {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    // Get user by email to check if exists
-    const userRecord = await auth.getUserByEmail(cleanEmail);
-    const uid = userRecord.uid;
-
-    // Note: email verification requirement removed — allow login regardless of emailVerified
-
-    // Fetch user metadata from Firestore
-    const userDoc = await db.collection('users').doc(uid).get();
-    const userData = userDoc.exists ? userDoc.data() : {};
-
-    // Creator privileges only if approved by admin (DB is source of truth)
+    let uid;
     try {
-      const { creator, creatorStatus: dbCreatorStatus } = await getUserCreatorStatus(uid);
-      userData.creator = !!creator;
-      userData.creatorStatus = dbCreatorStatus || 'none';
-    } catch (e) {
-      userData.creator = false;
-      userData.creatorStatus = 'none';
+      const verified = await verifyFirebasePassword(cleanEmail, password);
+      uid = verified.localId;
+    } catch (verifyErr) {
+      if (verifyErr.code === 'config') {
+        return res.status(503).json({
+          success: false,
+          message: 'Server misconfigured: set FIREBASE_WEB_API_KEY (same Web API key as the frontend).',
+        });
+      }
+      if (verifyErr.code === 'auth/invalid-credential') {
+        return res.status(401).json({ success: false, message: verifyErr.message || 'Invalid email or password.' });
+      }
+      if (verifyErr.code === 'auth/too-many-requests') {
+        return res.status(429).json({ success: false, message: verifyErr.message || 'Too many attempts.' });
+      }
+      return res.status(401).json({ success: false, message: verifyErr.message || 'Login failed.' });
     }
 
-    // Return a custom token so the frontend can sign in with Firebase client and get idToken for apply-creator etc.
+    const [userRecord, userDoc, creatorPack] = await Promise.all([
+      auth.getUser(uid),
+      db.collection('users').doc(uid).get(),
+      getUserCreatorStatus(uid),
+    ]);
+
+    const userData = userDoc.exists ? userDoc.data() : {};
+    userData.creator = !!creatorPack.creator;
+    userData.creatorStatus = creatorPack.creatorStatus || 'none';
+
     let token;
     try {
       token = await auth.createCustomToken(uid);
     } catch (tokenErr) {
-      console.warn('Login: could not create custom token', tokenErr?.message || tokenErr);
+      console.warn('Login: custom token failed', tokenErr?.message || tokenErr);
     }
 
     const sessionToken = mintSessionToken(uid, cleanEmail);
@@ -495,7 +493,7 @@ export async function login(req, res) {
       uid,
       email: cleanEmail,
       displayName: userRecord.displayName || userData.name || cleanEmail.split('@')[0],
-      emailVerified: true,
+      emailVerified: !!userRecord.emailVerified,
       ...(token && { token }),
       ...(sessionToken && { sessionToken }),
       userData: {
@@ -527,61 +525,53 @@ export async function google(req, res) {
 
     // Check if user exists in Firebase Auth; if not, create
     let userRecord;
-    let createdNew = false;
     try {
       userRecord = await auth.getUserByEmail(cleanEmail);
     } catch (err) {
       if (err.code === 'auth/user-not-found') {
-        // Create new user via Google
         userRecord = await auth.createUser({
           email: cleanEmail,
           displayName: name,
           photoURL: photoURL || undefined,
         });
-        createdNew = true;
       } else {
         throw err;
       }
     }
 
     const uid = userRecord.uid;
-    if (createdNew) console.log(`Created new Firebase Auth user via Google: uid=${uid} email=${cleanEmail}`);
-    else console.log(`Google sign-in for existing Firebase Auth user: uid=${uid} email=${cleanEmail}`);
 
-    // Create or update user in Firestore (Google users auto-verified)
-    await db.collection('users').doc(uid).set({
-      uid,
-      name,
-      email: cleanEmail,
-      displayName: name,
-      emailVerified: true,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      creatorStatus: 'none',
-      avatar: photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${cleanEmail}`,
-      followers: 0,
-      following: 0,
-      googleSignIn: true,
-    }, { merge: true });
+    await db.collection('users').doc(uid).set(
+      {
+        uid,
+        name,
+        email: cleanEmail,
+        displayName: name,
+        emailVerified: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        creatorStatus: 'none',
+        avatar: photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${cleanEmail}`,
+        followers: 0,
+        following: 0,
+        googleSignIn: true,
+      },
+      { merge: true }
+    );
 
-    console.log(`Upserted Firestore user for Google sign-in: uid=${uid}`);
-    const userDoc = await db.collection('users').doc(uid).get();
+    const [userDoc, creatorStatusRow, googleCustomToken] = await Promise.all([
+      db.collection('users').doc(uid).get(),
+      getUserCreatorStatus(uid),
+      auth.createCustomToken(uid).catch((e) => {
+        console.warn('Google login: custom token failed', e?.message || e);
+        return null;
+      }),
+    ]);
+
     const userData = userDoc.exists ? userDoc.data() : {};
-    try {
-      const { creator, creatorStatus: dbCreatorStatus } = await getUserCreatorStatus(uid);
-      userData.creator = !!creator;
-      userData.creatorStatus = dbCreatorStatus || 'none';
-    } catch (e) {
-      userData.creator = false;
-      userData.creatorStatus = 'none';
-    }
+    userData.creator = !!creatorStatusRow.creator;
+    userData.creatorStatus = creatorStatusRow.creatorStatus || 'none';
 
-    let googleCustomToken;
-    try {
-      googleCustomToken = await auth.createCustomToken(uid);
-    } catch (e) {
-      console.warn('Google login: custom token failed', e?.message || e);
-    }
     const sessionToken = mintSessionToken(uid, cleanEmail);
 
     return res.status(200).json({

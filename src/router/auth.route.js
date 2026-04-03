@@ -1,14 +1,17 @@
 import express from 'express';
 import multer from 'multer';
 import * as authController from '../controller/Auth.Controller.js';
+import { authRouteLimiter, authBurstLimiter } from '../middleware/authRateLimit.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
 
-router.post('/signup', authController.signup);
-router.post('/resend-verification', authController.resendVerification);
-router.post('/login', authController.login);
-router.post('/google', authController.google);
+const limitAuth = [authBurstLimiter, authRouteLimiter];
+
+router.post('/signup', ...limitAuth, authController.signup);
+router.post('/resend-verification', ...limitAuth, authController.resendVerification);
+router.post('/login', ...limitAuth, authController.login);
+router.post('/google', ...limitAuth, authController.google);
 router.post('/verify-email', authController.verifyEmail);
 router.post('/age-consent', authController.submitAgeConsent);
 

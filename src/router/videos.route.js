@@ -9,7 +9,7 @@ import * as trending from '../controller/trending.controller.js';
 import * as homeFeed from '../controller/homeFeed.controller.js';
 import * as todaysSelection from '../controller/todaysSelection.controller.js';
 import * as streamCtrl from '../controller/stream.controller.js';
-import { requireAuth } from '../middleware/authFirebase.js';
+import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
@@ -54,8 +54,11 @@ router.use('/tiktok', tiktokVideoRouter);
 
 // GET /api/videos/public — public feed (only isLive === true)
 router.get('/public', videoPublish.getPublicVideos);
-// GET /api/videos/public/:videoId
-router.get('/public/:videoId', videoPublish.getVideoById);
+// GET /api/videos/public/:videoId (Bearer optional: owners can load drafts)
+router.get('/public/:videoId', optionalAuth, videoPublish.getVideoById);
+router.delete('/public/:videoId', requireAuth, videoPublish.deleteVideo);
+router.patch('/public/:videoId', requireAuth, videoPublish.updateVideo);
+router.patch('/public/:videoId/draft', requireAuth, videoPublish.setVideoDraft);
 // GET /api/videos/public/:videoId/comments
 router.get('/public/:videoId/comments', videoPublish.getComments);
 // POST /api/videos/public/:videoId/like

@@ -5,6 +5,10 @@ function supabaseConfigured() {
   return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 }
 
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
+}
+
 /** Quick check: is Supabase reachable right now? */
 async function isSupabaseReachable() { 
   if (!supabaseConfigured()) return false;
@@ -152,10 +156,12 @@ async function insertMedia(metadata) {
 
 async function getPublicProfile(userId) {
   if (!userId) return null;
-  if (supabaseConfigured()) {
+  const rawId = String(userId).trim();
+  // Supabase users.id is UUID in this project; Firebase UIDs should go to RTDB fallback.
+  if (supabaseConfigured() && isUuidLike(rawId)) {
     try {
       // Select only columns that typically exist (followers may not exist; return 0)
-      const { data, error } = await supabase.from('users').select('id, username').eq('id', userId).maybeSingle();
+      const { data, error } = await supabase.from('users').select('id, username').eq('id', rawId).maybeSingle();
       if (error) throw error;
       if (data) return { id: data.id, displayName: data.username || data.id, followers: 0 };
       return null;
@@ -164,10 +170,10 @@ async function getPublicProfile(userId) {
     }
   }
   try {
-    const snap = await rtdb.ref(`users/${userId}`).once('value');
+    const snap = await rtdb.ref(`users/${rawId}`).once('value');
     const val = snap.val();
     if (!val) return null;
-    return { id: userId, displayName: val.username || val.displayName || userId, followers: Number(val.followers) || 0 };
+    return { id: rawId, displayName: val.username || val.displayName || rawId, followers: Number(val.followers) || 0 };
   } catch (err) {
     return null;
   }
