@@ -4,11 +4,44 @@
  */
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
-import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import crypto from 'crypto';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
+
+function parseSupabasePublicStoragePath(url) {
+  if (!url || typeof url !== 'string' || !url.includes('/storage/v1/object/public/')) return null;
+  try {
+    const u = new URL(url);
+    const m = u.pathname.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (!m) return null;
+    const path = decodeURIComponent(m[2].replace(/\+/g, ' '));
+    return { bucket: m[1], path };
+  } catch {
+    return null;
+  }
+}
+
+async function removeSupabaseObjectsForUrls(urls) {
+  if (!isSupabaseConfigured() || !supabase || !Array.isArray(urls)) return;
+  const seen = new Set();
+  for (const url of urls) {
+    const parsed = parseSupabasePublicStoragePath(url);
+    if (!parsed) continue;
+    const key = `${parsed.bucket}:${parsed.path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const { error } = await supabase.storage.from(parsed.bucket).remove([parsed.path]);
+      if (error && !/not\s*found|No such file/i.test(String(error.message || ''))) {
+        console.warn('Storage remove:', parsed.bucket, parsed.path, error.message || error);
+      }
+    } catch (err) {
+      console.warn('Storage remove failed:', err?.message || err);
+    }
+  }
+}
 
 function videosRef() {
   const rtdb = getFirebaseRtdb();
@@ -180,9 +213,15 @@ export async function deleteVideo(req, res) {
     const video = snap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
     if (video.userId !== uid) return res.status(403).json({ success: false, message: 'Forbidden' });
+    const storageUrls = [video.videoUrl, video.streamUrl, video.thumbnailUrl].filter(
+      (u) => typeof u === 'string' && u.includes('/storage/v1/object/public/')
+    );
+    await removeSupabaseObjectsForUrls(storageUrls);
     await videosRef().child(videoId).remove();
-    await likesRef().child(videoId).remove();
-    await commentsRef().child(videoId).remove();
+    const lr = likesRef();
+    const cr = commentsRef();
+    if (lr) await lr.child(videoId).remove();
+    if (cr) await cr.child(videoId).remove();
     return res.json({ success: true });
   } catch (err) {
     console.error('videoPublish.deleteVideo error', err?.message || err);
@@ -201,6 +240,8 @@ export async function updateVideo(req, res) {
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
     const titleRaw = req.body?.title;
     const descriptionRaw = req.body?.description;
+    const categoryRaw = req.body?.category;
+    const tagsRaw = req.body?.tags;
     const snap = await videosRef().child(videoId).once('value');
     const video = snap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -213,6 +254,12 @@ export async function updateVideo(req, res) {
     }
     if (descriptionRaw !== undefined) {
       updates.description = String(descriptionRaw).trim();
+    }
+    if (categoryRaw !== undefined) {
+      updates.category = String(categoryRaw).trim().slice(0, 80);
+    }
+    if (tagsRaw !== undefined) {
+      updates.tags = String(tagsRaw).trim().slice(0, 500);
     }
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, message: 'No updates provided' });
