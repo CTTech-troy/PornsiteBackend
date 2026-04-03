@@ -9,10 +9,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200
 const limitAuth = [authBurstLimiter, authRouteLimiter];
 
 router.post('/signup', ...limitAuth, authController.signup);
-router.post('/resend-verification', ...limitAuth, authController.resendVerification);
 router.post('/login', ...limitAuth, authController.login);
 router.post('/google', ...limitAuth, authController.google);
-router.post('/verify-email', authController.verifyEmail);
 router.post('/age-consent', authController.submitAgeConsent);
 
 // Creator application endpoints

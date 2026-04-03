@@ -23,9 +23,6 @@ export async function signup(req, res) {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
     }
 
-    // Create user in Firebase Auth only. Do NOT create Firestore or Supabase records yet.
-    // Age consent and further verification must be completed via `/age-consent` before
-    // the app-level user records are created.
     const userRecord = await auth.createUser({
       email: email.trim().toLowerCase(),
       password,
@@ -50,7 +47,6 @@ export async function signup(req, res) {
         name: name.trim(),
         email: emailNorm,
         displayName: name.trim(),
-        emailVerified: userRecord.emailVerified || false,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         creatorStatus: 'none',
@@ -79,7 +75,6 @@ export async function signup(req, res) {
       uid,
       email: emailNorm,
       displayName: name.trim(),
-      emailVerified: userRecord.emailVerified || false,
       ...(customToken && { token: customToken }),
       ...(sessionToken && { sessionToken }),
     });
@@ -96,7 +91,7 @@ export async function signup(req, res) {
   }
 }
 
-// Submit age consent (creates app user records after verifying ID token)
+// Submit age consent (creates app user records after validating ID token)
 export async function submitAgeConsent(req, res) {
   try {
     const authHeader = req.headers.authorization;
@@ -138,7 +133,6 @@ export async function submitAgeConsent(req, res) {
       name: displayName,
       email: email,
       displayName: displayName,
-      emailVerified: userRecord.emailVerified || false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       creatorStatus: 'none',
@@ -407,35 +401,6 @@ export async function uploadMedia(req, res) {
   }
 }
 
-export async function resendVerification(req, res) {
-  try {
-    const { email } = req.body;
-    if (!email || !email.trim()) return res.status(400).json({ success: false, message: 'Email is required.' });
-
-    const cleanEmail = email.trim().toLowerCase();
-    // Ensure user exists
-    let userRecord;
-    try {
-      userRecord = await auth.getUserByEmail(cleanEmail);
-    } catch (err) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    if (userRecord.emailVerified) {
-      return res.status(400).json({ success: false, message: 'Email already verified.' });
-    }
-
-    const verificationLink = await auth.generateEmailVerificationLink(cleanEmail);
-    console.log(`Verification link (no-mailer) for ${cleanEmail}: ${verificationLink}`);
-    const resp = { success: true, message: 'Email sending is disabled on this server; verification link generated.' };
-    if (process.env.NODE_ENV !== 'production') resp.verificationLink = verificationLink;
-    return res.status(200).json(resp);
-  } catch (error) {
-    console.error('Resend verification error:', error);
-    return res.status(500).json({ success: false, message: error.message || 'Failed to resend verification.' });
-  }
-}
-
 export async function login(req, res) {
   try {
     const { email, password } = req.body;
@@ -493,7 +458,6 @@ export async function login(req, res) {
       uid,
       email: cleanEmail,
       displayName: userRecord.displayName || userData.name || cleanEmail.split('@')[0],
-      emailVerified: !!userRecord.emailVerified,
       ...(token && { token }),
       ...(sessionToken && { sessionToken }),
       userData: {
@@ -547,7 +511,6 @@ export async function google(req, res) {
         name,
         email: cleanEmail,
         displayName: name,
-        emailVerified: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         creatorStatus: 'none',
@@ -580,7 +543,6 @@ export async function google(req, res) {
       uid,
       email: cleanEmail,
       displayName: name,
-      emailVerified: true,
       ...(googleCustomToken && { token: googleCustomToken }),
       ...(sessionToken && { sessionToken }),
       userData,
@@ -588,33 +550,5 @@ export async function google(req, res) {
   } catch (error) {
     console.error('Google login error:', error);
     return res.status(400).json({ success: false, message: error.message || 'Google login failed.' });
-  }
-}
-
-
-export async function verifyEmail(req, res) {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, message: 'Missing or invalid token' });
-    }
-
-    const idToken = authHeader.slice(7);
-    const decodedToken = await auth.verifyIdToken(idToken);
-    const uid = decodedToken.uid;
-
-    const user = await auth.getUser(uid);
-
-    // Generate a verification link and return it (no email sending on server)
-    const verificationLink = await auth.generateEmailVerificationLink(user.email);
-    console.log(`Verification link (no-mailer) for ${user.email}: ${verificationLink}`);
-    return res.status(200).json({
-      success: true,
-      message: 'Verification link generated (email sending disabled on server)',
-      verificationLink,
-    });
-  } catch (error) {
-    console.error('Verify email error:', error);
-    return res.status(400).json({ success: false, message: error.message });
   }
 }
