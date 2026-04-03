@@ -1,25 +1,30 @@
 import { auth, db, rtdb } from '../config/firebase.js';
-import { supabase } from '../config/supabase.js';
+import { supabase, isConfigured } from '../config/supabase.js';
 import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
 import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
 import { upsertCreator } from './creator.controller.js';
 import fetch from 'node-fetch';
 import { mintSessionToken, resolveUidFromBearerToken } from '../utils/sessionToken.js';
-import { verifyFirebasePassword } from '../utils/firebasePasswordVerify.js';
+import { createLoginTimer, createSignupTimer } from '../utils/authLoginTiming.js';
+import { recordAuth } from '../utils/authMetrics.js';
+import { signInWithPassword as firebaseRestSignIn } from '../services/firebaseAuthRestService.js';
 
 export async function signup(req, res) {
+  const mark = createSignupTimer();
   try {
     const { name, email, password } = req.body;
 
-    // Validate input
     if (!name || !name.trim()) {
+      recordAuth('signupFail');
       return res.status(400).json({ success: false, message: 'Name is required.' });
     }
     if (!email || !email.trim()) {
+      recordAuth('signupFail');
       return res.status(400).json({ success: false, message: 'Email is required.' });
     }
     if (!password || password.length < 8) {
+      recordAuth('signupFail');
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
     }
 
@@ -28,6 +33,7 @@ export async function signup(req, res) {
       password,
       displayName: name.trim(),
     });
+    mark('createUser(Firebase)');
 
     const uid = userRecord.uid;
     const emailNorm = email.trim().toLowerCase();
@@ -42,18 +48,21 @@ export async function signup(req, res) {
     void db
       .collection('users')
       .doc(uid)
-      .set({
-        uid,
-        name: name.trim(),
-        email: emailNorm,
-        displayName: name.trim(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        creatorStatus: 'none',
-        avatar: userRecord.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}`,
-        followers: 0,
-        following: 0,
-      })
+      .set(
+        {
+          uid,
+          name: name.trim(),
+          email: emailNorm,
+          displayName: name.trim(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          creatorStatus: 'none',
+          avatar: userRecord.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}`,
+          followers: 0,
+          following: 0,
+        },
+        { merge: true }
+      )
       .catch((dbErr) => {
         console.error('Firestore user stub on signup:', dbErr?.message || dbErr);
       });
@@ -69,7 +78,9 @@ export async function signup(req, res) {
     } catch (tokenErr) {
       console.error('createCustomToken on signup:', tokenErr?.message || tokenErr);
     }
+    mark('session+customToken');
 
+    recordAuth('signupOk');
     return res.status(201).json({
       success: true,
       uid,
@@ -80,8 +91,8 @@ export async function signup(req, res) {
     });
   } catch (error) {
     console.error('Signup error:', error);
+    recordAuth('signupFail');
 
-    // Handle common Firebase Auth errors
     let message = error.message || 'Signup failed.';
     if (error.code === 'auth/email-already-exists') message = 'Email already registered.';
     if (error.code === 'auth/invalid-email') message = 'Invalid email format.';
@@ -213,37 +224,40 @@ export async function applyCreator(req, res) {
     try {
       const files = req.files || [];
       const bucket = process.env.SUPABASE_CREATOR_BUCKET || process.env.SUPABASE_IMAGE_BUCKET || 'creator_applications';
-      for (const file of files) {
-        try {
-          const filename = `${uid}/${Date.now()}_${(file.originalname || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-          const { data, error } = await supabase.storage.from(bucket).upload(filename, file.buffer, { contentType: file.mimetype });
-          if (error) {
-            console.warn('Supabase upload error for creator attachment:', error.message || error);
-            // continue without failing entire request
-            continue;
-          }
-          const publicUrl = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
-          attachments.push({ name: file.originalname, path: data.path, url: publicUrl, contentType: file.mimetype });
-
-          // persist a media row to fallback DB for discovery
+      if (isConfigured() && supabase) {
+        for (const file of files) {
           try {
-            const meta = {
-              id: uuidv4(),
-              user_id: uid,
-              bucket,
-              path: data.path,
-              url: publicUrl,
-              type: 'application_attachment',
-              title: file.originalname || 'attachment',
-              created_at: new Date().toISOString(),
-            };
-            await insertMedia(meta);
-          } catch (metaErr) {
-            console.warn('Failed to persist attachment metadata:', metaErr && metaErr.message ? metaErr.message : metaErr);
+            const filename = `${uid}/${Date.now()}_${(file.originalname || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+            const { data, error } = await supabase.storage.from(bucket).upload(filename, file.buffer, { contentType: file.mimetype });
+            if (error) {
+              console.warn('Supabase upload error for creator attachment:', error.message || error);
+              continue;
+            }
+            const baseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+            const publicUrl = `${baseUrl}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
+            attachments.push({ name: file.originalname, path: data.path, url: publicUrl, contentType: file.mimetype });
+
+            try {
+              const meta = {
+                id: uuidv4(),
+                user_id: uid,
+                bucket,
+                path: data.path,
+                url: publicUrl,
+                type: 'application_attachment',
+                title: file.originalname || 'attachment',
+                created_at: new Date().toISOString(),
+              };
+              await insertMedia(meta);
+            } catch (metaErr) {
+              console.warn('Failed to persist attachment metadata:', metaErr && metaErr.message ? metaErr.message : metaErr);
+            }
+          } catch (upErr) {
+            console.warn('Failed to upload a creator attachment (skipping):', upErr && upErr.message ? upErr.message : upErr);
           }
-        } catch (upErr) {
-          console.warn('Failed to upload a creator attachment (skipping):', upErr && upErr.message ? upErr.message : upErr);
         }
+      } else if (files.length > 0) {
+        console.warn('Creator application file attachments skipped: Supabase storage not configured');
       }
     } catch (fileErr) {
       console.warn('Error processing attached files:', fileErr && fileErr.message ? fileErr.message : fileErr);
@@ -367,6 +381,9 @@ export async function uploadMedia(req, res) {
     const { uid, type = 'video', title = '' } = req.body; // uid should be provided by client
     if (!file) return res.status(400).json({ success: false, message: 'File required' });
     if (!uid) return res.status(400).json({ success: false, message: 'uid required' });
+    if (!isConfigured() || !supabase) {
+      return res.status(503).json({ success: false, message: 'Storage not configured' });
+    }
 
     const bucket = type === 'image' ? (process.env.SUPABASE_IMAGE_BUCKET || 'images') : (process.env.SUPABASE_VIDEO_BUCKET || 'videos');
     const filename = `${uid}/${Date.now()}_${file.originalname}`;
@@ -374,7 +391,7 @@ export async function uploadMedia(req, res) {
     const { data, error } = await supabase.storage.from(bucket).upload(filename, file.buffer, { contentType: file.mimetype });
     if (error) throw error;
 
-    const publicUrl = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
+    const publicUrl = `${(process.env.SUPABASE_URL || '').replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
 
     // store media metadata in Supabase or RTDB fallback
     try {
@@ -401,78 +418,157 @@ export async function uploadMedia(req, res) {
   }
 }
 
-export async function login(req, res) {
+export async function me(req, res) {
   try {
-    const { email, password } = req.body;
-
-    if (!email || !email.trim()) {
-      return res.status(400).json({ success: false, message: 'Email is required.' });
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
-    if (!password) {
-      return res.status(400).json({ success: false, message: 'Password is required.' });
+    const bearer = authHeader.slice(7);
+    const uid = await resolveUidFromBearerToken(bearer);
+    if (!uid) {
+      return res.status(401).json({ success: false, message: 'Invalid or expired session' });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
+    const [userRecord, creatorPack] = await Promise.all([auth.getUser(uid), getUserCreatorStatus(uid)]);
 
-    let uid;
+    const cleanEmail = (userRecord.email || '').trim().toLowerCase();
+    const displayName =
+      userRecord.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+
+    return res.status(200).json({
+      success: true,
+      uid,
+      email: cleanEmail,
+      displayName,
+      userData: {
+        email: cleanEmail,
+        name: displayName,
+        avatar: userRecord.photoURL || null,
+        creator: !!creatorPack.creator,
+        creatorStatus: creatorPack.creatorStatus || 'none',
+      },
+    });
+  } catch (error) {
+    console.error('me error:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Failed to load profile' });
+  }
+}
+
+export async function login(req, res) {
+  const mark = createLoginTimer();
+  try {
+    const emailRaw = req.body?.email;
+    const passwordRaw = req.body?.password;
+    let idToken = req.body?.idToken;
+
+    if (emailRaw != null && passwordRaw != null) {
+      const email = String(emailRaw).trim();
+      const password = String(passwordRaw);
+      if (!email || !password) {
+        recordAuth('loginFail');
+        return res.status(400).json({ success: false, message: 'Email and password are required.' });
+      }
+      try {
+        const rest = await firebaseRestSignIn(email, password);
+        idToken = rest.idToken;
+        mark('firebaseRestSignIn');
+      } catch (restErr) {
+        recordAuth('loginFail');
+        const code = restErr?.code || '';
+        if (restErr?.code === 'VALIDATION') {
+          return res.status(400).json({ success: false, message: restErr.message || 'Invalid input.' });
+        }
+        if (restErr?.code === 'AUTH_SERVICE_CONFIG') {
+          console.error('[login] FIREBASE_WEB_API_KEY missing');
+          return res.status(503).json({ success: false, message: 'Sign-in is temporarily unavailable.' });
+        }
+        const msg = restErr?.message || 'Invalid email or password.';
+        const lower = String(code).toLowerCase();
+        const status =
+          lower.includes('USER_DISABLED') || lower.includes('disabled') ? 403 : 401;
+        return res.status(status).json({ success: false, message: msg });
+      }
+    }
+
+    if (!idToken || typeof idToken !== 'string') {
+      recordAuth('loginFail');
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required.',
+      });
+    }
+
+    let decoded;
     try {
-      const verified = await verifyFirebasePassword(cleanEmail, password);
-      uid = verified.localId;
-    } catch (verifyErr) {
-      if (verifyErr.code === 'config') {
-        return res.status(503).json({
-          success: false,
-          message: 'Server misconfigured: set FIREBASE_WEB_API_KEY (same Web API key as the frontend).',
-        });
-      }
-      if (verifyErr.code === 'auth/invalid-credential') {
-        return res.status(401).json({ success: false, message: verifyErr.message || 'Invalid email or password.' });
-      }
-      if (verifyErr.code === 'auth/too-many-requests') {
-        return res.status(429).json({ success: false, message: verifyErr.message || 'Too many attempts.' });
-      }
-      return res.status(401).json({ success: false, message: verifyErr.message || 'Login failed.' });
+      decoded = await auth.verifyIdToken(idToken);
+    } catch {
+      recordAuth('loginFail');
+      return res.status(401).json({ success: false, message: 'Invalid or expired session. Try again.' });
+    }
+    mark('verifyIdToken');
+
+    const uid = decoded.uid;
+    let cleanEmail = (decoded.email || '').trim().toLowerCase();
+    let userRecord;
+
+    if (!cleanEmail) {
+      userRecord = await auth.getUser(uid);
+      cleanEmail = (userRecord.email || '').trim().toLowerCase();
+      mark('getUser(email only)');
+      const creatorPack = await getUserCreatorStatus(uid);
+      mark('getUserCreatorStatus');
+      const sessionToken = mintSessionToken(uid, cleanEmail);
+      mark('mintSessionToken');
+      const displayName =
+        userRecord.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+      recordAuth('loginOk');
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        uid,
+        email: cleanEmail,
+        displayName,
+        ...(sessionToken && { sessionToken }),
+        userData: {
+          email: cleanEmail,
+          name: displayName,
+          avatar: userRecord.photoURL || null,
+          creator: !!creatorPack.creator,
+          creatorStatus: creatorPack.creatorStatus || 'none',
+        },
+      });
     }
 
-    const [userRecord, userDoc, creatorPack] = await Promise.all([
-      auth.getUser(uid),
-      db.collection('users').doc(uid).get(),
-      getUserCreatorStatus(uid),
-    ]);
-
-    const userData = userDoc.exists ? userDoc.data() : {};
-    userData.creator = !!creatorPack.creator;
-    userData.creatorStatus = creatorPack.creatorStatus || 'none';
-
-    let token;
-    try {
-      token = await auth.createCustomToken(uid);
-    } catch (tokenErr) {
-      console.warn('Login: custom token failed', tokenErr?.message || tokenErr);
-    }
+    const [ur, creatorPack] = await Promise.all([auth.getUser(uid), getUserCreatorStatus(uid)]);
+    userRecord = ur;
+    mark('getUser+getUserCreatorStatus(parallel)');
 
     const sessionToken = mintSessionToken(uid, cleanEmail);
+    mark('mintSessionToken');
+
+    const displayName =
+      userRecord.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+    recordAuth('loginOk');
     return res.status(200).json({
       success: true,
       message: 'Login successful',
       uid,
       email: cleanEmail,
-      displayName: userRecord.displayName || userData.name || cleanEmail.split('@')[0],
-      ...(token && { token }),
+      displayName,
       ...(sessionToken && { sessionToken }),
       userData: {
-        ...userData,
         email: cleanEmail,
+        name: displayName,
+        avatar: userRecord.photoURL || null,
+        creator: !!creatorPack.creator,
+        creatorStatus: creatorPack.creatorStatus || 'none',
       },
     });
   } catch (error) {
     console.error('Login error:', error);
-
-    let message = error.message || 'Login failed.';
-    if (error.code === 'auth/user-not-found') message = 'User not found.';
-    if (error.code === 'auth/invalid-email') message = 'Invalid email format.';
-
-    return res.status(400).json({ success: false, message });
+    recordAuth('loginFail');
+    return res.status(400).json({ success: false, message: error.message || 'Login failed.' });
   }
 }
 

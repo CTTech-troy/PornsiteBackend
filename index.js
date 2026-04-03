@@ -13,10 +13,11 @@ import postsRouter from './src/router/posts.route.js';
 import pornhubRouter from './src/router/pornhubRoutes.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
-import { supabase, ensureBuckets } from './src/config/supabase.js';
+import { ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 import { pingServices } from './src/utils/servicePing.js';
+import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
 
 dotenv.config();
 
@@ -57,6 +58,13 @@ app.get('/api/health/services', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err?.message || String(err) });
   }
+});
+
+app.get('/api/health/auth-metrics', (req, res) => {
+  if (process.env.AUTH_METRICS !== '1' && process.env.AUTH_METRICS !== 'true') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  res.json(getAuthMetricsSnapshot());
 });
 
 // Auth routes

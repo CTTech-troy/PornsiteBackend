@@ -1,9 +1,14 @@
+import path from 'path';
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Initialize Firebase Admin SDK using service account key from environment
+const gacRaw = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+if (gacRaw && !path.isAbsolute(gacRaw)) {
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = path.resolve(process.cwd(), gacRaw);
+}
+
 const serviceAccount = (() => {
   try {
     return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}');
@@ -12,6 +17,15 @@ const serviceAccount = (() => {
     return {};
   }
 })();
+
+const useApplicationDefault = () => {
+  const p = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+  return p.length > 0;
+};
+
+const hasInlineServiceAccount = Boolean(
+  serviceAccount && serviceAccount.client_email && serviceAccount.private_key
+);
 
 let firebaseInitialized = false;
 let auth = null;
@@ -31,22 +45,32 @@ function makeNotInitProxy(name, errMessage) {
 }
 
 try {
-  const hasCred = Boolean(serviceAccount && serviceAccount.client_email && serviceAccount.private_key);
   const hasDbUrl = Boolean(process.env.FIREBASE_DATABASE_URL);
-  if (!hasCred || !hasDbUrl) {
-    console.warn('Skipping Firebase initialization: missing service account or FIREBASE_DATABASE_URL');
+  const canInit = hasDbUrl && (hasInlineServiceAccount || useApplicationDefault());
+  if (!hasDbUrl) {
+    console.warn('Skipping Firebase initialization: missing FIREBASE_DATABASE_URL');
+  } else if (!canInit) {
+    console.warn(
+      'Skipping Firebase initialization: set FIREBASE_SERVICE_ACCOUNT_KEY (JSON string) or GOOGLE_APPLICATION_CREDENTIALS (path to service account .json)'
+    );
   } else {
     try {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: process.env.FIREBASE_DATABASE_URL,
-      });
+      if (hasInlineServiceAccount) {
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          databaseURL: process.env.FIREBASE_DATABASE_URL,
+        });
+      } else {
+        admin.initializeApp({
+          credential: admin.credential.applicationDefault(),
+          databaseURL: process.env.FIREBASE_DATABASE_URL,
+        });
+      }
       db = admin.firestore();
       auth = admin.auth();
       rtdb = admin.database();
       firebaseInitialized = true;
     } catch (initErr) {
-      // Network or credential errors (e.g., ETIMEDOUT) can happen here; log and continue with proxies
       console.warn('Firebase Admin initialization failed:', initErr && initErr.message ? initErr.message : initErr);
     }
   }

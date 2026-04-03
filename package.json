@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "exit-all-lives": "node scripts/exit-all-lives.js"
+    "exit-all-lives": "node scripts/exit-all-lives.js",
+    "stress-auth": "node scripts/stress-auth.mjs"
   },
   "keywords": [],
   "author": "",
@@ -31,6 +32,8 @@
     "morgan": "^1.10.1",
     "multer": "^1.4.5-lts.1",
     "node-fetch": "^2.7.0",
+    "rate-limit-redis": "^4.3.1",
+    "redis": "^5.11.0",
     "socket.io": "^4.8.3",
     "xss-clean": "^0.1.4"
   },

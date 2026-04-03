@@ -106,7 +106,7 @@ async function updateInCache(liveId, updates) {
  * Sync all cached lives to Supabase: insert row, run payout if ended, then remove from RTDB.
  */
 async function syncCacheToSupabase() {
-  if (!isSupabaseConfigured()) return { synced: 0, errors: [] };
+  if (!isSupabaseConfigured() || !supabase) return { synced: 0, errors: [] };
   const ref = cacheRef();
   if (!ref) return { synced: 0, errors: [] };
   let synced = 0;

@@ -14,7 +14,7 @@ const ADS_TABLE = 'video_ads';
 const AD_IMPRESSIONS_TABLE = 'video_ad_impressions';
 
 function ensureSupabase() {
-  if (!isSupabaseConfigured()) throw new Error('Supabase not configured');
+  if (!isSupabaseConfigured() || !supabase) throw new Error('Supabase not configured');
 }
 
 /**

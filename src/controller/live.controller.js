@@ -158,7 +158,7 @@ async function endLive(liveId) {
     return { total, companyShare, hostShare };
   }
 
-  if (!isConfigured()) throw new Error('Supabase not configured');
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const hostId = live.host_id;
   try {
     // Ensure wallet exists and credit host share (no upsert — wallets may not have UNIQUE on owner_id)
@@ -252,6 +252,7 @@ async function pauseLive(liveId) {
     await liveCache.updateInCache(liveId, { status: 'paused' });
     return { id: liveId, status: 'paused' };
   }
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data, error } = await supabase.from('lives').update({ status: 'paused' }).eq('id', liveId).select().maybeSingle();
   if (error) throw error;
   return data;
@@ -264,6 +265,7 @@ async function resumeLive(liveId) {
     await liveCache.updateInCache(liveId, { status: 'live' });
     return { id: liveId, status: 'live' };
   }
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data, error } = await supabase.from('lives').update({ status: 'live' }).eq('id', liveId).select().maybeSingle();
   if (error) throw error;
   return data;
@@ -277,6 +279,7 @@ async function joinLive(liveId, userId) {
     await liveCache.updateInCache(liveId, { viewers_count: next });
     return { live_id: liveId, user_id: userId };
   }
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data: existing } = await supabase.from('live_viewers').select('*').eq('live_id', liveId).eq('user_id', userId).maybeSingle();
   if (existing && existing.is_active) return existing;
   if (existing && !existing.is_active) {
@@ -303,6 +306,7 @@ async function leaveLive(liveId, userId) {
     await liveCache.updateInCache(liveId, { viewers_count: next });
     return { live_id: liveId, user_id: userId };
   }
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data: existing } = await supabase.from('live_viewers').select('*').eq('live_id', liveId).eq('user_id', userId).maybeSingle();
   if (!existing || !existing.is_active) return null;
   const { data, error } = await supabase.from('live_viewers').update({ is_active: false, left_at: new Date().toISOString() }).eq('id', existing.id).select().maybeSingle();
@@ -321,6 +325,7 @@ async function likeLive(liveId) {
     await liveCache.updateInCache(liveId, { total_likes: next });
     return { id: liveId, total_likes: next };
   }
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data, error } = await supabase.from('lives').update({ total_likes: next }).eq('id', liveId).select().maybeSingle();
   if (error) throw error;
   return data;
@@ -330,6 +335,7 @@ async function commentLive(liveId, userId, message) {
   const live = await getLive(liveId, { includeSource: true });
   if (!live) throw new Error('Live not found');
   if (live._fromCache) return { live_id: liveId, user_id: userId, message };
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data, error } = await supabase.from('live_comments').insert([{ live_id: liveId, user_id: userId, message }]).select().maybeSingle();
   if (error) throw error;
   return data;
@@ -343,6 +349,7 @@ async function sendGift(liveId, senderId, giftType, amount) {
     await liveCache.updateInCache(liveId, { total_gifts_amount: next });
     return { live_id: liveId, sender_id: senderId, gift_type: giftType, amount };
   }
+  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
   const { data, error } = await supabase.from('live_gifts').insert([{ live_id: liveId, sender_id: senderId, gift_type: giftType, amount }]).select().maybeSingle();
   if (error) throw error;
   await supabase.from('lives').update({ total_gifts_amount: next }).eq('id', liveId);

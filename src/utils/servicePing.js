@@ -44,7 +44,7 @@ export async function pingFirebase() {
 }
 
 export async function pingSupabase() {
-  if (!isConfigured()) {
+  if (!isConfigured() || !supabase) {
     return {
       id: 'supabase',
       status: 'not_configured',
