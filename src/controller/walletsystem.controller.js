@@ -24,38 +24,66 @@ async function createTransaction(ownerId, type, amount, balanceAfter, meta = {})
   return data;
 }
 
+/**
+ * Atomically credit a wallet using the Postgres RPC function.
+ * The RPC uses SELECT ... FOR UPDATE to prevent race conditions.
+ */
 async function fundWallet(ownerId, amount, meta = {}) {
   if (!isConfigured()) throw new Error('Supabase not configured');
-  await createOrEnsureWallet(ownerId);
-  const { data: w } = await supabase.from('wallets').select('*').eq('owner_id', ownerId).maybeSingle();
-  const newBal = +(Number(w?.balance || 0) + Number(amount || 0)).toFixed(2);
-  const { data, error } = await supabase.from('wallets').update({ balance: newBal, updated_at: new Date().toISOString() }).eq('owner_id', ownerId).select().maybeSingle();
+  const amt = +Number(amount || 0).toFixed(2);
+  if (amt <= 0) throw new Error('Amount must be positive');
+
+  const { data: newBal, error } = await supabase.rpc('credit_wallet', {
+    p_owner_id: ownerId,
+    p_amount: amt,
+  });
   if (error) throw error;
-  await createTransaction(ownerId, 'credit', Number(amount), newBal, meta);
-  return data;
+
+  const balAfter = Number(newBal);
+  await createTransaction(ownerId, 'credit', amt, balAfter, meta);
+
+  return { owner_id: ownerId, balance: balAfter };
 }
 
+/**
+ * Atomically debit a wallet using the Postgres RPC function.
+ * The RPC checks balance and deducts in a single locked transaction,
+ * preventing double-spend / race conditions.
+ */
 async function debitWallet(ownerId, amount, meta = {}) {
   if (!isConfigured()) throw new Error('Supabase not configured');
-  const { data: w, error: wErr } = await supabase.from('wallets').select('*').eq('owner_id', ownerId).maybeSingle();
-  if (wErr) throw wErr;
-  const balance = Number(w?.balance || 0);
-  const amt = Number(amount || 0);
-  if (balance < amt) throw new Error('Insufficient balance');
-  const newBal = +(balance - amt).toFixed(2);
-  const { data, error } = await supabase.from('wallets').update({ balance: newBal, updated_at: new Date().toISOString() }).eq('owner_id', ownerId).select().maybeSingle();
-  if (error) throw error;
-  await createTransaction(ownerId, 'debit', amt, newBal, meta);
-  return data;
+  const amt = +Number(amount || 0).toFixed(2);
+  if (amt <= 0) throw new Error('Amount must be positive');
+
+  const { data: newBal, error } = await supabase.rpc('debit_wallet', {
+    p_owner_id: ownerId,
+    p_amount: amt,
+  });
+
+  if (error) {
+    // The Postgres function raises 'Insufficient balance' — surface it cleanly
+    if (error.message && /insufficient balance/i.test(error.message)) {
+      throw new Error('Insufficient balance');
+    }
+    if (error.message && /wallet not found/i.test(error.message)) {
+      throw new Error('Wallet not found');
+    }
+    throw error;
+  }
+
+  const balAfter = Number(newBal);
+  await createTransaction(ownerId, 'debit', amt, balAfter, meta);
+
+  return { owner_id: ownerId, balance: balAfter };
 }
 
 /**
  * Charge the sender for a gift and distribute payout to host and company.
  * This will:
- * - debit sender wallet
+ * - debit sender wallet (atomic)
  * - persist gift via live controller (via gift controller)
- * - credit host wallet with 70%
- * - credit company wallet with 30%
+ * - credit host wallet with 70% (atomic)
+ * - credit company wallet with 30% (atomic)
  */
 async function processGiftPayment({ liveId, senderId, giftType, quantity = 1 }) {
   if (!isConfigured()) throw new Error('Supabase not configured');
@@ -64,28 +92,29 @@ async function processGiftPayment({ liveId, senderId, giftType, quantity = 1 }) 
   const qty = Number(quantity) || 1;
   const totalAmount = +(gift.price * qty).toFixed(2);
 
-  // Debit sender
+  // Atomic debit — will throw if insufficient balance
   await debitWallet(senderId, totalAmount, { reason: 'gift_purchase', giftType, quantity: qty, liveId });
 
   // Persist gift to live_gifts and update live totals
-  // giftCtrl.processGift will call liveCtrl.sendGift internally
   const result = await giftCtrl.processGift({ liveId, senderId, giftType, quantity: qty });
 
   // Distribute payout immediately: host receives 70%, company 30%
   const { split } = result;
-  const hostShare = Number(split.hostShare || 0);
-  const companyShare = Number(split.companyShare || 0);
+  const hostShare = +Number(split.hostShare || 0).toFixed(2);
+  const companyShare = +Number(split.companyShare || 0).toFixed(2);
 
-  // Need to determine hostId for the live
+  // Determine hostId for the live
   const { data: live, error: liveErr } = await supabase.from('lives').select('host_id').eq('id', liveId).maybeSingle();
   if (liveErr) throw liveErr;
   const hostId = live?.host_id;
 
-  if (hostId) {
+  if (hostId && hostShare > 0) {
     await fundWallet(hostId, hostShare, { reason: 'gift_host_share', liveId, giftType, quantity: qty, from: senderId });
   }
   // credit company wallet
-  await fundWallet(COMPANY_WALLET_OWNER, companyShare, { reason: 'gift_company_share', liveId, giftType, quantity: qty, from: senderId });
+  if (companyShare > 0) {
+    await fundWallet(COMPANY_WALLET_OWNER, companyShare, { reason: 'gift_company_share', liveId, giftType, quantity: qty, from: senderId });
+  }
 
   return { result, hostShare, companyShare, totalAmount };
 }
@@ -95,13 +124,16 @@ async function processGiftPayment({ liveId, senderId, giftType, quantity = 1 }) 
  */
 async function withdrawPayout(ownerId, amount, meta = {}) {
   if (!isConfigured()) throw new Error('Supabase not configured');
-  // debit wallet and record a payout transaction
-  const debited = await debitWallet(ownerId, amount, { ...meta, reason: 'withdraw' });
+  const amt = +Number(amount || 0).toFixed(2);
+  if (amt <= 0) throw new Error('Amount must be positive');
+
+  // Atomic debit
+  const debited = await debitWallet(ownerId, amt, { ...meta, reason: 'withdraw' });
+
   // In production, integrate with payment processor to send funds externally.
-  // Here we simply record a 'payout' transaction entry
-  const { data: w } = await supabase.from('wallets').select('*').eq('owner_id', ownerId).maybeSingle();
-  await createTransaction(ownerId, 'payout', Number(amount), Number(w?.balance || 0), meta);
-  return { success: true, balance: Number(w?.balance || 0) };
+  // Here we record a 'payout' transaction entry
+  await createTransaction(ownerId, 'payout', amt, debited.balance, meta);
+  return { success: true, balance: debited.balance };
 }
 
 export {

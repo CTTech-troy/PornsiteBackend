@@ -6,7 +6,7 @@ import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 
 const uploadVideoWithThumb = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 200 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 }, // MED-04: Reduced to 50MB
 }).fields([
   { name: 'video', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 },

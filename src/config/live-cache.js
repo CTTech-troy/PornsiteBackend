@@ -137,24 +137,19 @@ async function syncCacheToSupabase() {
           const companyShare = +(total * 0.3).toFixed(2);
           const hostShare = +(total * 0.7).toFixed(2);
           const hostId = row.host_id;
-          const { error: walletErr } = await supabase.from('wallets').upsert({ owner_id: hostId }, { onConflict: 'owner_id' });
-          if (!walletErr) {
-            const { data: w2, error: w2err } = await supabase.from('wallets').select('balance').eq('owner_id', hostId).maybeSingle();
-            if (!w2err && w2) {
-              const newBal = Number(w2.balance || 0) + hostShare;
-              await supabase.from('wallets').update({ balance: newBal, updated_at: new Date().toISOString() }).eq('owner_id', hostId);
-            } else {
-              await supabase.from('wallets').insert([{ owner_id: hostId, balance: hostShare }]);
-            }
-            if (companyShare > 0) {
-              await supabase.from('transactions').insert([{
-                owner_id: 'company',
-                type: 'company_commission',
-                amount: companyShare,
-                balance_after: companyShare,
-                meta: { live_id: liveId, host_id: hostId }
-              }]);
-            }
+          // Use atomic RPC for wallet credit (consistent with SEC-03 fix)
+          if (hostShare > 0) {
+            await supabase.rpc('credit_wallet', { p_owner_id: hostId, p_amount: hostShare });
+          }
+          if (companyShare > 0) {
+            await supabase.rpc('credit_wallet', { p_owner_id: 'company', p_amount: companyShare });
+            await supabase.from('transactions').insert([{
+              owner_id: 'company',
+              type: 'company_commission',
+              amount: companyShare,
+              balance_after: companyShare,
+              meta: { live_id: liveId, host_id: hostId }
+            }]);
           }
         }
         await ref.child(liveId).remove();

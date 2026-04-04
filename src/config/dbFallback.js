@@ -284,7 +284,7 @@ async function syncRtdbToSupabase() {
   return { users: usersSynced, creator_applications: applicationsSynced, media: mediaSynced };
 }
 
-export { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia, getPublicProfile, incrementFollow, syncRtdbToSupabase, isSupabaseReachable };
+// Export aggregated at the bottom
 
 async function getMediaByUser(userId) {
   if (!userId) return [];
@@ -309,4 +309,16 @@ async function getMediaByUser(userId) {
   }
 }
 
-export { getMediaByUser };
+export { 
+  insertUser, 
+  insertCreatorApplication, 
+  getUserCreatorStatus, 
+  updateUserCreatorStatus, 
+  updateUserWithCreatorApplication, 
+  insertMedia, 
+  getPublicProfile, 
+  incrementFollow, 
+  syncRtdbToSupabase, 
+  isSupabaseReachable,
+  getMediaByUser 
+};

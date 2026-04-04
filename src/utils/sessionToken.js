@@ -14,7 +14,8 @@ export function mintSessionToken(uid, email) {
   if (!uid) return null;
   const secret = getSecret();
   if (!secret) return null;
-  return jwt.sign({ uid, email: email || '' }, secret, { expiresIn: '7d' });
+  // MED-03: Reduced session expiry from 7d to 24h
+  return jwt.sign({ uid, email: email || '' }, secret, { expiresIn: '24h' });
 }
 
 /**

@@ -1,5 +1,6 @@
 import express from 'express';
 import { getPublicProfile, incrementFollow } from '../config/dbFallback.js';
+import { requireAuth } from '../middleware/authFirebase.js';
 
 const router = express.Router();
 
@@ -16,8 +17,8 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/users/:id/follow — increment creator's followers count
-router.post('/:id/follow', async (req, res) => {
+// POST /api/users/:id/follow — SEC-08: requireAuth so follows are from real users
+router.post('/:id/follow', requireAuth, async (req, res) => {
   const { id: creatorId } = req.params;
   try {
     const result = await incrementFollow(creatorId);

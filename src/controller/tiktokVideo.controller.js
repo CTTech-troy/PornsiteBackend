@@ -170,11 +170,14 @@ export async function likeVideo(req, res) {
       throw likeError;
     }
 
-    const newCount = Math.max(0, (video.likes_count || 0) + 1);
-    const { error: updateError } = await supabase.from(VIDEOS_TABLE).update({ likes_count: newCount }).eq('video_id', videoId);
-    if (updateError) throw updateError;
+    // BUG-04: Atomic increment via RPC
+    const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
+      p_video_id: videoId,
+      p_stat_name: 'likes_count',
+      p_delta: 1
+    });
 
-    return res.json({ success: true, liked: true, likesCount: newCount });
+    return res.json({ success: true, liked: true, likesCount: newCount || 0 });
   } catch (err) {
     console.error('tiktokVideo.likeVideo error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });
@@ -200,9 +203,13 @@ export async function unlikeVideo(req, res) {
     const didRemove = deleted && deleted.length > 0;
 
     if (didRemove) {
-      const newCount = Math.max(0, (video.likes_count || 0) - 1);
-      await supabase.from(VIDEOS_TABLE).update({ likes_count: newCount }).eq('video_id', videoId);
-      return res.json({ success: true, liked: false, likesCount: newCount });
+      // BUG-04: Atomic decrement via RPC
+      const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
+        p_video_id: videoId,
+        p_stat_name: 'likes_count',
+        p_delta: -1
+      });
+      return res.json({ success: true, liked: false, likesCount: newCount || 0 });
     }
 
     return res.json({ success: true, liked: false, likesCount: Math.max(0, video.likes_count || 0) });
@@ -261,9 +268,13 @@ export async function recordView(req, res) {
     }
 
     if (inserted) {
-      const newCount = Math.max(0, (video.views_count || 0) + 1);
-      await supabase.from(VIDEOS_TABLE).update({ views_count: newCount }).eq('video_id', videoId);
-      return res.json({ success: true, viewsCount: newCount, newView: true });
+      // BUG-04: Atomic increment via RPC
+      const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
+        p_video_id: videoId,
+        p_stat_name: 'views_count',
+        p_delta: 1
+      });
+      return res.json({ success: true, viewsCount: newCount || 0, newView: true });
     }
 
     return res.json({ success: true, viewsCount: Math.max(0, video.views_count || 0), newView: false });
@@ -328,8 +339,12 @@ export async function addComment(req, res) {
 
     if (insertError) throw insertError;
 
-    const newCount = Math.max(0, (video.comments_count || 0) + 1);
-    await supabase.from(VIDEOS_TABLE).update({ comments_count: newCount }).eq('video_id', videoId);
+    // BUG-04: Atomic increment via RPC
+    const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
+      p_video_id: videoId,
+      p_stat_name: 'comments_count',
+      p_delta: 1
+    });
 
     return res.status(201).json({
       success: true,
@@ -340,7 +355,7 @@ export async function addComment(req, res) {
         comment: commentRow.comment,
         created_at: commentRow.created_at,
       },
-      commentsCount: newCount,
+      commentsCount: newCount || 0,
     });
   } catch (err) {
     console.error('tiktokVideo.addComment error', err?.message || err);
@@ -374,8 +389,12 @@ export async function deleteComment(req, res) {
 
     const { data: video } = await supabase.from(VIDEOS_TABLE).select('comments_count').eq('video_id', comment.video_id).single();
     if (video) {
-      const newCount = Math.max(0, (video.comments_count || 0) - 1);
-      await supabase.from(VIDEOS_TABLE).update({ comments_count: newCount }).eq('video_id', comment.video_id);
+      // BUG-04: Atomic decrement via RPC
+      await supabase.rpc('adjust_tiktok_stat', {
+        p_video_id: comment.video_id,
+        p_stat_name: 'comments_count',
+        p_delta: -1
+      });
     }
 
     return res.json({ success: true, message: 'Comment deleted' });
