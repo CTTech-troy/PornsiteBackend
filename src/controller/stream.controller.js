@@ -1,4 +1,4 @@
-import { rtdb } from '../config/firebase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 import { lookupHomeFeedRow } from '../config/homeFeedCache.js';
 import { getVideoById as getFeedVideoById } from './videoFeed.controller.js';
 
@@ -14,6 +14,8 @@ export async function getStreamUrl(req, res) {
 
     // 1) RTDB check for uploaded videos (has streamUrl or videoUrl)
     try {
+      const rtdb = getFirebaseRtdb();
+      if (!rtdb) throw new Error('RTDB unavailable');
       const snap = await rtdb.ref(`videos/${id}`).once('value');
       const val = snap.val();
       if (val) {

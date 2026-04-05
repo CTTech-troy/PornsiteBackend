@@ -8,6 +8,9 @@ yarn.lock
 .env.local
 .env.*.local
 
+# Firebase Admin SDK key files (use GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_KEY in .env)
+*firebase-adminsdk*.json
+
 # IDE
 .vscode/
 .idea/

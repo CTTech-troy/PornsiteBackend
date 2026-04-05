@@ -2,21 +2,58 @@
  * Secure video upload & publish: Supabase Storage + Firebase RTDB.
  * Consent required; only consentGiven === true sets isLive. Public feed returns only isLive === true.
  */
-import { rtdb } from '../config/firebase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
-import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import crypto from 'crypto';
+import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 
+function parseSupabasePublicStoragePath(url) {
+  if (!url || typeof url !== 'string' || !url.includes('/storage/v1/object/public/')) return null;
+  try {
+    const u = new URL(url);
+    const m = u.pathname.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (!m) return null;
+    const path = decodeURIComponent(m[2].replace(/\+/g, ' '));
+    return { bucket: m[1], path };
+  } catch {
+    return null;
+  }
+}
+
+async function removeSupabaseObjectsForUrls(urls) {
+  if (!isSupabaseConfigured() || !supabase || !Array.isArray(urls)) return;
+  const seen = new Set();
+  for (const url of urls) {
+    const parsed = parseSupabasePublicStoragePath(url);
+    if (!parsed) continue;
+    const key = `${parsed.bucket}:${parsed.path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const { error } = await supabase.storage.from(parsed.bucket).remove([parsed.path]);
+      if (error && !/not\s*found|No such file/i.test(String(error.message || ''))) {
+        console.warn('Storage remove:', parsed.bucket, parsed.path, error.message || error);
+      }
+    } catch (err) {
+      console.warn('Storage remove failed:', err?.message || err);
+    }
+  }
+}
+
 function videosRef() {
-  return rtdb.ref('videos');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('videos') : null;
 }
 function likesRef() {
-  return rtdb.ref('likes');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('likes') : null;
 }
 function commentsRef() {
-  return rtdb.ref('comments');
+  const rtdb = getFirebaseRtdb();
+  return rtdb ? rtdb.ref('comments') : null;
 }
 
 /**
@@ -48,13 +85,19 @@ export async function uploadAndPublish(req, res) {
 
     const videoId = crypto.randomUUID();
     const timestamp = Date.now();
-    const safeName = (file.originalname || 'video').replace(/[^a-zA-Z0-9.-]/g, '_');
+    const safeName = ensureVideoFilenameForStorage(file.originalname, file.mimetype);
     const storagePath = `${uid}/${timestamp}-${safeName}`;
+    const contentType = resolveVideoContentType(file.mimetype, safeName);
 
     let videoUrl = null;
     if (isSupabaseConfigured()) {
-      const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, file.mimetype || 'video/mp4');
-      videoUrl = getPublicUrl(VIDEO_BUCKET, data.path) || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${VIDEO_BUCKET}/${storagePath}`;
+      const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, contentType);
+      const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, '');
+      videoUrl =
+        getPublicUrl(VIDEO_BUCKET, data.path) ||
+        (baseUrl
+          ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${data.path.split('/').map(encodeURIComponent).join('/')}`
+          : null);
     } else {
       return res.status(503).json({ success: false, message: 'Storage not configured' });
     }
@@ -89,6 +132,10 @@ export async function uploadAndPublish(req, res) {
       createdAt: Date.now(),
     };
 
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video metadata storage is temporarily unavailable.' });
+    }
+
     await videosRef().child(videoId).set(metadata);
     return res.status(201).json({
       success: true,
@@ -110,6 +157,9 @@ export async function uploadAndPublish(req, res) {
  */
 export async function getPublicVideos(req, res) {
   try {
+    if (!videosRef()) {
+      return res.json({ success: true, data: [] });
+    }
     const snap = await videosRef().once('value');
     const val = snap.val();
     const list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
@@ -127,6 +177,9 @@ export async function getPublicVideos(req, res) {
  */
 export async function getVideoById(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video feed is temporarily unavailable.' });
+    }
     const { videoId } = req.params;
     const requesterUid = req.uid;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
@@ -149,6 +202,9 @@ export async function getVideoById(req, res) {
 
 export async function deleteVideo(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -157,9 +213,15 @@ export async function deleteVideo(req, res) {
     const video = snap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
     if (video.userId !== uid) return res.status(403).json({ success: false, message: 'Forbidden' });
+    const storageUrls = [video.videoUrl, video.streamUrl, video.thumbnailUrl].filter(
+      (u) => typeof u === 'string' && u.includes('/storage/v1/object/public/')
+    );
+    await removeSupabaseObjectsForUrls(storageUrls);
     await videosRef().child(videoId).remove();
-    await likesRef().child(videoId).remove();
-    await commentsRef().child(videoId).remove();
+    const lr = likesRef();
+    const cr = commentsRef();
+    if (lr) await lr.child(videoId).remove();
+    if (cr) await cr.child(videoId).remove();
     return res.json({ success: true });
   } catch (err) {
     console.error('videoPublish.deleteVideo error', err?.message || err);
@@ -169,12 +231,17 @@ export async function deleteVideo(req, res) {
 
 export async function updateVideo(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
     const titleRaw = req.body?.title;
     const descriptionRaw = req.body?.description;
+    const categoryRaw = req.body?.category;
+    const tagsRaw = req.body?.tags;
     const snap = await videosRef().child(videoId).once('value');
     const video = snap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -187,6 +254,12 @@ export async function updateVideo(req, res) {
     }
     if (descriptionRaw !== undefined) {
       updates.description = String(descriptionRaw).trim();
+    }
+    if (categoryRaw !== undefined) {
+      updates.category = String(categoryRaw).trim().slice(0, 80);
+    }
+    if (tagsRaw !== undefined) {
+      updates.tags = String(tagsRaw).trim().slice(0, 500);
     }
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, message: 'No updates provided' });
@@ -206,6 +279,9 @@ export async function updateVideo(req, res) {
 
 export async function setVideoDraft(req, res) {
   try {
+    if (!videosRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -232,6 +308,9 @@ export async function setVideoDraft(req, res) {
  */
 export async function likeVideo(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -260,6 +339,9 @@ export async function likeVideo(req, res) {
  */
 export async function unlikeVideo(req, res) {
   try {
+    if (!videosRef() || !likesRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -284,6 +366,9 @@ export async function unlikeVideo(req, res) {
  */
 export async function addComment(req, res) {
   try {
+    if (!videosRef() || !commentsRef()) {
+      return res.status(503).json({ success: false, message: 'Video storage is temporarily unavailable.' });
+    }
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
@@ -320,6 +405,9 @@ export async function addComment(req, res) {
  */
 export async function getComments(req, res) {
   try {
+    if (!videosRef() || !commentsRef()) {
+      return res.json({ success: true, data: [] });
+    }
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
 
@@ -343,6 +431,9 @@ export async function getComments(req, res) {
  */
 export async function getLikeStatus(req, res) {
   try {
+    if (!likesRef()) {
+      return res.json({ success: true, liked: false });
+    }
     const uid = req.uid;
     const { videoId } = req.params;
     if (!uid) return res.json({ success: true, liked: false });

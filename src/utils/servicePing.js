@@ -1,4 +1,4 @@
-import { auth, firebaseInitialized } from '../config/firebase.js';
+import { getFirebaseAuth, isFirebaseAdminReady } from '../config/firebase.js';
 import { supabase, isConfigured } from '../config/supabase.js';
 
 const STARTUP_CHECK_TIMEOUT_MS = 3500;
@@ -20,12 +20,16 @@ export async function pingFirebase() {
       detail: 'missing FIREBASE_SERVICE_ACCOUNT_KEY or GOOGLE_APPLICATION_CREDENTIALS'
     };
   }
-  if (!firebaseInitialized) {
+  if (!isFirebaseAdminReady) {
     return {
       id: 'firebase',
       status: 'inactive',
       detail: 'Admin SDK not initialized (credentials or FIREBASE_DATABASE_URL)'
     };
+  }
+  const auth = getFirebaseAuth();
+  if (!auth) {
+    return { id: 'firebase', status: 'inactive', detail: 'Firebase Auth admin API unavailable' };
   }
   try {
     const fbRes = await Promise.race([
@@ -44,7 +48,7 @@ export async function pingFirebase() {
 }
 
 export async function pingSupabase() {
-  if (!isConfigured()) {
+  if (!isConfigured() || !supabase) {
     return {
       id: 'supabase',
       status: 'not_configured',

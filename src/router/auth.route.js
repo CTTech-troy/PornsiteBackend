@@ -10,7 +10,8 @@ const router = express.Router();
 // MED-04: Reduced to 50MB to prevent memory exhaustion
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-const limitAuth = [authBurstLimiter, authRouteLimiter];
+const limitLogin = [authLoginBurst, authLoginWindow];
+const limitSignup = [authSignupBurst, authSignupWindow];
 
 // MED-08: Validation rules
 const signupVal = [
@@ -62,16 +63,13 @@ export default router;
 // Multer-specific error handler for this router: return 413 for file/field size limits
 router.use((err, req, res, next) => {
 	if (!err) return next();
-	// Multer errors set `code` like 'LIMIT_FILE_SIZE', 'LIMIT_FIELD_VALUE', etc.
 	if (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FIELD_VALUE' || err.code === 'LIMIT_PART_COUNT' || err.code === 'LIMIT_FIELD_KEY') {
 		console.warn('Multer limit reached:', err.code, err.message);
 		return res.status(413).json({ success: false, message: 'Payload too large' });
 	}
-	// If it's a generic PayloadTooLargeError from body-parser
 	if (err.type === 'entity.too.large' || err.status === 413) {
 		console.warn('Payload too large (body-parser):', err.message || err);
 		return res.status(413).json({ success: false, message: 'Payload too large' });
 	}
-	// Otherwise propagate
 	return next(err);
 });

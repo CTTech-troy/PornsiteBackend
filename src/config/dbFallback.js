@@ -1,17 +1,15 @@
-import { supabase } from './supabase.js';
-import { rtdb } from './firebase.js';
+import { supabase, isConfigured } from './supabase.js';
+import { getFirebaseRtdb, isFirebaseReady } from './firebase.js';
 
-function supabaseConfigured() {
-  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
-}
+let syncSkipLogged = false;
 
 function isUuidLike(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
 
 /** Quick check: is Supabase reachable right now? */
-async function isSupabaseReachable() { 
-  if (!supabaseConfigured()) return false;
+async function isSupabaseReachable() {
+  if (!isConfigured() || !supabase) return false;
   try {
     const { error } = await supabase.from('users').select('id').limit(1);
     return !error;
@@ -21,9 +19,9 @@ async function isSupabaseReachable() {
 }
 
 async function insertUser(user) {
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
-      const { data, error } = await supabase.from('users').insert([user]);
+      const { data, error } = await supabase.from('users').upsert([user], { onConflict: 'id' });
       if (error) throw error;
       return { source: 'supabase', data };
     } catch (err) {
@@ -31,7 +29,10 @@ async function insertUser(user) {
     }
   }
 
-  // RTDB fallback: write under /users/{id}
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('User save failed: Firebase Realtime Database is not available.');
+  }
   try {
     const id = user.id || user.id === 0 ? user.id : (user.id = user.id || (user.uid || Date.now().toString()));
     await rtdb.ref(`users/${id}`).set(user);
@@ -43,7 +44,7 @@ async function insertUser(user) {
 }
 
 async function insertCreatorApplication(payload) {
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('creator_applications').insert([payload]);
       if (error) throw error;
@@ -53,6 +54,10 @@ async function insertCreatorApplication(payload) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Creator application save failed: Firebase Realtime Database is not available.');
+  }
   try {
     await rtdb.ref(`creator_applications/${payload.id}`).set(payload);
     return { source: 'rtdb', data: payload };
@@ -63,7 +68,7 @@ async function insertCreatorApplication(payload) {
 }
 
 async function getUserCreatorStatus(userId) {
-  if (supabaseConfigured()) {
+  if (isConfigured() && isUuidLike(userId)) {
     try {
       const { data, error } = await supabase.from('users').select('creator, verified').eq('id', userId).maybeSingle();
       if (!error && data) return { creator: !!data.creator, creatorStatus: data.verified === 'approved' ? 'approved' : data.verified === 'rejected' ? 'rejected' : data.verified === 'pending' ? 'pending' : 'none' };
@@ -71,19 +76,28 @@ async function getUserCreatorStatus(userId) {
       // ignore
     }
   }
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    return { creator: false, creatorStatus: 'none' };
+  }
   try {
-    const snap = await rtdb.ref(`users/${userId}/creator`).once('value');
-    const creator = snap.val();
-    const statusSnap = await rtdb.ref(`users/${userId}/creatorStatus`).once('value');
-    const creatorStatus = statusSnap.val() || 'none';
-    return { creator: !!creator, creatorStatus: typeof creatorStatus === 'string' ? creatorStatus : (creator ? 'approved' : 'none') };
+    const snap = await rtdb.ref(`users/${userId}`).once('value');
+    const val = snap.val();
+    if (!val || typeof val !== 'object') {
+      return { creator: false, creatorStatus: 'none' };
+    }
+    const creator = !!val.creator;
+    const rawStatus = val.creatorStatus ?? val.verified;
+    const creatorStatus =
+      typeof rawStatus === 'string' ? rawStatus : creator ? 'approved' : 'none';
+    return { creator, creatorStatus };
   } catch (err) {
     return { creator: false, creatorStatus: 'none' };
   }
 }
 
 async function updateUserCreatorStatus(userId, approve) {
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('users').update({
         creator: !!approve,
@@ -96,6 +110,10 @@ async function updateUserCreatorStatus(userId, approve) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Update failed: Firebase Realtime Database is not available.');
+  }
   try {
     await rtdb.ref(`users/${userId}/creator`).set(!!approve);
     await rtdb.ref(`users/${userId}/creatorStatus`).set(approve ? 'approved' : 'rejected');
@@ -108,7 +126,7 @@ async function updateUserCreatorStatus(userId, approve) {
 }
 
 async function updateUserWithCreatorApplication(userId, creatorApplicationData) {
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('users').update({
         creator_application: creatorApplicationData || {},
@@ -122,6 +140,10 @@ async function updateUserWithCreatorApplication(userId, creatorApplicationData) 
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Update failed: Firebase Realtime Database is not available.');
+  }
   try {
     await rtdb.ref(`users/${userId}/creator_application`).set(creatorApplicationData || {});
     await rtdb.ref(`users/${userId}/verified`).set('pending');
@@ -134,7 +156,7 @@ async function updateUserWithCreatorApplication(userId, creatorApplicationData) 
 }
 
 async function insertMedia(metadata) {
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('media').insert([metadata]);
       if (error) throw error;
@@ -144,6 +166,10 @@ async function insertMedia(metadata) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Media save failed: Firebase Realtime Database is not available.');
+  }
   try {
     const id = metadata.id || Date.now().toString();
     await rtdb.ref(`media/${id}`).set(metadata);
@@ -158,7 +184,7 @@ async function getPublicProfile(userId) {
   if (!userId) return null;
   const rawId = String(userId).trim();
   // Supabase users.id is UUID in this project; Firebase UIDs should go to RTDB fallback.
-  if (supabaseConfigured() && isUuidLike(rawId)) {
+  if (isConfigured() && isUuidLike(rawId)) {
     try {
       // Select only columns that typically exist (followers may not exist; return 0)
       const { data, error } = await supabase.from('users').select('id, username').eq('id', rawId).maybeSingle();
@@ -169,6 +195,8 @@ async function getPublicProfile(userId) {
       console.warn('Supabase getPublicProfile failed:', err && err.message ? err.message : err);
     }
   }
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return null;
   try {
     const snap = await rtdb.ref(`users/${rawId}`).once('value');
     const val = snap.val();
@@ -181,7 +209,7 @@ async function getPublicProfile(userId) {
 
 async function incrementFollow(userId) {
   if (!userId) throw new Error('missing userId');
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
       // users.followers may not exist; if so, fall through to RTDB
       const { data: row, error: fetchErr } = await supabase.from('users').select('followers').eq('id', userId).maybeSingle();
@@ -198,6 +226,10 @@ async function incrementFollow(userId) {
         console.warn('Supabase incrementFollow failed:', msg);
       }
     }
+  }
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Follow update failed: Firebase Realtime Database is not available.');
   }
   try {
     const ref = rtdb.ref(`users/${userId}/followers`);
@@ -216,10 +248,16 @@ async function incrementFollow(userId) {
  * Call periodically (e.g. every 2 min) from the server.
  */
 async function syncRtdbToSupabase() {
-  if (!supabaseConfigured()) return { users: 0, creator_applications: 0, media: 0 };
-  const hasRtdb = Boolean(process.env.FIREBASE_DATABASE_URL);
-  if (!hasRtdb) return { users: 0, creator_applications: 0, media: 0 };
+  if (!isConfigured()) return { users: 0, creator_applications: 0, media: 0 };
+  if (!isFirebaseReady || !getFirebaseRtdb()) {
+    if (!syncSkipLogged) {
+      syncSkipLogged = true;
+      console.warn('[syncRtdbToSupabase] Disabled: Firebase Admin is inactive — RTDB sync will not run.');
+    }
+    return { users: 0, creator_applications: 0, media: 0 };
+  }
 
+  const rtdb = getFirebaseRtdb();
   const ok = await isSupabaseReachable();
   if (!ok) return { users: 0, creator_applications: 0, media: 0 };
 
@@ -288,7 +326,7 @@ async function syncRtdbToSupabase() {
 
 async function getMediaByUser(userId) {
   if (!userId) return [];
-  if (supabaseConfigured()) {
+  if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('media').select('*').eq('user_id', userId);
       if (error) throw error;
@@ -298,6 +336,8 @@ async function getMediaByUser(userId) {
     }
   }
 
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return [];
   try {
     const snap = await rtdb.ref('media').orderByChild('user_id').equalTo(userId).once('value');
     const val = snap.val();

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { auth } from '../config/firebase.js';
+import { getFirebaseAuth } from '../config/firebase.js';
 
 function getSecret() {
   const s = process.env.JWT_SECRET || process.env.SESSION_JWT_SECRET;
@@ -23,18 +23,24 @@ export function mintSessionToken(uid, email) {
  */
 export async function resolveUidFromBearerToken(token) {
   if (!token || typeof token !== 'string') return null;
-  try {
-    const decoded = await auth.verifyIdToken(token);
-    return decoded.uid;
-  } catch {
-    const secret = getSecret();
-    if (!secret) return null;
+  const authSvc = getFirebaseAuth();
+  if (authSvc) {
     try {
-      const payload = jwt.verify(token, secret);
-      return typeof payload?.uid === 'string' ? payload.uid : null;
+      const decoded = await authSvc.verifyIdToken(token);
+      return decoded.uid;
     } catch {
-      return null;
+      /* fall through to session JWT */
     }
+  } else {
+    /* Admin SDK unavailable — only session JWT may work */
+  }
+  const secret = getSecret();
+  if (!secret) return null;
+  try {
+    const payload = jwt.verify(token, secret);
+    return typeof payload?.uid === 'string' ? payload.uid : null;
+  } catch {
+    return null;
   }
 }
 

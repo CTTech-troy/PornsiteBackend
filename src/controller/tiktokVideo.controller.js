@@ -4,6 +4,7 @@
  */
 import crypto from 'crypto';
 import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 
 const VIDEOS_TABLE = 'tiktok_videos';
 const LIKES_TABLE = 'tiktok_video_likes';
@@ -14,7 +15,7 @@ const ADS_TABLE = 'video_ads';
 const AD_IMPRESSIONS_TABLE = 'video_ad_impressions';
 
 function ensureSupabase() {
-  if (!isSupabaseConfigured()) throw new Error('Supabase not configured');
+  if (!isSupabaseConfigured() || !supabase) throw new Error('Supabase not configured');
 }
 
 /**
@@ -36,11 +37,17 @@ export async function uploadVideo(req, res) {
 
     const videoId = crypto.randomUUID();
     const timestamp = Date.now();
-    const safeName = (file.originalname || 'video').replace(/[^a-zA-Z0-9.-]/g, '_');
+    const safeName = ensureVideoFilenameForStorage(file.originalname, file.mimetype);
     const storagePath = `tiktok/${uid}/${timestamp}-${safeName}`;
+    const contentType = resolveVideoContentType(file.mimetype, safeName);
 
-    const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, file.mimetype || 'video/mp4');
-    const storageUrl = getPublicUrl(VIDEO_BUCKET, data.path) || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${VIDEO_BUCKET}/${storagePath}`;
+    const data = await uploadFileToBucket(VIDEO_BUCKET, storagePath, file, contentType);
+    const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, '');
+    const storageUrl =
+      getPublicUrl(VIDEO_BUCKET, data.path) ||
+      (baseUrl
+        ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${data.path.split('/').map(encodeURIComponent).join('/')}`
+        : '');
 
     const { error } = await supabase.from(VIDEOS_TABLE).insert({
       video_id: videoId,

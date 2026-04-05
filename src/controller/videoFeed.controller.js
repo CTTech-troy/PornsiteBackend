@@ -2,7 +2,7 @@
  * Paginated video feed via RapidAPI xnxx-api GET /xn/best?page=
  * GET /api/videos?page=1&limit=20 → { data: Video[], total, page, totalPages, hasMore }
  */
-import { rtdb } from '../config/firebase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 import { lookupHomeFeedRow, ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 import {
   isXnxxApiConfigured,
@@ -66,6 +66,14 @@ export async function getVideosPaginated(page = 1, limit = 20) {
 
 async function withRtdbMerge(result) {
   const { data } = result;
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    data.forEach((item) => {
+      item.totalLikes = item.totalLikes ?? 0;
+      item.totalComments = item.totalComments ?? 0;
+    });
+    return result;
+  }
   try {
     const rtdbRef = rtdb.ref('videos');
     await Promise.all(
@@ -108,19 +116,25 @@ export async function getVideoById(id) {
       channel: hf.channel || '',
       views: hf.views ?? 0,
     };
-    try {
-      const ref = rtdb.ref('videos').child(videoId);
-      const snap = await ref.once('value');
-      const val = snap.val();
-      if (!val) {
-        await ref.set({ externalId: videoId, totalLikes: 0, totalComments: 0 });
-        video.totalLikes = 0;
-        video.totalComments = 0;
-      } else {
-        video.totalLikes = val.totalLikes ?? 0;
-        video.totalComments = val.totalComments ?? 0;
+    const rtdb = getFirebaseRtdb();
+    if (rtdb) {
+      try {
+        const ref = rtdb.ref('videos').child(videoId);
+        const snap = await ref.once('value');
+        const val = snap.val();
+        if (!val) {
+          await ref.set({ externalId: videoId, totalLikes: 0, totalComments: 0 });
+          video.totalLikes = 0;
+          video.totalComments = 0;
+        } else {
+          video.totalLikes = val.totalLikes ?? 0;
+          video.totalComments = val.totalComments ?? 0;
+        }
+      } catch (err) {
+        video.totalLikes = video.totalLikes ?? 0;
+        video.totalComments = video.totalComments ?? 0;
       }
-    } catch (err) {
+    } else {
       video.totalLikes = video.totalLikes ?? 0;
       video.totalComments = video.totalComments ?? 0;
     }
@@ -162,19 +176,25 @@ export async function getVideoById(id) {
 
   if (!video) return null;
 
-  try {
-    const ref = rtdb.ref('videos').child(videoId);
-    const snap = await ref.once('value');
-    const val = snap.val();
-    if (!val) {
-      await ref.set({ externalId: videoId, totalLikes: 0, totalComments: 0 });
-      video.totalLikes = 0;
-      video.totalComments = 0;
-    } else {
-      video.totalLikes = val.totalLikes ?? 0;
-      video.totalComments = val.totalComments ?? 0;
+  const rtdbLate = getFirebaseRtdb();
+  if (rtdbLate) {
+    try {
+      const ref = rtdbLate.ref('videos').child(videoId);
+      const snap = await ref.once('value');
+      const val = snap.val();
+      if (!val) {
+        await ref.set({ externalId: videoId, totalLikes: 0, totalComments: 0 });
+        video.totalLikes = 0;
+        video.totalComments = 0;
+      } else {
+        video.totalLikes = val.totalLikes ?? 0;
+        video.totalComments = val.totalComments ?? 0;
+      }
+    } catch (err) {
+      video.totalLikes = video.totalLikes ?? 0;
+      video.totalComments = video.totalComments ?? 0;
     }
-  } catch (err) {
+  } else {
     video.totalLikes = video.totalLikes ?? 0;
     video.totalComments = video.totalComments ?? 0;
   }

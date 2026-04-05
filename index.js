@@ -1,8 +1,8 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
 import authRouter from './src/router/auth.route.js';
 import videosRouter from './src/router/videos.route.js';
 import liveRouter from './src/router/live.route.js';
@@ -17,6 +17,7 @@ import * as walletsystem from './src/controller/walletsystem.controller.js';
 import { supabase, ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
+import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
 
@@ -73,6 +74,13 @@ app.get('/api/health/services', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err?.message || String(err) });
   }
+});
+
+app.get('/api/health/auth-metrics', (req, res) => {
+  if (process.env.AUTH_METRICS !== '1' && process.env.AUTH_METRICS !== 'true') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  res.json(getAuthMetricsSnapshot());
 });
 
 // Auth routes
@@ -304,6 +312,7 @@ app.use((err, req, res, next) => {
 
 server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  printFirebaseStartupSummary();
   await checkConnections();
   ensureBuckets().then(() => {}).catch(() => {});
   syncCacheToSupabase().catch(() => {});

@@ -4,21 +4,21 @@ import fs from 'fs';
 
 dotenv.config();
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
+const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
+const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+
 /** S3-compatible endpoint (e.g. for AWS SDK): SUPABASE_STORAGE_S3_URL */
-const SUPABASE_STORAGE_S3_URL = process.env.SUPABASE_STORAGE_S3_URL || (SUPABASE_URL ? `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/s3` : '');
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // service-role key for server
+const SUPABASE_STORAGE_S3_URL =
+  process.env.SUPABASE_STORAGE_S3_URL ||
+  (supabaseUrl ? `${supabaseUrl.replace(/\/$/, '')}/storage/v1/s3` : '');
+
 const IMAGE_BUCKET = process.env.SUPABASE_IMAGE_BUCKET || 'images';
 const VIDEO_BUCKET = process.env.SUPABASE_VIDEO_BUCKET || 'videos';
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.warn('Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY). Storage and DB operations will fallback.');
-}
+let supabase = null;
 
-// Ensure a global fetch is available for @supabase/supabase-js (Node <18 doesn't provide fetch)
 if (typeof globalThis.fetch === 'undefined') {
   try {
-    // top-level await to synchronously import the polyfill before createClient runs
     const m = await import('node-fetch');
     const ff = m && (m.default || m);
     if (ff) {
@@ -30,17 +30,22 @@ if (typeof globalThis.fetch === 'undefined') {
     console.warn('Either upgrade Node to v18+ or `npm install node-fetch@2` in backend to provide a fetch polyfill.');
   }
 }
- 
-const supabase = createClient(SUPABASE_URL || '', SUPABASE_KEY || '', {
-  auth: { autoRefreshToken: false },
-  global: {
-    // prefer explicit headers on server
-    headers: { 'x-application-name': 'letstream-backend' }
-  }
-});
+
+if (supabaseUrl && supabaseServiceRoleKey) {
+  supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
+    auth: { autoRefreshToken: false },
+    global: {
+      headers: { 'x-application-name': 'letstream-backend' },
+    },
+  });
+} else {
+  console.warn(
+    '[Supabase] Not configured: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY missing or empty. Fallback mode will be used for DB/storage where supported.'
+  );
+}
 
 function isConfigured() {
-  return Boolean(SUPABASE_URL && SUPABASE_KEY);
+  return supabase !== null;
 }
 
 async function uploadFileToBucket(bucket, destPath, file, contentType) {
@@ -61,20 +66,14 @@ async function uploadFileToBucket(bucket, destPath, file, contentType) {
 
 function getPublicUrl(bucket, path) {
   if (!isConfigured()) return null;
-  // supabase client provides getPublicUrl
   try {
     const { data } = supabase.storage.from(bucket).getPublicUrl(path);
     return data?.publicUrl || null;
   } catch (err) {
-    // fallback to manual construction
-    return `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(path)}`;
+    return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(path)}`;
   }
 }
 
-/**
- * Ensure storage buckets exist (public for reading). Call once on app start if desired.
- * Silently skips on RLS, network, or missing-permission errors (create buckets in Dashboard if needed).
- */
 async function ensureBuckets() {
   if (!isConfigured()) return;
   for (const bucket of [VIDEO_BUCKET, IMAGE_BUCKET]) {

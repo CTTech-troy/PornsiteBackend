@@ -1,7 +1,8 @@
-import { db, firebaseInitialized } from '../config/firebase.js';
+import { getFirebaseDb, isFirebaseAdminReady } from '../config/firebase.js';
 
 export async function getCreatorPublicFields(uid) {
-  if (!uid || !firebaseInitialized) {
+  const db = getFirebaseDb();
+  if (!uid || !isFirebaseAdminReady || !db) {
     return { creatorDisplayName: null, creatorAvatarUrl: null };
   }
   try {
