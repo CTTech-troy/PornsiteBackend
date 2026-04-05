@@ -13,10 +13,11 @@ import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB
+// MED-04: Reduced from 200MB to 50MB to strictly manage Heap fragmentation Memory Leaks
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB
 const uploadVideoWithThumb = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 200 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 }, // MED-04: Reduced to 50MB
 }).fields([
   { name: 'video', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 },
@@ -107,6 +108,12 @@ router.get('/:videoId/comments', videoInteractions.getComments);
 // POST /api/videos/:videoId/comments
 router.post('/:videoId/comments', requireAuth, videoInteractions.addComment);
 
+// BUG-07: /stream/:id must be defined BEFORE /:id (otherwise /:id matches 'stream' first)
+// GET /api/videos/stream/:id — return playable stream URL when available
+router.get('/stream/:id', async (req, res) => {
+  return streamCtrl.getStreamUrl(req, res);
+});
+
 // GET /api/videos/:id — single video (from feed cache) for detail page
 router.get('/:id', async (req, res) => {
   try {
@@ -117,11 +124,6 @@ router.get('/:id', async (req, res) => {
     console.error('get video by id error', err?.message || err);
     return res.status(500).json({ error: err?.message || 'Failed' });
   }
-});
-
-// GET /api/videos/stream/:id — return playable stream URL when available
-router.get('/stream/:id', async (req, res) => {
-  return streamCtrl.getStreamUrl(req, res);
 });
 
 export default router;

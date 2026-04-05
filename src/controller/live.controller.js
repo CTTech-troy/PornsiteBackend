@@ -158,29 +158,11 @@ async function endLive(liveId) {
     return { total, companyShare, hostShare };
   }
 
-  if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
-  const hostId = live.host_id;
+  if (!isConfigured()) throw new Error('Supabase not configured');
   try {
-    // Ensure wallet exists and credit host share (no upsert — wallets may not have UNIQUE on owner_id)
-    const { data: w2, error: w2err } = await supabase.from('wallets').select('*').eq('owner_id', hostId).maybeSingle();
-    if (w2err) throw w2err;
-    if (w2) {
-      const newBal = Number(w2.balance || 0) + hostShare;
-      const { error: up } = await supabase.from('wallets').update({ balance: newBal, updated_at: now }).eq('owner_id', hostId);
-      if (up) throw up;
-    } else {
-      const { error: ins } = await supabase.from('wallets').insert([{ owner_id: hostId, balance: hostShare }]);
-      if (ins) throw ins;
-    }
-    if (companyShare > 0) {
-      await supabase.from('transactions').insert([{
-        owner_id: 'company',
-        type: 'company_commission',
-        amount: companyShare,
-        balance_after: companyShare,
-        meta: { live_id: liveId, host_id: hostId }
-      }]);
-    }
+    // NOTE: Wallet payouts (host 70%, company 30%) are handled in real-time by
+    // walletsystem.processGiftPayment at gift-send time. endLive only marks the
+    // stream as ended — no duplicate wallet credits here.
     const { error: endErr } = await supabase.from('lives').update({ status: 'ended', ended_at: now }).eq('id', liveId);
     if (endErr) throw endErr;
     return { total, companyShare, hostShare };
@@ -191,7 +173,6 @@ async function endLive(liveId) {
         await liveCache.updateInCache(liveId, { status: 'ended', ended_at: now });
         return { total, companyShare, hostShare, _fallback: 'cache' };
       } catch (cacheErr) {
-        // If cache update also fails, prefer returning the original error
         throw err;
       }
     }

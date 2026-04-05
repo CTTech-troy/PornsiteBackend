@@ -82,18 +82,17 @@ export async function likeVideo(req, res) {
     if (!isValidPathSegment(videoId)) return res.status(400).json({ error: 'videoId required' });
 
     await ensureVideoRef(videoId);
-    const videoSnap = await videosRef().child(videoId).once('value');
-    const video = videoSnap.val();
 
     const likeSnap = await likesRef().child(videoId).child(uid).once('value');
     if (likeSnap.val()) {
-      return res.json({ liked: true, totalLikes: video?.totalLikes ?? 0 });
+      const videoSnap = await videosRef().child(videoId).once('value');
+      return res.json({ liked: true, totalLikes: videoSnap.val()?.totalLikes ?? 0 });
     }
 
     await likesRef().child(videoId).child(uid).set(true);
-    const newTotal = (video?.totalLikes ?? 0) + 1;
-    await videosRef().child(videoId).child('totalLikes').set(newTotal);
-    return res.json({ liked: true, totalLikes: newTotal });
+    // BUG-03: Use RTDB transaction for atomic increment
+    const result = await videosRef().child(videoId).child('totalLikes').transaction(current => (current || 0) + 1);
+    return res.json({ liked: true, totalLikes: result.snapshot.val() });
   } catch (err) {
     if (err?.message === 'RTDB_UNAVAILABLE') {
       return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
@@ -118,9 +117,9 @@ export async function unlikeVideo(req, res) {
     if (!video) return res.json({ liked: false, totalLikes: 0 });
 
     await likesRef().child(videoId).child(uid).remove();
-    const newTotal = Math.max(0, (video.totalLikes ?? 0) - 1);
-    await videosRef().child(videoId).child('totalLikes').set(newTotal);
-    return res.json({ liked: false, totalLikes: newTotal });
+    // BUG-03: Use RTDB transaction for atomic decrement (min 0)
+    const result = await videosRef().child(videoId).child('totalLikes').transaction(current => Math.max(0, (current || 0) - 1));
+    return res.json({ liked: false, totalLikes: result.snapshot.val() });
   } catch (err) {
     console.error('videoInteractions.unlikeVideo', err?.message || err);
     return res.status(500).json({ error: err?.message || 'Failed' });
@@ -160,7 +159,7 @@ export async function addComment(req, res) {
 
     const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
 
-    const { totalComments } = await ensureVideoRef(videoId);
+    await ensureVideoRef(videoId);
     const commentId = crypto.randomUUID();
     const comment = {
       userId: uid,
@@ -169,9 +168,9 @@ export async function addComment(req, res) {
       createdAt: Date.now(),
     };
     await commentsRef().child(videoId).child(commentId).set(comment);
-    const newTotal = (totalComments ?? 0) + 1;
-    await videosRef().child(videoId).child('totalComments').set(newTotal);
-    return res.status(201).json({ comment: { ...comment, commentId }, totalComments: newTotal });
+    // BUG-03: Use RTDB transaction for atomic increment
+    const result = await videosRef().child(videoId).child('totalComments').transaction(current => (current || 0) + 1);
+    return res.status(201).json({ comment: { ...comment, commentId }, totalComments: result.snapshot.val() });
   } catch (err) {
     console.error('videoInteractions.addComment', err?.message || err);
     return res.status(500).json({ error: err?.message || 'Failed' });
