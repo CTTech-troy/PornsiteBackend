@@ -5,6 +5,7 @@ import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
 import { upsertCreator } from './creator.controller.js';
 import fetch from 'node-fetch';
+import crypto from 'crypto';
 import { mintSessionToken, resolveUidFromBearerToken } from '../utils/sessionToken.js';
 import { createLoginTimer, createSignupTimer } from '../utils/authLoginTiming.js';
 import { recordAuth } from '../utils/authMetrics.js';
@@ -175,8 +176,8 @@ export async function submitAgeConsent(req, res) {
         creator: false,
         created_at: new Date().toISOString(),
       };
-      const res = await insertUser(userPayload);
-      console.log(`insertUser result:`, res && res.source ? res.source : res);
+      const insertResult = await insertUser(userPayload);
+      console.log(`insertUser result:`, insertResult && insertResult.source ? insertResult.source : insertResult);
     } catch (err) {
       console.error('Failed to persist lightweight user during age-consent:', err && err.message ? err.message : err);
     }
@@ -348,10 +349,20 @@ export async function applyCreator(req, res) {
           user_id: uid,
           submitted_at: payload.created_at,
         };
+        const payloadStr = JSON.stringify(payloadForAdmin);
+        
+        const headers = { 'Content-Type': 'application/json' };
+        // Generate HMAC signature if admin secret exists
+        if (process.env.ADMIN_SECRET) {
+          const crypto = await import('crypto');
+          const signature = crypto.createHmac('sha256', process.env.ADMIN_SECRET).update(payloadStr).digest('hex');
+          headers['X-Signature'] = signature;
+        }
+
         await fetch(webhook, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payloadForAdmin),
+          headers: headers,
+          body: payloadStr,
           timeout: 5000
         });
       }
@@ -372,8 +383,19 @@ export async function applyCreator(req, res) {
 export async function approveCreator(req, res) {
   try {
     const { user_id, approve } = req.body; // approve=true/false
+
+    // SEC-06: Timing-safe admin secret comparison (header only, no query string)
     const adminSecret = req.headers['x-admin-secret'];
-    if (adminSecret !== process.env.ADMIN_SECRET) return res.status(401).json({ success: false, message: 'Not authorized' });
+    const expectedSecret = process.env.ADMIN_SECRET;
+    if (!expectedSecret || !adminSecret) {
+      return res.status(401).json({ success: false, message: 'Not authorized' });
+    }
+    const a = Buffer.from(String(adminSecret));
+    const b = Buffer.from(String(expectedSecret));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).json({ success: false, message: 'Not authorized' });
+    }
+
     if (!user_id) return res.status(400).json({ success: false, message: 'user_id required' });
 
     try {
@@ -397,8 +419,10 @@ export async function approveCreator(req, res) {
 export async function uploadMedia(req, res) {
   try {
     const file = req.file;
-    const { uid, type = 'video', title = '' } = req.body; // uid should be provided by client
+    const uid = req.uid; // from requireAuth middleware — never trust client
+    const { type = 'video', title = '' } = req.body;
     if (!file) return res.status(400).json({ success: false, message: 'File required' });
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!uid) return res.status(400).json({ success: false, message: 'uid required' });
     if (!isConfigured() || !supabase) {
       return res.status(503).json({ success: false, message: 'Storage not configured' });
@@ -618,20 +642,22 @@ export async function login(req, res) {
 
 export async function google(req, res) {
   try {
-    const { email, displayName, photoURL } = req.body;
+    const { idToken } = req.body;
 
-    if (!email || !email.trim()) {
-      return res.status(400).json({ success: false, message: 'Email is required.' });
+    if (!idToken) {
+      return res.status(400).json({ success: false, message: 'idToken is required.' });
     }
 
-    const auth = getFirebaseAuth();
-    const db = getFirebaseDb();
-    if (!auth || !db) {
-      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
+    let decoded;
+    try {
+      decoded = await auth.verifyIdToken(idToken);
+    } catch (err) {
+      return res.status(401).json({ success: false, message: 'Invalid or expired Google token' });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const name = displayName || cleanEmail.split('@')[0];
+    const cleanEmail = decoded.email?.toLowerCase();
+    const name = decoded.name || decoded.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+    const photoURL = decoded.picture || decoded.photoURL;
 
     // Check if user exists in Firebase Auth; if not, create
     let userRecord;

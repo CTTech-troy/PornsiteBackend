@@ -13,24 +13,41 @@ import postsRouter from './src/router/posts.route.js';
 import pornhubRouter from './src/router/pornhubRoutes.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
-import { ensureBuckets } from './src/config/supabase.js';
+import * as walletsystem from './src/controller/walletsystem.controller.js';
+import { supabase, ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
-import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
+import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
+
+dotenv.config();
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
 
+// Secure HTTP headers
 app.use(
   helmet({
-    contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
   })
 );
+
 app.use(compression());
-app.use(cors());
+
+// SEC-02: Restrict CORS to allowed origins (comma-separated in env, fallback to localhost dev)
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+app.use(cors({
+  origin(origin, callback) {
+    // Allow requests with no origin (server-to-server, curl, mobile apps)
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: '1mb' }));
 
 console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode`);
@@ -133,32 +150,54 @@ try {
   const Server = mod.Server || mod.default;
   io = new Server(server, {
     cors: {
-      origin: '*',
-      methods: ['GET', 'POST']
+      origin: ALLOWED_ORIGINS,
+      methods: ['GET', 'POST'],
+      credentials: true,
+    }
+  });
+
+  // SEC-05: Socket.IO authentication middleware — verify token before connection
+  io.use(async (socket, next) => {
+    try {
+      const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.replace('Bearer ', '');
+      if (!token) return next(new Error('Authentication required'));
+      const uid = await resolveUidFromBearerToken(token);
+      if (!uid) return next(new Error('Invalid or expired token'));
+      socket.uid = uid;
+      next();
+    } catch (err) {
+      next(new Error('Authentication failed'));
     }
   });
 
   app.set('io', io);
 
   io.on('connection', (socket) => {
-    console.log('Socket connected:', socket.id);
+    console.log('Socket connected:', socket.id, 'uid:', socket.uid);
 
-  socket.on('join-live', async ({ liveId, userId }) => {
+  socket.on('join-live', async ({ liveId }) => {
     try {
+      const userId = socket.uid; // authenticated — never trust client
       await socket.join(liveId);
       await liveCtrl.joinLive(liveId, userId);
+<<<<<<< HEAD
       const session = await liveCtrl.getLiveSession(liveId);
       const viewersCount = session?.viewersCount ?? 0;
       io.to(liveId).emit('update-viewers', { viewersCount });
       io.to(liveId).emit('user_joined', { userId, session });
+=======
+      const live = await liveCtrl.getLive(liveId);
+      io.to(liveId).emit('update-viewers', { viewersCount: live?.viewers_count || 0 });
+>>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
     } catch (err) {
       console.error('join-live error', err && err.message ? err.message : err);
       socket.emit('error', { message: String(err) });
     }
   });
 
-  socket.on('leave-live', async ({ liveId, userId }) => {
+  socket.on('leave-live', async ({ liveId }) => {
     try {
+      const userId = socket.uid;
       await socket.leave(liveId);
       await liveCtrl.leaveLive(liveId, userId);
       const session = await liveCtrl.getLiveSession(liveId);
@@ -181,8 +220,9 @@ try {
     }
   });
 
-  socket.on('comment-live', async ({ liveId, userId, message }) => {
+  socket.on('comment-live', async ({ liveId, message }) => {
     try {
+      const userId = socket.uid; // authenticated
       const comment = await liveCtrl.commentLive(liveId, userId, message);
       io.to(liveId).emit('new-comment', comment);
     } catch (err) {
@@ -190,19 +230,21 @@ try {
     }
   });
 
-  socket.on('gift-live', async ({ liveId, senderId, giftType, quantity }) => {
+  socket.on('gift-live', async ({ liveId, giftType, quantity }) => {
     try {
+      const senderId = socket.uid; // authenticated — never trust client senderId
       const giftDef = giftCtrl.getGift(giftType);
       if (!giftDef) {
         socket.emit('error', { message: 'Unknown gift type' });
         return;
       }
       const qty = Math.max(1, Number(quantity) || 1);
-      const amount = +(giftDef.price * qty).toFixed(2);
-      const gift = await liveCtrl.sendGift(liveId, senderId, giftType, amount);
+      
+      const paymentResult = await walletsystem.processGiftPayment({ liveId, senderId, giftType, quantity: qty });
+      
       const live = await liveCtrl.getLive(liveId);
       io.to(liveId).emit('new-gift', {
-        gift: { ...giftDef, quantity: qty, amount, record: gift },
+        gift: { ...giftDef, quantity: qty, amount: paymentResult.totalAmount, record: paymentResult.result },
         totalGiftsAmount: live?.total_gifts_amount || 0
       });
     } catch (err) {
@@ -213,11 +255,22 @@ try {
 
   socket.on('end-live', async ({ liveId, creatorId, hostId }) => {
     try {
+<<<<<<< HEAD
       const requesterId = creatorId != null ? creatorId : hostId;
       const payout = await liveCtrl.endLive(liveId, { requesterId: requesterId != null ? requesterId : undefined });
       io.to(liveId).emit('live_ended', { sessionId: liveId, payout });
       io.to(liveId).emit('live-ended', payout);
       io.emit('live_ended', { sessionId: liveId, payout });
+=======
+      // Only the host should be able to end their own live
+      const live = await liveCtrl.getLive(liveId);
+      if (live && live.host_id !== socket.uid) {
+        socket.emit('error', { message: 'Only the host can end this live stream' });
+        return;
+      }
+      const payout = await liveCtrl.endLive(liveId);
+      io.to(liveId).emit('live-ended', payout);
+>>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
       const sockets = await io.in(liveId).fetchSockets();
       sockets.forEach(s => s.leave(liveId));
     } catch (err) {
@@ -228,6 +281,11 @@ try {
 
   socket.on('pause-live', async ({ liveId }) => {
     try {
+      const live = await liveCtrl.getLive(liveId);
+      if (live && live.host_id !== socket.uid) {
+        socket.emit('error', { message: 'Only the host can pause this live stream' });
+        return;
+      }
       await liveCtrl.pauseLive(liveId);
       io.to(liveId).emit('live-paused', { liveId });
     } catch (err) {
@@ -237,6 +295,11 @@ try {
 
   socket.on('resume-live', async ({ liveId }) => {
     try {
+      const live = await liveCtrl.getLive(liveId);
+      if (live && live.host_id !== socket.uid) {
+        socket.emit('error', { message: 'Only the host can resume this live stream' });
+        return;
+      }
       await liveCtrl.resumeLive(liveId);
       io.to(liveId).emit('live-resumed', { liveId });
     } catch (err) {
@@ -259,6 +322,15 @@ try {
   app.set('io', io);
 }
 
+// MED-01: Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled Server Error:', err && err.message ? err.message : err);
+  res.status(err.status || 500).json({
+    ok: false,
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : (err.message || 'Unknown error')
+  });
+});
+
 server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   printFirebaseStartupSummary();
@@ -266,8 +338,30 @@ server.listen(PORT, async () => {
   ensureBuckets().then(() => {}).catch(() => {});
   syncCacheToSupabase().catch(() => {});
   syncRtdbToSupabase().catch(() => {});
-  setInterval(() => {
-    syncCacheToSupabase().catch(() => {});
-    syncRtdbToSupabase().catch(() => {});
-  }, 60 * 1000);
+// MED-09: Removed the 60-second interval block. Sync now only happens safely at startup or explicitly via manual invocation.
 });
+
+// MED-10: Graceful shutdown
+async function gracefulShutdown(signal) {
+  console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+  try {
+    console.log('Force-syncing caches to Supabase...');
+    await syncCacheToSupabase();
+    await syncRtdbToSupabase();
+  } catch (err) {
+    console.error('Error during shutdown sync:', err?.message || err);
+  }
+  server.close(() => {
+    console.log('Closed out remaining connections.');
+    process.exit(0);
+  });
+  
+  // Force exit if taking too long
+  setTimeout(() => {
+    console.error('Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

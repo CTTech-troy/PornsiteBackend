@@ -8,7 +8,8 @@ import { requireAuth } from '../middleware/authFirebase.js';
 import * as tiktokVideo from '../controller/tiktokVideo.controller.js';
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB
+// MED-04: Reduced to 50MB bounds
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB
 
 // Upload (auth required)
 router.post('/upload', requireAuth, upload.single('video'), tiktokVideo.uploadVideo);
