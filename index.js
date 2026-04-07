@@ -138,15 +138,19 @@ try {
     }
   });
 
+  app.set('io', io);
+
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
 
   socket.on('join-live', async ({ liveId, userId }) => {
     try {
       await socket.join(liveId);
-      const v = await liveCtrl.joinLive(liveId, userId);
-      const live = await liveCtrl.getLive(liveId);
-      io.to(liveId).emit('update-viewers', { viewersCount: live?.viewers_count || 0 });
+      await liveCtrl.joinLive(liveId, userId);
+      const session = await liveCtrl.getLiveSession(liveId);
+      const viewersCount = session?.viewersCount ?? 0;
+      io.to(liveId).emit('update-viewers', { viewersCount });
+      io.to(liveId).emit('user_joined', { userId, session });
     } catch (err) {
       console.error('join-live error', err && err.message ? err.message : err);
       socket.emit('error', { message: String(err) });
@@ -157,8 +161,10 @@ try {
     try {
       await socket.leave(liveId);
       await liveCtrl.leaveLive(liveId, userId);
-      const live = await liveCtrl.getLive(liveId);
-      io.to(liveId).emit('update-viewers', { viewersCount: live?.viewers_count || 0 });
+      const session = await liveCtrl.getLiveSession(liveId);
+      const viewersCount = session?.viewersCount ?? 0;
+      io.to(liveId).emit('update-viewers', { viewersCount });
+      io.to(liveId).emit('user_left', { userId, session });
     } catch (err) {
       console.error('leave-live error', err && err.message ? err.message : err);
       socket.emit('error', { message: String(err) });
@@ -205,15 +211,18 @@ try {
     }
   });
 
-  socket.on('end-live', async ({ liveId }) => {
+  socket.on('end-live', async ({ liveId, creatorId, hostId }) => {
     try {
-      const payout = await liveCtrl.endLive(liveId);
+      const requesterId = creatorId != null ? creatorId : hostId;
+      const payout = await liveCtrl.endLive(liveId, { requesterId: requesterId != null ? requesterId : undefined });
+      io.to(liveId).emit('live_ended', { sessionId: liveId, payout });
       io.to(liveId).emit('live-ended', payout);
-      // optionally disconnect room sockets
+      io.emit('live_ended', { sessionId: liveId, payout });
       const sockets = await io.in(liveId).fetchSockets();
       sockets.forEach(s => s.leave(liveId));
     } catch (err) {
       console.error('end-live error', err && err.message ? err.message : err);
+      socket.emit('error', { message: String(err?.message || err) });
     }
   });
 
@@ -241,12 +250,13 @@ try {
   });
 } catch (err) {
   console.warn('socket.io not available — running without real-time features:', err?.message || err);
-  // provide a minimal no-op io object so code referencing io won't crash
   io = {
     to: () => ({ emit: () => {} }),
     in: () => ({ fetchSockets: async () => [] }),
-    on: () => {}
+    on: () => {},
+    emit: () => {}
   };
+  app.set('io', io);
 }
 
 server.listen(PORT, async () => {

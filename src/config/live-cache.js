@@ -35,7 +35,8 @@ async function createInCache(hostId, hostDisplayName = null) {
     host_id: hostId,
     host_display_name: hostDisplayName || null,
     status: 'live',
-    viewers_count: 1,
+    viewers_count: 0,
+    viewer_user_ids: [],
     total_likes: 0,
     total_gifts_amount: 0,
     created_at: now,
@@ -172,11 +173,36 @@ async function syncCacheToSupabase() {
   return { synced, errors };
 }
 
+async function addViewerToCachedLive(liveId, userId) {
+  if (!userId) return { ok: false, duplicate: false, viewers_count: 0, viewer_user_ids: [] };
+  const live = await getFromCache(liveId);
+  if (!live) return { ok: false, duplicate: false, viewers_count: 0, viewer_user_ids: [] };
+  const ids = Array.isArray(live.viewer_user_ids) ? [...live.viewer_user_ids] : [];
+  if (ids.includes(userId)) {
+    return { ok: true, duplicate: true, viewers_count: Number(live.viewers_count) || ids.length, viewer_user_ids: ids };
+  }
+  ids.push(userId);
+  await updateInCache(liveId, { viewer_user_ids: ids, viewers_count: ids.length });
+  return { ok: true, duplicate: false, viewers_count: ids.length, viewer_user_ids: ids };
+}
+
+async function removeViewerFromCachedLive(liveId, userId) {
+  if (!userId) return { ok: false, viewers_count: 0, viewer_user_ids: [] };
+  const live = await getFromCache(liveId);
+  if (!live) return { ok: false, viewers_count: 0, viewer_user_ids: [] };
+  const ids = Array.isArray(live.viewer_user_ids) ? live.viewer_user_ids.filter((id) => id !== userId) : [];
+  const next = Math.max(0, ids.length);
+  await updateInCache(liveId, { viewer_user_ids: ids, viewers_count: next });
+  return { ok: true, viewers_count: next, viewer_user_ids: ids };
+}
+
 export {
   isRtdbAvailable,
   createInCache,
   listFromCache,
   getFromCache,
   updateInCache,
-  syncCacheToSupabase
+  syncCacheToSupabase,
+  addViewerToCachedLive,
+  removeViewerFromCachedLive
 };
