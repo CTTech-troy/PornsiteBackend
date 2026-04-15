@@ -5,23 +5,25 @@ import compression from 'compression';
 import helmet from 'helmet';
 import authRouter from './src/router/auth.route.js';
 import videosRouter from './src/router/videos.route.js';
+import * as streamCtrl from './src/controller/stream.controller.js';
 import liveRouter from './src/router/live.route.js';
 import giftRouter from './src/router/gift.route.js';
 import usersRouter from './src/router/users.route.js';
 import creatorsRouter from './src/router/creators.route.js';
 import postsRouter from './src/router/posts.route.js';
 import pornhubRouter from './src/router/pornhubRoutes.js';
+import contentRemovalRouter from './src/router/ContentRemoval.route.js';
+import paymentRouter from './src/router/payment.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
 import * as walletsystem from './src/controller/walletsystem.controller.js';
+import * as chatQueue from './src/controller/chatQueue.controller.js';
 import { supabase, ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
-
-dotenv.config();
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
@@ -85,6 +87,7 @@ app.get('/api/health/auth-metrics', (req, res) => {
 
 // Auth routes
 app.use('/api/auth', authRouter);
+app.get('/api/videos/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
 // Videos proxy routes
 app.use('/api/videos', videosRouter);
 // Pornhub scraper routes
@@ -99,6 +102,10 @@ app.use('/api/users', usersRouter);
 app.use('/api/creators', creatorsRouter);
 // User posts (RTDB + Supabase Storage; same persistence as /api/videos/upload)
 app.use('/api/posts', postsRouter);
+// Content Removal Requests
+app.use('/api/contentRemoval', contentRemovalRouter);
+// Payments (membership plans, checkout, webhooks — Paystack + Monnify)
+app.use('/api/payments', paymentRouter);
 
 const PORT = process.env.PORT || 5000;
 
@@ -137,6 +144,50 @@ async function checkConnections() {
   const { firebase, supabase } = await pingServices();
   logServicePing(firebase);
   logServicePing(supabase);
+
+  // --- Paystack connectivity ---
+  const paystackKey = process.env.PAYSTACK_SECRET_KEY || '';
+  if (paystackKey) {
+    try {
+      const psRes = await fetch('https://api.paystack.co/bank?country=nigeria&perPage=1', {
+        headers: { Authorization: `Bearer ${paystackKey}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (psRes.ok) {
+        console.log('✅ Paystack: connected (test mode)');
+      } else {
+        console.warn(`⚠️  Paystack: HTTP ${psRes.status} — check PAYSTACK_SECRET_KEY`);
+      }
+    } catch (err) {
+      console.warn(`⚠️  Paystack: unreachable — ${err.message}`);
+    }
+  } else {
+    console.log('ℹ️  Paystack: PAYSTACK_SECRET_KEY not set');
+  }
+
+  // --- Monnify connectivity ---
+  const monnifyKey    = process.env.MONNIFY_API_KEY    || '';
+  const monnifySecret = process.env.MONNIFY_SECRET_KEY || '';
+  const monnifyBase   = process.env.MONNIFY_BASE_URL   || 'https://sandbox.monnify.com';
+  if (monnifyKey && monnifySecret) {
+    try {
+      const creds = Buffer.from(`${monnifyKey}:${monnifySecret}`).toString('base64');
+      const mnRes = await fetch(`${monnifyBase}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { Authorization: `Basic ${creds}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (mnRes.ok) {
+        console.log('✅ Monnify:  connected (sandbox)');
+      } else {
+        console.warn(`⚠️  Monnify:  HTTP ${mnRes.status} — check MONNIFY_API_KEY / MONNIFY_SECRET_KEY`);
+      }
+    } catch (err) {
+      console.warn(`⚠️  Monnify:  unreachable — ${err.message}`);
+    }
+  } else {
+    console.log('ℹ️  Monnify:  MONNIFY_API_KEY / MONNIFY_SECRET_KEY not set');
+  }
 }
 
 // Create HTTP server and attach socket.io (dynamic import with graceful fallback)
@@ -172,23 +223,30 @@ try {
 
   app.set('io', io);
 
+  // --- Random chat tracking maps ---
+  // userId  → socket.id
+  const userSocketMap = new Map();
+  // userId  → { roomId }
+  const userRoomMap   = new Map();
+
+  // Periodic stale-queue cleanup (every 30 s)
+  setInterval(() => chatQueue.cleanupStaleQueue(30).catch(() => {}), 30_000);
+
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id, 'uid:', socket.uid);
+
+    // Register socket for this user (needed so peers can look up the live socket)
+    userSocketMap.set(socket.uid, socket.id);
 
   socket.on('join-live', async ({ liveId }) => {
     try {
       const userId = socket.uid; // authenticated — never trust client
       await socket.join(liveId);
       await liveCtrl.joinLive(liveId, userId);
-<<<<<<< HEAD
       const session = await liveCtrl.getLiveSession(liveId);
       const viewersCount = session?.viewersCount ?? 0;
       io.to(liveId).emit('update-viewers', { viewersCount });
       io.to(liveId).emit('user_joined', { userId, session });
-=======
-      const live = await liveCtrl.getLive(liveId);
-      io.to(liveId).emit('update-viewers', { viewersCount: live?.viewers_count || 0 });
->>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
     } catch (err) {
       console.error('join-live error', err && err.message ? err.message : err);
       socket.emit('error', { message: String(err) });
@@ -253,24 +311,17 @@ try {
     }
   });
 
-  socket.on('end-live', async ({ liveId, creatorId, hostId }) => {
+  socket.on('end-live', async ({ liveId }) => {
     try {
-<<<<<<< HEAD
-      const requesterId = creatorId != null ? creatorId : hostId;
-      const payout = await liveCtrl.endLive(liveId, { requesterId: requesterId != null ? requesterId : undefined });
-      io.to(liveId).emit('live_ended', { sessionId: liveId, payout });
-      io.to(liveId).emit('live-ended', payout);
-      io.emit('live_ended', { sessionId: liveId, payout });
-=======
-      // Only the host should be able to end their own live
       const live = await liveCtrl.getLive(liveId);
-      if (live && live.host_id !== socket.uid) {
+      if (live && String(live.host_id) !== String(socket.uid)) {
         socket.emit('error', { message: 'Only the host can end this live stream' });
         return;
       }
-      const payout = await liveCtrl.endLive(liveId);
+      const payout = await liveCtrl.endLive(liveId, { requesterId: socket.uid });
+      io.to(liveId).emit('live_ended', { sessionId: liveId, payout });
       io.to(liveId).emit('live-ended', payout);
->>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
+      io.emit('live_ended', { sessionId: liveId, payout });
       const sockets = await io.in(liveId).fetchSockets();
       sockets.forEach(s => s.leave(liveId));
     } catch (err) {
@@ -307,8 +358,164 @@ try {
     }
   });
 
-  socket.on('disconnect', () => {
+  // -----------------------------------------------------------------------
+  // Random video-chat events
+  // -----------------------------------------------------------------------
+
+  /**
+   * chat:find-match { gender }
+   * Enqueue the user and attempt an immediate match.
+   * Emits chat:matched (to both) or chat:waiting (to self).
+   */
+  socket.on('chat:find-match', async ({ gender = 'any' } = {}) => {
+    try {
+      const userId = socket.uid;
+
+      // Update socket map (may have changed on reconnect)
+      userSocketMap.set(userId, socket.id);
+
+      // Put caller into the queue
+      await chatQueue.enqueueUser(userId, gender, socket.id);
+
+      // Try to find a partner
+      const match = await chatQueue.dequeueAndMatch(userId, gender);
+
+      if (!match) {
+        // No partner yet — wait
+        socket.emit('chat:waiting');
+        return;
+      }
+
+      const { roomId, peerUserId, peerSocketId } = match;
+
+      // Track room for both users
+      userRoomMap.set(userId,     { roomId });
+      userRoomMap.set(peerUserId, { roomId });
+
+      // Join both sockets into the room
+      socket.join(roomId);
+      const peerSocket = io.sockets.sockets.get(peerSocketId);
+      if (peerSocket) peerSocket.join(roomId);
+
+      // Notify caller (initiator creates WebRTC offer)
+      socket.emit('chat:matched', { roomId, initiator: true, peerId: peerUserId });
+
+      // Notify partner
+      if (peerSocket) {
+        peerSocket.emit('chat:matched', { roomId, initiator: false, peerId: userId });
+      } else {
+        // Peer socket disconnected between queue entry and match — emit to room anyway
+        io.to(roomId).emit('chat:matched', { roomId, initiator: false, peerId: userId });
+      }
+    } catch (err) {
+      console.error('chat:find-match error:', err?.message || err);
+      socket.emit('chat:error', { message: String(err?.message || err) });
+    }
+  });
+
+  /**
+   * chat:cancel
+   * Remove the user from the queue without starting a match.
+   */
+  socket.on('chat:cancel', async () => {
+    try {
+      await chatQueue.dequeueUser(socket.uid);
+      userRoomMap.delete(socket.uid);
+    } catch (err) {
+      console.error('chat:cancel error:', err?.message || err);
+    }
+  });
+
+  /**
+   * chat:signal { roomId, signal }
+   * Relay a WebRTC signal (offer / answer / ICE candidate) to the peer.
+   */
+  socket.on('chat:signal', ({ roomId, signal } = {}) => {
+    if (!roomId || !signal) return;
+    // Relay to everyone else in the room (i.e., the peer)
+    socket.to(roomId).emit('chat:signal', { signal, fromId: socket.uid });
+  });
+
+  /**
+   * chat:next { roomId }
+   * End the current chat and immediately re-enter the queue.
+   * Notifies the peer, then emits chat:ended to the caller.
+   */
+  socket.on('chat:next', async ({ roomId } = {}) => {
+    try {
+      const userId = socket.uid;
+
+      if (roomId) {
+        await chatQueue.endChatRoom(roomId);
+        socket.to(roomId).emit('chat:peer-left', { roomId });
+        socket.leave(roomId);
+        userRoomMap.delete(userId);
+      }
+
+      socket.emit('chat:ended', { roomId });
+    } catch (err) {
+      console.error('chat:next error:', err?.message || err);
+      socket.emit('chat:error', { message: String(err?.message || err) });
+    }
+  });
+
+  /**
+   * chat:leave { roomId }
+   * End the chat completely without re-queuing.
+   */
+  socket.on('chat:leave', async ({ roomId } = {}) => {
+    try {
+      const userId = socket.uid;
+
+      if (roomId) {
+        await chatQueue.endChatRoom(roomId);
+        socket.to(roomId).emit('chat:peer-left', { roomId });
+        socket.leave(roomId);
+      }
+
+      await chatQueue.dequeueUser(userId);
+      userRoomMap.delete(userId);
+      socket.emit('chat:ended', { roomId });
+    } catch (err) {
+      console.error('chat:leave error:', err?.message || err);
+    }
+  });
+
+  /**
+   * chat:message { roomId, text }
+   * Relay a text message to the peer in the room.
+   */
+  socket.on('chat:message', ({ roomId, text } = {}) => {
+    if (!roomId || !text) return;
+    const safeText = String(text).slice(0, 500); // cap at 500 chars
+    socket.to(roomId).emit('chat:message', {
+      fromId: socket.uid,
+      text:   safeText,
+      ts:     Date.now(),
+    });
+  });
+
+  socket.on('disconnect', async () => {
     console.log('Socket disconnected:', socket.id);
+
+    const userId = socket.uid;
+    userSocketMap.delete(userId);
+
+    // Clean up any active chat room
+    const roomEntry = userRoomMap.get(userId);
+    if (roomEntry) {
+      const { roomId } = roomEntry;
+      userRoomMap.delete(userId);
+      try {
+        await chatQueue.endChatRoom(roomId);
+        io.to(roomId).emit('chat:peer-left', { roomId });
+      } catch (err) {
+        console.error('disconnect cleanup error:', err?.message || err);
+      }
+    }
+
+    // Remove from queue if still waiting
+    try { await chatQueue.dequeueUser(userId); } catch (_) {}
   });
   });
 } catch (err) {

@@ -30,7 +30,6 @@ router.post('/cancel-all', async (req, res) => {
   }
 });
 
-<<<<<<< HEAD
 function emitToLive(io, liveId, event, payload) {
   try {
     const inst = io && typeof io.to === 'function' ? io : null;
@@ -134,16 +133,10 @@ router.get('/session/:sessionId', async (req, res) => {
   }
 });
 
-// POST /api/live/create { hostId, hostDisplayName? }
-router.post('/create', async (req, res) => {
-  const { hostId, hostDisplayName } = req.body || {};
-  if (!hostId) return res.status(400).json({ ok: false, error: 'missing hostId' });
-=======
-// POST /api/live/create — SEC-08: requireAuth, use req.uid as hostId
+// POST /api/live/create — requireAuth, use req.uid as hostId
 router.post('/create', requireAuth, async (req, res) => {
-  const hostId = req.uid; // authenticated — never trust client-supplied hostId
+  const hostId = req.uid;
   const { hostDisplayName } = req.body || {};
->>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
   try {
     const live = await liveCtrl.createLive(hostId, hostDisplayName);
     const session = liveCtrl.buildSession(live, []);
@@ -174,29 +167,18 @@ router.get('/my-active', requireAuth, async (req, res) => {
   }
 });
 
-<<<<<<< HEAD
-// POST /api/live/:id/end  body: { creatorId? } — creatorId required when verifying host
-router.post('/:id/end', async (req, res) => {
-=======
-// POST /api/live/:id/end — SEC-08: requireAuth + host ownership check
+// POST /api/live/:id/end — requireAuth + host ownership check
 router.post('/:id/end', requireAuth, async (req, res) => {
->>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
   const { id } = req.params;
-  const { creatorId } = req.body || {};
   try {
-<<<<<<< HEAD
-    const payout = await liveCtrl.endLive(id, { requesterId: creatorId != null ? creatorId : undefined });
+    const live = await liveCtrl.getLive(id);
+    if (live && String(live.host_id) !== String(req.uid)) {
+      return res.status(403).json({ ok: false, error: 'Only the host can end this live stream' });
+    }
+    const payout = await liveCtrl.endLive(id, { requesterId: req.uid });
     const io = req.app.get('io');
     emitToLive(io, id, 'live_ended', { sessionId: id, payout });
     emitToLive(io, id, 'live-ended', payout);
-=======
-    // Verify the requester is the host of this live stream
-    const live = await liveCtrl.getLive(id);
-    if (live && live.host_id !== req.uid) {
-      return res.status(403).json({ ok: false, error: 'Only the host can end this live stream' });
-    }
-    const payout = await liveCtrl.endLive(id);
->>>>>>> 1a919b4efad8956c76b70a2e35d320b6332d4eb8
     res.json({ ok: true, payout });
   } catch (err) {
     console.error('live.end error', err && err.message ? err.message : err);
