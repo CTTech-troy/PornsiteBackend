@@ -13,6 +13,8 @@ import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
+router.get('/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
+
 // MED-04: Reduced from 200MB to 50MB to strictly manage Heap fragmentation Memory Leaks
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB
 const uploadVideoWithThumb = multer({
@@ -107,12 +109,6 @@ router.delete('/:videoId/like', requireAuth, videoInteractions.unlikeVideo);
 router.get('/:videoId/comments', videoInteractions.getComments);
 // POST /api/videos/:videoId/comments
 router.post('/:videoId/comments', requireAuth, videoInteractions.addComment);
-
-// BUG-07: /stream/:id must be defined BEFORE /:id (otherwise /:id matches 'stream' first)
-// GET /api/videos/stream/:id — return playable stream URL when available
-router.get('/stream/:id', async (req, res) => {
-  return streamCtrl.getStreamUrl(req, res);
-});
 
 // GET /api/videos/:id — single video (from feed cache) for detail page
 router.get('/:id', async (req, res) => {

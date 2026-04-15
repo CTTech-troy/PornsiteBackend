@@ -1,7 +1,12 @@
 import express from 'express';
 import multer from 'multer';
 import * as authController from '../controller/auth.controller.js';
-import { authRouteLimiter, authBurstLimiter } from '../middleware/authRateLimit.js';
+import {
+  authLoginBurst,
+  authLoginWindow,
+  authSignupBurst,
+  authSignupWindow,
+} from '../middleware/authRateLimit.js';
 import { requireAuth } from '../middleware/authFirebase.js';
 import { body } from 'express-validator';
 import { validateRequest } from '../middleware/validator.js';
@@ -10,7 +15,7 @@ const router = express.Router();
 // MED-04: Reduced to 50MB to prevent memory exhaustion
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-const limitLogin = [authLoginBurst, authLoginWindow];
+const limitAuth = [authLoginBurst, authLoginWindow];
 const limitSignup = [authSignupBurst, authSignupWindow];
 
 // MED-08: Validation rules
@@ -44,7 +49,7 @@ const approveCreatorVal = [
   validateRequest
 ];
 
-router.post('/signup', ...limitAuth, signupVal, authController.signup);
+router.post('/signup', ...limitSignup, signupVal, authController.signup);
 router.post('/login', ...limitAuth, loginVal, authController.login);
 router.post('/google', ...limitAuth, googleVal, authController.google);
 router.post('/age-consent', ...limitAuth, ageConsentVal, authController.submitAgeConsent);
