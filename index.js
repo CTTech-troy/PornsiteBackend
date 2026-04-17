@@ -23,6 +23,7 @@ import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
+import { pingPaymentService } from './src/services/paymentServiceClient.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
 import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
 
@@ -151,48 +152,19 @@ async function checkConnections() {
   logServicePing(firebase);
   logServicePing(supabase);
 
-  // --- Paystack connectivity ---
-  const paystackKey = process.env.PAYSTACK_SECRET_KEY || '';
-  if (paystackKey) {
-    try {
-      const psRes = await fetch('https://api.paystack.co/bank?country=nigeria&perPage=1', {
-        headers: { Authorization: `Bearer ${paystackKey}` },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (psRes.ok) {
-        console.log('✅ Paystack: connected (test mode)');
-      } else {
-        console.warn(`⚠️  Paystack: HTTP ${psRes.status} — check PAYSTACK_SECRET_KEY`);
-      }
-    } catch (err) {
-      console.warn(`⚠️  Paystack: unreachable — ${err.message}`);
-    }
+  // --- Payment service health ---
+  // Checkout creation is fully delegated to the C# payment service.
+  // This is a non-blocking check — the backend starts regardless of whether
+  // the payment service is reachable.
+  const paymentHealth = await pingPaymentService();
+  if (paymentHealth.ok) {
+    console.log(`✅ Payment service: ${paymentHealth.detail}`);
   } else {
-    console.log('ℹ️  Paystack: PAYSTACK_SECRET_KEY not set');
-  }
-
-  // --- Monnify connectivity ---
-  const monnifyKey    = process.env.MONNIFY_API_KEY    || '';
-  const monnifySecret = process.env.MONNIFY_SECRET_KEY || '';
-  const monnifyBase   = process.env.MONNIFY_BASE_URL   || 'https://sandbox.monnify.com';
-  if (monnifyKey && monnifySecret) {
-    try {
-      const creds = Buffer.from(`${monnifyKey}:${monnifySecret}`).toString('base64');
-      const mnRes = await fetch(`${monnifyBase}/api/v1/auth/login`, {
-        method: 'POST',
-        headers: { Authorization: `Basic ${creds}` },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (mnRes.ok) {
-        console.log('✅ Monnify:  connected (sandbox)');
-      } else {
-        console.warn(`⚠️  Monnify:  HTTP ${mnRes.status} — check MONNIFY_API_KEY / MONNIFY_SECRET_KEY`);
-      }
-    } catch (err) {
-      console.warn(`⚠️  Monnify:  unreachable — ${err.message}`);
-    }
-  } else {
-    console.log('ℹ️  Monnify:  MONNIFY_API_KEY / MONNIFY_SECRET_KEY not set');
+    console.warn(
+      `⚠️  Payment service: ${paymentHealth.detail}\n` +
+      `   → Checkout will fail until the service is running.\n` +
+      `   → Set PAYMENT_SERVICE_URL in backend/.env and start the payment service.`
+    );
   }
 }
 

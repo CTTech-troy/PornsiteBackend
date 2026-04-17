@@ -7,12 +7,16 @@
  *   GET  /api/payments/plans              — list active membership plans
  *
  * Authenticated
- *   POST /api/payments/checkout           — create Paystack / Monnify checkout session
+ *   POST /api/payments/checkout           — create checkout session via payment service
  *   GET  /api/payments/membership         — current user's plan + coin balance
  *
- * Webhooks (no auth — verified by signature)
+ * Webhooks (no auth — verified by HMAC signature)
  *   POST /api/payments/webhooks/paystack  — Paystack charge.success
  *   POST /api/payments/webhooks/monnify   — Monnify SUCCESSFUL_TRANSACTION
+ *
+ * Checkout creation is fully delegated to the C# payment service via
+ * paymentServiceClient.  Only webhook signature verification and plan-
+ * activation logic live here.
  */
 
 import express from 'express';
@@ -23,112 +27,18 @@ import {
   getUserMembership,
   activatePlan,
 } from '../controller/membership.controller.js';
+import { createCheckout as createPaymentServiceCheckout } from '../services/paymentServiceClient.js';
 
 const router = express.Router();
 
 // ---------------------------------------------------------------------------
-// Config
+// Webhook verification keys
+// These are only needed to verify HMAC signatures on incoming webhook calls
+// and to re-query the payment providers for server-side confirmation.
+// Checkout creation credentials live exclusively in the payment service.
 // ---------------------------------------------------------------------------
-const PAYSTACK_SECRET_KEY  = process.env.PAYSTACK_SECRET_KEY  || '';
-const MONNIFY_API_KEY      = process.env.MONNIFY_API_KEY      || '';
-const MONNIFY_SECRET_KEY   = process.env.MONNIFY_SECRET_KEY   || '';
-const MONNIFY_BASE_URL     = process.env.MONNIFY_BASE_URL     || 'https://sandbox.monnify.com';
-const MONNIFY_CONTRACT     = process.env.MONNIFY_CONTRACT_CODE || process.env.MONNIFY_CONTRACT || '';
-
-// Front-end callback URLs (set these in your .env)
-const PAYSTACK_CALLBACK    = process.env.PAYSTACK_CALLBACK_URL || 'http://localhost:5173/payment/success';
-const MONNIFY_REDIRECT     = process.env.MONNIFY_REDIRECT_URL  || 'http://localhost:5173/payment/return';
-
-// ---------------------------------------------------------------------------
-// Helper — initiate a Paystack transaction
-// Returns { checkoutUrl, reference, provider: 'paystack' }
-// ---------------------------------------------------------------------------
-async function paystackInitialize({ reference, email, amount, currency, metadata }) {
-  if (!PAYSTACK_SECRET_KEY) throw new Error('PAYSTACK_SECRET_KEY not configured');
-
-  const res = await fetch('https://api.paystack.co/transaction/initialize', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`,
-    },
-    body: JSON.stringify({
-      reference,
-      email:        email || 'guest@letstream.tv',
-      amount:       Math.round(amount * 100), // kobo / cents
-      currency,
-      callback_url: PAYSTACK_CALLBACK,
-      metadata,
-    }),
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body?.status) {
-    throw new Error(body?.message ?? `Paystack error ${res.status}`);
-  }
-
-  return {
-    checkoutUrl: body.data.authorization_url,
-    reference:   body.data.reference,
-    provider:    'paystack',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Helper — initiate a Monnify transaction
-// Returns { checkoutUrl, reference, provider: 'monnify' }
-// ---------------------------------------------------------------------------
-async function monnifyInitialize({ reference, email, name, amount, currency, description, userId, planId }) {
-  if (!MONNIFY_API_KEY || !MONNIFY_SECRET_KEY) throw new Error('Monnify credentials not configured');
-
-  // 1. Get bearer token
-  const creds   = Buffer.from(`${MONNIFY_API_KEY}:${MONNIFY_SECRET_KEY}`).toString('base64');
-  const authRes = await fetch(`${MONNIFY_BASE_URL}/api/v1/auth/login`, {
-    method:  'POST',
-    headers: { Authorization: `Basic ${creds}` },
-    signal:  AbortSignal.timeout(10_000),
-  });
-  const authData = await authRes.json().catch(() => ({}));
-  const token    = authData?.responseBody?.accessToken;
-  if (!token) throw new Error('Monnify authentication failed');
-
-  // 2. Init transaction — include userId + planId in metaData so the webhook
-  //    can activate the plan without relying solely on reference parsing.
-  const txRes = await fetch(`${MONNIFY_BASE_URL}/api/v1/merchant/transactions/init-transaction`, {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      amount,
-      customerName:       name  || 'Member',
-      customerEmail:      email || 'guest@letstream.tv',
-      paymentReference:   reference,
-      paymentDescription: description,
-      currencyCode:       currency,
-      contractCode:       MONNIFY_CONTRACT,
-      redirectUrl:        MONNIFY_REDIRECT,
-      paymentMethods:     ['CARD', 'ACCOUNT_TRANSFER'],
-      // metaData is returned as-is in the webhook — lets us recover userId/planId
-      // without parsing the reference string (which can contain extra underscores).
-      metaData:           { userId: userId ?? '', planId: planId ?? '' },
-    }),
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  const txData = await txRes.json().catch(() => ({}));
-  if (!txRes.ok || txData?.requestSuccessful === false) {
-    throw new Error(txData?.responseMessage ?? `Monnify error ${txRes.status}`);
-  }
-
-  return {
-    checkoutUrl: txData.responseBody.checkoutUrl,
-    reference:   txData.responseBody.paymentReference,
-    provider:    'monnify',
-  };
-}
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || '';
+const MONNIFY_SECRET_KEY  = process.env.MONNIFY_SECRET_KEY  || '';
 
 // ---------------------------------------------------------------------------
 // GET /api/payments/plans
@@ -157,7 +67,8 @@ router.get('/membership', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/payments/checkout  (requires auth)
 //
-// Body: { planId, countryCode, customerEmail, customerName, customerPhone }
+// Delegates to the C# payment service via PAYMENT_SERVICE_URL.
+// Body: { planId, countryCode, customerEmail, customerName }
 // ---------------------------------------------------------------------------
 router.post('/checkout', requireAuth, async (req, res) => {
   try {
@@ -180,38 +91,22 @@ router.post('/checkout', requireAuth, async (req, res) => {
     const amount    = isNigeria ? Number(plan.price_ngn) : Number(plan.price_usd);
     const currency  = isNigeria ? 'NGN' : 'USD';
 
-    // Reference encodes userId + planId so webhooks can recover them without a DB lookup
-    // Uses underscore separators — colons are rejected by Paystack and Monnify validators
-    const reference = `${req.uid}_${planId}_${Date.now()}`;
+    // orderId encodes userId + planId so webhooks can recover them.
+    // Firebase UIDs are 28 alphanumeric chars (no underscores), so the first
+    // segment is always the userId.  planId may contain underscores (coins_30).
+    const orderId = `${req.uid}_${planId}_${Date.now()}`;
 
-    let paymentResp;
-
-    if (isNigeria && MONNIFY_API_KEY) {
-      // Nigerian users → Monnify
-      paymentResp = await monnifyInitialize({
-        reference,
-        email:       customerEmail,
-        name:        customerName,
-        amount,
-        currency,
-        description: plan.name,
-        userId:      req.uid,   // passed into metaData so the webhook can recover them
-        planId,
-      });
-    } else {
-      // Everyone else → Paystack (also works for NGN)
-      paymentResp = await paystackInitialize({
-        reference,
-        email:    customerEmail,
-        amount,
-        currency,
-        metadata: {
-          user_id:  req.uid,
-          plan_id:  planId,
-          order_id: reference,
-        },
-      });
-    }
+    const paymentResp = await createPaymentServiceCheckout({
+      orderId,
+      userId:        req.uid,
+      planId,
+      countryCode:   countryCode.trim().toUpperCase(),
+      currency,
+      amount,
+      productName:   plan.name,
+      customerEmail,
+      customerName,
+    });
 
     res.json({
       ok:          true,
@@ -221,7 +116,9 @@ router.post('/checkout', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('[payment] checkout error:', err.message);
-    res.status(500).json({ ok: false, error: err.message });
+    // Surface service-down errors as 503 so the frontend can show a friendly message
+    const status = /unreachable|timed out/i.test(err.message) ? 503 : 500;
+    res.status(status).json({ ok: false, error: err.message });
   }
 });
 
@@ -232,13 +129,10 @@ router.post('/checkout', requireAuth, async (req, res) => {
 // Signature arrives in the `x-paystack-signature` header.
 // ---------------------------------------------------------------------------
 router.post('/webhooks/paystack', async (req, res) => {
-  // --- Signature verification ---
-  // Paystack signs the raw request body. We use req.rawBody which is captured
-  // by the global express.json() verify callback — never re-serialised JSON.
   const receivedSig = req.headers['x-paystack-signature'] ?? '';
 
   if (PAYSTACK_SECRET_KEY) {
-    const rawPayload = req.rawBody ?? JSON.stringify(req.body); // fallback for safety
+    const rawPayload = req.rawBody ?? JSON.stringify(req.body);
     const computedSig = crypto
       .createHmac('sha512', PAYSTACK_SECRET_KEY)
       .update(rawPayload)
@@ -257,10 +151,8 @@ router.post('/webhooks/paystack', async (req, res) => {
   if (event === 'charge.success' && data?.status === 'success') {
     const meta      = data.metadata ?? {};
     const reference = data.reference;
-    // orderId format: "{userId}_{planId}_{timestamp}" — also in metadata directly
     const userId    = meta.user_id  ?? _parseOrderId(meta.order_id)?.userId;
     const planId    = meta.plan_id  ?? _parseOrderId(meta.order_id)?.planId;
-    // amount is in smallest unit (kobo / cents) — convert to USD for record keeping
     const currency  = (data.currency ?? 'NGN').toUpperCase();
     const amountUsd = currency === 'USD'
       ? (data.amount ?? 0) / 100
@@ -272,15 +164,12 @@ router.post('/webhooks/paystack', async (req, res) => {
     }
 
     try {
-      // Re-verify server-side before crediting
       await _verifyPaystackTransaction(reference);
-
       await activatePlan(userId, planId, {
         reference,
-        provider:     'paystack',
+        provider:      'paystack',
         amountPaidUsd: amountUsd,
       });
-
       console.log(`[paystack-webhook] Plan "${planId}" activated for user "${userId}"`);
     } catch (err) {
       console.error('[paystack-webhook] activatePlan failed:', err.message);
@@ -294,15 +183,14 @@ router.post('/webhooks/paystack', async (req, res) => {
 // POST /api/payments/webhooks/monnify
 //
 // Monnify sends a POST with a JSON body.
-// Signature is HMAC-SHA512 of the serialized payload using the Monnify secret key.
-// Per Monnify docs: always re-query transaction status before crediting the user.
+// Signature is HMAC-SHA512 of the serialised payload using the secret key.
+// Per Monnify docs: always re-query transaction status before crediting.
 // ---------------------------------------------------------------------------
 router.post('/webhooks/monnify', express.json(), async (req, res) => {
-  // --- Signature verification ---
   const receivedHash = req.headers['monnify-signature'] ?? '';
 
   if (MONNIFY_SECRET_KEY && receivedHash) {
-    const rawPayload = req.rawBody ?? JSON.stringify(req.body); // rawBody set by global verify cb
+    const rawPayload = req.rawBody ?? JSON.stringify(req.body);
     const computedHash = crypto
       .createHmac('sha512', MONNIFY_SECRET_KEY)
       .update(rawPayload)
@@ -310,9 +198,9 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
 
     const computedBuf = Buffer.from(computedHash, 'hex');
     const receivedBuf = Buffer.from(receivedHash.toLowerCase(), 'hex');
-    // timingSafeEqual throws when buffers have different lengths — guard explicitly.
-    const sigMismatch = computedBuf.length !== receivedBuf.length
-      || !crypto.timingSafeEqual(computedBuf, receivedBuf);
+    const sigMismatch =
+      computedBuf.length !== receivedBuf.length ||
+      !crypto.timingSafeEqual(computedBuf, receivedBuf);
 
     if (sigMismatch) {
       console.error('[monnify-webhook] Signature mismatch');
@@ -325,10 +213,10 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
   const { eventType, eventData } = req.body ?? {};
 
   if (eventType === 'SUCCESSFUL_TRANSACTION') {
-    const txRef     = eventData?.transactionReference;
-    const payRef    = eventData?.paymentReference;   // This is the paymentReference we sent
-    const txStatus  = eventData?.paymentStatus;
-    const metaData  = eventData?.metaData ?? {};
+    const txRef    = eventData?.transactionReference;
+    const payRef   = eventData?.paymentReference;
+    const txStatus = eventData?.paymentStatus;
+    const metaData = eventData?.metaData ?? {};
 
     if (txStatus !== 'PAID') {
       console.log('[monnify-webhook] Non-PAID status received:', txStatus);
@@ -336,13 +224,12 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
     }
 
     try {
-      // Re-query transaction server-side before activating (Monnify recommendation)
       await _verifyMonnifyTransaction(txRef);
 
       const userId    = metaData?.userId ?? _parseOrderId(payRef)?.userId;
       const planId    = metaData?.planId ?? _parseOrderId(payRef)?.planId;
       const amountUsd = eventData?.amountPaid
-        ? Number(eventData.amountPaid) / 1550   // rough NGN→USD conversion; replace with live rate
+        ? Number(eventData.amountPaid) / 1550 // rough NGN→USD; replace with live rate
         : undefined;
 
       if (!userId || !planId) {
@@ -351,11 +238,10 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
       }
 
       await activatePlan(userId, planId, {
-        reference:    txRef ?? payRef,
-        provider:     'monnify',
+        reference:     txRef ?? payRef,
+        provider:      'monnify',
         amountPaidUsd: amountUsd,
       });
-
       console.log(`[monnify-webhook] Plan "${planId}" activated for user "${userId}"`);
     } catch (err) {
       console.error('[monnify-webhook] activatePlan failed:', err.message);
@@ -375,17 +261,12 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
  * Firebase UIDs are 28 alphanumeric characters (no underscores).
  * Plan IDs may contain underscores (e.g. "coins_30", "coins_120").
  * The timestamp is always the last numeric segment.
- *
- * Strategy: take the first segment as userId, the last segment as timestamp,
- * and rejoin everything in between as the planId.
  */
 function _parseOrderId(orderId) {
   if (!orderId) return null;
   const parts = orderId.split('_');
-  // Need at least: userId + planId + timestamp → 3 parts minimum
   if (parts.length < 3) return null;
   const userId = parts[0];
-  // Rejoin the middle segments to reconstruct multi-word plan IDs like "coins_30"
   const planId = parts.slice(1, -1).join('_');
   if (!userId || !planId) return null;
   return { userId, planId };
@@ -396,19 +277,18 @@ function _parseOrderId(orderId) {
  * Throws if the transaction is not PAID.
  */
 async function _verifyMonnifyTransaction(transactionReference) {
-  const MONNIFY_API_KEY = process.env.MONNIFY_API_KEY ?? '';
-  const MONNIFY_SECRET  = process.env.MONNIFY_SECRET_KEY ?? '';
-  const MONNIFY_BASE    = process.env.MONNIFY_BASE_URL ?? 'https://sandbox.monnify.com';
+  const apiKey = process.env.MONNIFY_API_KEY   ?? '';
+  const secret = process.env.MONNIFY_SECRET_KEY ?? '';
+  const base   = process.env.MONNIFY_BASE_URL   ?? 'https://sandbox.monnify.com';
 
-  if (!MONNIFY_API_KEY || !MONNIFY_SECRET) {
+  if (!apiKey || !secret) {
     console.warn('[monnify] Skipping re-query — credentials not configured');
     return;
   }
 
-  const credentials = Buffer.from(`${MONNIFY_API_KEY}:${MONNIFY_SECRET}`).toString('base64');
+  const credentials = Buffer.from(`${apiKey}:${secret}`).toString('base64');
 
-  // 1. Get auth token
-  const authRes = await fetch(`${MONNIFY_BASE}/api/v1/auth/login`, {
+  const authRes  = await fetch(`${base}/api/v1/auth/login`, {
     method:  'POST',
     headers: { Authorization: `Basic ${credentials}` },
   });
@@ -416,9 +296,8 @@ async function _verifyMonnifyTransaction(transactionReference) {
   const token    = authData?.responseBody?.accessToken;
   if (!token) throw new Error('Monnify re-query auth failed');
 
-  // 2. Fetch transaction
-  const txRes = await fetch(
-    `${MONNIFY_BASE}/api/v2/transactions/${encodeURIComponent(transactionReference)}`,
+  const txRes  = await fetch(
+    `${base}/api/v2/transactions/${encodeURIComponent(transactionReference)}`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   const txData = await txRes.json();
@@ -439,14 +318,16 @@ async function _verifyPaystackTransaction(reference) {
     return;
   }
 
-  const res = await fetch(
+  const res  = await fetch(
     `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
     { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
   );
   const body = await res.json();
 
   if (!body?.status || body?.data?.status !== 'success') {
-    throw new Error(`Paystack transaction not successful (status: ${body?.data?.status ?? 'unknown'})`);
+    throw new Error(
+      `Paystack transaction not successful (status: ${body?.data?.status ?? 'unknown'})`
+    );
   }
 }
 
