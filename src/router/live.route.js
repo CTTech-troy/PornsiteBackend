@@ -191,7 +191,7 @@ router.post('/:id/pause', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     const live = await liveCtrl.getLive(id);
-    if (live && live.host_id !== req.uid) {
+    if (live && String(live.host_id) !== String(req.uid)) {
       return res.status(403).json({ ok: false, error: 'Only the host can pause this live stream' });
     }
     const d = await liveCtrl.pauseLive(id);

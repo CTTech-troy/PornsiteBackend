@@ -2,7 +2,7 @@
 // Payment Service — ASP.NET Core Minimal API
 // Providers: Paystack (international) · Monnify (NG)
 // Reads secrets from paymentSystem/.env via DotNetEnv.
-// Run: dotnet run  (default port 5001, set via PAYMENT_SERVICE_PORT env var)
+// Run: dotnet run  (uses PORT → PAYMENT_SERVICE_PORT → 10000; binds 0.0.0.0)
 // =============================================================================
 
 using System.Net.Http.Headers;
@@ -52,8 +52,15 @@ builder.Services.AddTransient<IPaymentRouter, PaymentRouter>();
 builder.Services.AddTransient<PaystackGateway>();
 builder.Services.AddTransient<MonnifyGateway>();
 
-var port = Environment.GetEnvironmentVariable("PAYMENT_SERVICE_PORT") ?? "5001";
-builder.WebHost.UseUrls($"http://localhost:{port}");
+// Render injects PORT dynamically; fall back to PAYMENT_SERVICE_PORT for local
+// dev, then 10000 as a safe default.
+var port = Environment.GetEnvironmentVariable("PORT")
+    ?? Environment.GetEnvironmentVariable("PAYMENT_SERVICE_PORT")
+    ?? "10000";
+
+// Must bind to 0.0.0.0 so Render's port scanner can detect the open port.
+// ListenLocalhost / localhost would only be visible inside the container.
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 var app = builder.Build();
 
@@ -117,7 +124,7 @@ catch (Exception ex)
     Console.WriteLine($"  ✗ Monnify   — {ex.Message}");
 }
 
-Console.WriteLine($"\n  Listening on http://localhost:{port}\n");
+Console.WriteLine($"\n  Listening on http://0.0.0.0:{port}\n");
 
 // ---------------------------------------------------------------------------
 // POST /api/payments/create — called by Node.js to create a checkout session
@@ -150,6 +157,9 @@ app.MapPost("/api/payments/create", async (
 // ---------------------------------------------------------------------------
 app.MapGet("/api/payments/health", () =>
     Results.Ok(new { status = "ok", service = "payment-service", providers = new[] { "paystack", "monnify" } }));
+
+// Root health probe — Render (and other platforms) hit /health by convention.
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 // ---------------------------------------------------------------------------
 app.Run();

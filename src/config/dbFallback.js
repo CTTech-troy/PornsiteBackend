@@ -34,7 +34,8 @@ async function insertUser(user) {
     throw new Error('User save failed: Firebase Realtime Database is not available.');
   }
   try {
-    const id = user.id || user.id === 0 ? user.id : (user.id = user.id || (user.uid || Date.now().toString()));
+    if (!user.id && user.id !== 0) user.id = user.uid || Date.now().toString();
+    const id = user.id;
     await rtdb.ref(`users/${id}`).set(user);
     return { source: 'rtdb', data: user };
   } catch (err) {
