@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import * as authController from '../controller/auth.controller.js';
+import * as authController from '../controller/Auth.Controller.js';
 import {
   authLoginBurst,
   authLoginWindow,
