@@ -352,9 +352,8 @@ export async function applyCreator(req, res) {
         const payloadStr = JSON.stringify(payloadForAdmin);
         
         const headers = { 'Content-Type': 'application/json' };
-        // Generate HMAC signature if admin secret exists
+        // Generate HMAC signature if admin secret exists (use static crypto import)
         if (process.env.ADMIN_SECRET) {
-          const crypto = await import('crypto');
           const signature = crypto.createHmac('sha256', process.env.ADMIN_SECRET).update(payloadStr).digest('hex');
           headers['X-Signature'] = signature;
         }
@@ -422,8 +421,7 @@ export async function uploadMedia(req, res) {
     const uid = req.uid; // from requireAuth middleware — never trust client
     const { type = 'video', title = '' } = req.body;
     if (!file) return res.status(400).json({ success: false, message: 'File required' });
-    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!uid) return res.status(400).json({ success: false, message: 'uid required' });
+    if (!uid)  return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!isConfigured() || !supabase) {
       return res.status(503).json({ success: false, message: 'Storage not configured' });
     }
@@ -646,6 +644,12 @@ export async function google(req, res) {
 
     if (!idToken) {
       return res.status(400).json({ success: false, message: 'idToken is required.' });
+    }
+
+    const auth = getFirebaseAuth();
+    const db   = getFirebaseDb();
+    if (!auth || !db) {
+      return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
     let decoded;

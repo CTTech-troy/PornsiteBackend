@@ -24,10 +24,11 @@ import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
+import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
-
+ 
 // Secure HTTP headers
 app.use(
   helmet({
@@ -50,12 +51,17 @@ app.use(cors({
   },
   credentials: true,
 }));
-app.use(express.json({ limit: '1mb' }));
+// Capture raw body bytes before JSON parsing so webhook handlers can verify
+// HMAC signatures over the original bytes (not re-serialized JSON).
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); },
+}));
 
 console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode`);
 
 app.get('/', (req, res) => {
-  res.send('API running on port 5000');
+  res.send(`API running on port ${PORT}`);
 });
 
 app.get('/api/health/services', async (req, res) => {
@@ -107,7 +113,7 @@ app.use('/api/contentRemoval', contentRemovalRouter);
 // Payments (membership plans, checkout, webhooks — Paystack + Monnify)
 app.use('/api/payments', paymentRouter);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
 
 let supabaseWarned = false;
 
