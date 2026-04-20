@@ -17,7 +17,7 @@ import {
   normalizeTags,
   normalizeMainOrientationCategory,
   normalizeAllowPeopleToComment,
-} from '../../../shared/uploadMetadata.js';
+} from '../constants/uploadMetadata.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 
