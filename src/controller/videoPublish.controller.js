@@ -139,7 +139,12 @@ export async function uploadAndPublish(req, res) {
 
     let thumbnailUrl = null;
     const thumbFile = req.thumbnailFile;
-    if (thumbFile?.buffer?.length > 0 && isSupabaseConfigured()) {
+    // Support both multer memory storage (file.buffer) and disk storage (file.path)
+    const thumbReady = thumbFile && (
+      (thumbFile.buffer && thumbFile.buffer.length > 0) ||
+      (thumbFile.path && thumbFile.size > 0)
+    );
+    if (thumbReady && isSupabaseConfigured()) {
       const thumbPath = `${uid}/${timestamp}-thumb.jpg`;
       const thumbData = await uploadFileToBucket(IMAGE_BUCKET, thumbPath, thumbFile, thumbFile.mimetype || 'image/jpeg');
       thumbnailUrl = getPublicUrl(IMAGE_BUCKET, thumbData.path)

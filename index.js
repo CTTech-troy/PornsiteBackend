@@ -227,6 +227,8 @@ try {
   const userSocketMap = new Map();
   // userId  → { roomId }
   const userRoomMap   = new Map();
+  // liveId  → host socket.id  (for WebRTC live signaling)
+  const liveHostMap   = new Map();
 
   // Periodic stale-queue cleanup (every 30 s)
   setInterval(() => chatQueue.cleanupStaleQueue(30).catch(() => {}), 30_000);
@@ -277,11 +279,17 @@ try {
     }
   });
 
-  socket.on('comment-live', async ({ liveId, message }) => {
+  socket.on('comment-live', async ({ liveId, message, authorName }) => {
     try {
-      const userId = socket.uid; // authenticated
+      const userId = socket.uid; // authenticated — never trust client for identity
+      // Sanitise display name supplied by the client (trust for display only, not identity)
+      const safeAuthorName = typeof authorName === 'string' ? authorName.trim().slice(0, 80) : '';
       const comment = await liveCtrl.commentLive(liveId, userId, message);
-      io.to(liveId).emit('new-comment', comment);
+      // Inject the author display name so all viewers see the real sender name
+      const enriched = safeAuthorName
+        ? { ...comment, authorName: safeAuthorName, author_name: safeAuthorName }
+        : comment;
+      io.to(liveId).emit('new-comment', enriched);
     } catch (err) {
       console.error('comment-live error', err && err.message ? err.message : err);
     }
@@ -318,6 +326,7 @@ try {
         return;
       }
       const payout = await liveCtrl.endLive(liveId, { requesterId: socket.uid });
+      liveHostMap.delete(liveId);
       io.to(liveId).emit('live_ended', { sessionId: liveId, payout });
       io.to(liveId).emit('live-ended', payout);
       io.emit('live_ended', { sessionId: liveId, payout });
@@ -494,11 +503,58 @@ try {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // WebRTC live-stream signaling (host → viewers, peer-to-peer video)
+  // -----------------------------------------------------------------------
+
+  // Host explicitly registers their socket after creating/resuming a live session.
+  // More reliable than inferring from join-live (which has async DB calls).
+  socket.on('live:host-register', ({ liveId } = {}) => {
+    if (!liveId) return;
+    liveHostMap.set(liveId, socket.id);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[WebRTC] Host ${socket.uid} registered for live ${liveId}`);
+    }
+  });
+
+  // Relay periodic thumbnail snapshots from host camera to all live-list browsers.
+  socket.on('live:thumbnail-update', ({ liveId, thumbnail } = {}) => {
+    if (!liveId || !thumbnail || typeof thumbnail !== 'string') return;
+    // Only the registered host for this live may push thumbnails
+    if (liveHostMap.get(liveId) !== socket.id) return;
+    // Broadcast to everyone (live-list browsers + viewers in room)
+    io.emit('live:thumbnail-update', { liveId, thumbnail });
+  });
+
+  socket.on('live:viewer-ready', ({ liveId } = {}) => {
+    if (!liveId) return;
+    const hostSocketId = liveHostMap.get(liveId);
+    if (!hostSocketId) return;
+    const hostSocket = io.sockets.sockets.get(hostSocketId);
+    if (hostSocket) hostSocket.emit('live:viewer-joined', { viewerSocketId: socket.id });
+  });
+
+  socket.on('live:signal', ({ liveId, signal, targetSocketId } = {}) => {
+    if (!signal || !targetSocketId) return;
+    const target = io.sockets.sockets.get(targetSocketId);
+    if (target) target.emit('live:signal', { signal, fromSocketId: socket.id });
+  });
+
+  socket.on('live:ice', ({ candidate, targetSocketId } = {}) => {
+    if (!candidate || !targetSocketId) return;
+    const target = io.sockets.sockets.get(targetSocketId);
+    if (target) target.emit('live:ice', { candidate, fromSocketId: socket.id });
+  });
+
   socket.on('disconnect', async () => {
     console.log('Socket disconnected:', socket.id);
 
     const userId = socket.uid;
     userSocketMap.delete(userId);
+    // Clean up any live host registration
+    for (const [lid, sid] of liveHostMap) {
+      if (sid === socket.id) { liveHostMap.delete(lid); break; }
+    }
 
     // Clean up any active chat room
     const roomEntry = userRoomMap.get(userId);
