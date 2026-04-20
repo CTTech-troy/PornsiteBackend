@@ -14,6 +14,7 @@ import postsRouter from './src/router/posts.route.js';
 import pornhubRouter from './src/router/pornhubRoutes.js';
 import contentRemovalRouter from './src/router/ContentRemoval.route.js';
 import paymentRouter from './src/router/payment.route.js';
+import messagesRouter from './src/router/messages.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
 import * as walletsystem from './src/controller/walletsystem.controller.js';
@@ -39,18 +40,36 @@ app.use(
 
 app.use(compression());
 
-// SEC-02: Restrict CORS to allowed origins (comma-separated in env, fallback to localhost dev)
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// SEC-02: Restrict CORS to allowed origins (comma-separated in env).
+// Includes local dev + primary production frontend as safe defaults.
+const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'https://xstreamvideos.netlify.app',
+];
+
+function parseAllowedOrigins(rawOrigins) {
+  const input = typeof rawOrigins === 'string' && rawOrigins.trim()
+    ? rawOrigins
+    : DEFAULT_ALLOWED_ORIGINS.join(',');
+  return input
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ORIGINS);
+const allowedOriginsSet = new Set(ALLOWED_ORIGINS);
+
 app.use(cors({
   origin(origin, callback) {
     // Allow requests with no origin (server-to-server, curl, mobile apps)
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
+    if (!origin || allowedOriginsSet.has(origin)) return callback(null, true);
+    callback(new Error(`Not allowed by CORS for origin: ${origin}`));
   },
   credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  optionsSuccessStatus: 204,
 }));
 // Capture raw body bytes before JSON parsing so webhook handlers can verify
 // HMAC signatures over the original bytes (not re-serialized JSON).
@@ -113,6 +132,8 @@ app.use('/api/posts', postsRouter);
 app.use('/api/contentRemoval', contentRemovalRouter);
 // Payments (membership plans, checkout, webhooks — Paystack + Monnify)
 app.use('/api/payments', paymentRouter);
+// Creator messaging (authenticated users + creators)
+app.use('/api/messages', messagesRouter);
 
 const PORT = process.env.PORT || 3000;
 

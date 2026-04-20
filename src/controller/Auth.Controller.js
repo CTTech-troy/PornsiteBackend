@@ -448,6 +448,38 @@ export async function uploadMedia(req, res) {
     const encodedPath = data.path.split('/').map(encodeURIComponent).join('/');
     const publicUrl = `${(process.env.SUPABASE_URL || '').replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodedPath}`;
 
+    // Persist avatar changes across sessions/navigation when uploading a profile image.
+    const isAvatarUpload =
+      type === 'image' &&
+      String(req.body?.usage || req.body?.target || '').trim().toLowerCase() === 'avatar';
+    if (isAvatarUpload) {
+      const auth = getFirebaseAuth();
+      const db = getFirebaseDb();
+      const rtdb = getFirebaseRtdb();
+
+      if (auth) {
+        try {
+          await auth.updateUser(uid, { photoURL: publicUrl });
+        } catch (err) {
+          console.warn('auth.updateUser(photoURL) failed:', err?.message || err);
+        }
+      }
+      if (db) {
+        try {
+          await db.collection('users').doc(uid).set({ avatar: publicUrl, photoURL: publicUrl, updatedAt: new Date().toISOString() }, { merge: true });
+        } catch (err) {
+          console.warn('Firestore avatar update failed:', err?.message || err);
+        }
+      }
+      if (rtdb) {
+        try {
+          await rtdb.ref(`users/${uid}`).update({ avatar: publicUrl, photoURL: publicUrl, updatedAt: new Date().toISOString() });
+        } catch (err) {
+          console.warn('RTDB avatar update failed:', err?.message || err);
+        }
+      }
+    }
+
     // store media metadata in Supabase or RTDB fallback
     try {
       const meta = {
@@ -466,7 +498,12 @@ export async function uploadMedia(req, res) {
       console.error('Failed to persist media metadata:', err && err.message ? err.message : err);
     }
 
-    return res.status(201).json({ success: true, url: publicUrl, path: data.path });
+    return res.status(201).json({
+      success: true,
+      url: publicUrl,
+      path: data.path,
+      ...(isAvatarUpload ? { userData: { avatar: publicUrl } } : {}),
+    });
   } catch (err) {
     console.error('uploadMedia error', err);
     return res.status(500).json({ success: false, message: err.message || 'Upload failed' });
@@ -486,15 +523,25 @@ export async function me(req, res) {
     }
 
     const auth = getFirebaseAuth();
+    const db = getFirebaseDb();
     if (!auth) {
       return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
-    const [userRecord, creatorPack] = await Promise.all([auth.getUser(uid), getUserCreatorStatus(uid)]);
+    const [userRecord, creatorPack, userDoc] = await Promise.all([
+      auth.getUser(uid),
+      getUserCreatorStatus(uid),
+      db ? db.collection('users').doc(uid).get().catch(() => null) : null,
+    ]);
 
     const cleanEmail = (userRecord.email || '').trim().toLowerCase();
     const displayName =
       userRecord.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+
+    const profileAvatar =
+      userRecord.photoURL ||
+      (userDoc?.exists ? userDoc.data()?.avatar || userDoc.data()?.photoURL : null) ||
+      null;
 
     return res.status(200).json({
       success: true,
@@ -504,7 +551,7 @@ export async function me(req, res) {
       userData: {
         email: cleanEmail,
         name: displayName,
-        avatar: userRecord.photoURL || null,
+        avatar: profileAvatar,
         creator: !!creatorPack.creator,
         creatorStatus: creatorPack.creatorStatus || 'none',
       },

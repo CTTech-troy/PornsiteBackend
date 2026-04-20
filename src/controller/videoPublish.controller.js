@@ -6,7 +6,18 @@ import { getFirebaseRtdb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import crypto from 'crypto';
+import fs from 'fs';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
+import {
+  MAX_UPLOAD_TITLE_LENGTH,
+  MAX_UPLOAD_DESCRIPTION_LENGTH,
+  normalizeTitle,
+  normalizeDescription,
+  getDescriptionFallback,
+  normalizeTags,
+  normalizeMainOrientationCategory,
+  normalizeAllowPeopleToComment,
+} from '../../../shared/uploadMetadata.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 
@@ -56,6 +67,10 @@ function commentsRef() {
   return rtdb ? rtdb.ref('comments') : null;
 }
 
+function parseBodyBoolean(value, fallback = true) {
+  return normalizeAllowPeopleToComment(value, fallback);
+}
+
 /**
  * Upload video to Supabase Storage and save metadata to RTDB.
  * req.uid from auth middleware; req.file from multer; body: title, description, consentGiven.
@@ -66,12 +81,31 @@ export async function uploadAndPublish(req, res) {
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
 
     const file = req.file;
-    const title = (req.body?.title || '').trim();
-    const description = (req.body?.description || '').trim();
+    const title = normalizeTitle(req.body?.title || '');
+    const description = normalizeDescription(req.body?.description || '');
     const consentGiven = req.body?.consentGiven === true || req.body?.consentGiven === 'true';
+    const mainOrientationCategory = normalizeMainOrientationCategory(req.body?.mainOrientationCategory || req.body?.category);
+    const tags = normalizeTags(req.body?.tags ? (() => {
+      try {
+        return JSON.parse(req.body.tags);
+      } catch {
+        return req.body.tags;
+      }
+    })() : []);
+    const allowPeopleToComment = parseBodyBoolean(req.body?.allowPeopleToComment, true);
 
-    if (!title) return res.status(400).json({ success: false, message: 'Title is required' });
-    if (!description) return res.status(400).json({ success: false, message: 'Description is required' });
+    if (!mainOrientationCategory) {
+      return res.status(400).json({ success: false, message: 'Main category is required' });
+    }
+    if (!Array.isArray(tags) || tags.length < 1) {
+      return res.status(400).json({ success: false, message: 'At least one tag is required' });
+    }
+    if (title.length > MAX_UPLOAD_TITLE_LENGTH) {
+      return res.status(400).json({ success: false, message: `Title must be at most ${MAX_UPLOAD_TITLE_LENGTH} characters` });
+    }
+    if (description.length > MAX_UPLOAD_DESCRIPTION_LENGTH) {
+      return res.status(400).json({ success: false, message: `Description must be at most ${MAX_UPLOAD_DESCRIPTION_LENGTH} characters` });
+    }
     if (!file) return res.status(400).json({ success: false, message: 'Video file is required' });
     if (req.body?.consentGiven === undefined && req.body?.consentGiven !== false)
       return res.status(400).json({ success: false, message: 'You must answer the consent question' });
@@ -116,7 +150,11 @@ export async function uploadAndPublish(req, res) {
     const isLive = consentGiven === true;
     const metadata = {
       title,
-      description,
+      description: description || getDescriptionFallback(title),
+      mainOrientationCategory,
+      category: mainOrientationCategory, // backward compatibility for old clients
+      tags,
+      allowPeopleToComment,
       videoUrl,
       streamUrl: videoUrl, // direct playable URL for HTML5 player
       thumbnailUrl,
@@ -149,6 +187,10 @@ export async function uploadAndPublish(req, res) {
   } catch (err) {
     console.error('videoPublish.uploadAndPublish error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Upload failed' });
+  } finally {
+    // Clean up disk-storage temp files (no-op if memoryStorage was used)
+    if (req.file?.path) fs.promises.unlink(req.file.path).catch(() => {});
+    if (req.thumbnailFile?.path) fs.promises.unlink(req.thumbnailFile.path).catch(() => {});
   }
 }
 
@@ -241,7 +283,9 @@ export async function updateVideo(req, res) {
     const titleRaw = req.body?.title;
     const descriptionRaw = req.body?.description;
     const categoryRaw = req.body?.category;
+    const mainOrientationCategoryRaw = req.body?.mainOrientationCategory;
     const tagsRaw = req.body?.tags;
+    const allowPeopleToCommentRaw = req.body?.allowPeopleToComment;
     const snap = await videosRef().child(videoId).once('value');
     const video = snap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -249,17 +293,52 @@ export async function updateVideo(req, res) {
     const updates = {};
     if (titleRaw !== undefined) {
       const title = String(titleRaw).trim();
-      if (!title) return res.status(400).json({ success: false, message: 'Title cannot be empty' });
+      if (title.length > MAX_UPLOAD_TITLE_LENGTH) {
+        return res.status(400).json({ success: false, message: `Title must be at most ${MAX_UPLOAD_TITLE_LENGTH} characters` });
+      }
       updates.title = title;
     }
     if (descriptionRaw !== undefined) {
-      updates.description = String(descriptionRaw).trim();
+      const normalized = normalizeDescription(descriptionRaw);
+      if (normalized.length > MAX_UPLOAD_DESCRIPTION_LENGTH) {
+        return res.status(400).json({ success: false, message: `Description must be at most ${MAX_UPLOAD_DESCRIPTION_LENGTH} characters` });
+      }
+      const titleForFallback = titleRaw !== undefined ? normalizeTitle(titleRaw) : normalizeTitle(video?.title || '');
+      updates.description = normalized || getDescriptionFallback(titleForFallback);
+    }
+    if (mainOrientationCategoryRaw !== undefined) {
+      const normalized = normalizeMainOrientationCategory(mainOrientationCategoryRaw);
+      if (!normalized) {
+        return res.status(400).json({ success: false, message: 'Invalid main category' });
+      }
+      updates.mainOrientationCategory = normalized;
+      updates.category = normalized;
     }
     if (categoryRaw !== undefined) {
-      updates.category = String(categoryRaw).trim().slice(0, 80);
+      const normalized = normalizeMainOrientationCategory(categoryRaw);
+      if (!normalized) {
+        return res.status(400).json({ success: false, message: 'Invalid main category' });
+      }
+      updates.mainOrientationCategory = normalized;
+      updates.category = normalized;
     }
     if (tagsRaw !== undefined) {
-      updates.tags = String(tagsRaw).trim().slice(0, 500);
+      const tagsInput = (() => {
+        if (typeof tagsRaw !== 'string') return tagsRaw;
+        try {
+          return JSON.parse(tagsRaw);
+        } catch {
+          return tagsRaw;
+        }
+      })();
+      const tags = normalizeTags(tagsInput);
+      if (!Array.isArray(tags) || tags.length < 1) {
+        return res.status(400).json({ success: false, message: 'At least one tag is required' });
+      }
+      updates.tags = tags;
+    }
+    if (allowPeopleToCommentRaw !== undefined) {
+      updates.allowPeopleToComment = parseBodyBoolean(allowPeopleToCommentRaw, true);
     }
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, message: 'No updates provided' });
@@ -382,6 +461,9 @@ export async function addComment(req, res) {
     const video = videoSnap.val();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
     if (video.isLive !== true) return res.status(400).json({ success: false, message: 'Video is not live' });
+    if (video.allowPeopleToComment === false) {
+      return res.status(403).json({ success: false, message: 'Comments are disabled for this video' });
+    }
 
     const commentId = crypto.randomUUID();
     const comment = {

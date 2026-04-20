@@ -128,6 +128,12 @@ export async function getStreamUrl(req, res) {
       console.warn('stream.controller home-feed lookup failed:', err?.message || err);
     }
 
+    // xnxx hex IDs: no stream available, return page URL so frontend can show "Watch on XNXX" CTA.
+    if (/^[0-9a-f]{8,20}$/i.test(id)) {
+      const xnxxUrl = `https://www.xnxx.com/video-${id.toLowerCase()}/`;
+      return res.json({ url: xnxxUrl, kind: 'page' });
+    }
+
     return res.status(404).json({ error: 'No playable stream found' });
   } catch (err) {
     console.error('getStreamUrl error', err?.message || err);

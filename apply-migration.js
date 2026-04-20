@@ -1,65 +1,106 @@
 /**
- * Apply Chat Queue Migration
- * Creates the missing cleanup_stale_queue function
+ * apply-migration.js
+ *
+ * Applies the chat_queue migration to the Supabase (Postgres) database.
+ *
+ * Usage:
+ *   node apply-migration.js
+ *
+ * Requires one of these in backend/.env:
+ *   DATABASE_URL=postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
+ *   — OR —
+ *   SUPABASE_DB_URL=<same format>
+ *
+ * If neither is set, the script prints the SQL so you can run it manually
+ * in the Supabase Dashboard → SQL Editor.
+ *
+ * Your Supabase database password is at:
+ *   Dashboard → Settings → Database → Database password
+ * Connection string format:
+ *   Dashboard → Settings → Database → Connection string → URI (Session mode, port 5432)
  */
 
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
+import 'dotenv/config';
+import { readFileSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const MIGRATION_FILE = resolve(
+  __dirname,
+  'supabase/migrations/20250414_chat_queue.sql'
+);
 
-if (!supabaseUrl || !supabaseServiceRoleKey) {
-  console.error('❌ SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set');
+const SQL = readFileSync(MIGRATION_FILE, 'utf8');
+
+// ---------------------------------------------------------------------------
+// Try to run via pg (needs DATABASE_URL or SUPABASE_DB_URL in .env)
+// ---------------------------------------------------------------------------
+const dbUrl = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL;
+
+if (!dbUrl) {
+  printManualInstructions();
+  process.exit(0);
+}
+
+// Dynamically import pg — it is in devDependencies
+let pg;
+try {
+  pg = await import('pg');
+} catch {
+  console.error('❌  "pg" package not found. Run: npm install --save-dev pg');
+  printManualInstructions();
   process.exit(1);
 }
 
-const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-  auth: { autoRefreshToken: false },
-});
+const { default: Pg } = pg;
+const client = new Pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
 
-const CREATE_FUNCTION_SQL = `
-CREATE OR REPLACE FUNCTION cleanup_stale_queue(p_seconds_old int DEFAULT 30)
-RETURNS int
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  v_deleted int;
-BEGIN
-  DELETE FROM chat_queue
-   WHERE joined_at < now() - (p_seconds_old || ' seconds')::interval;
-  GET DIAGNOSTICS v_deleted = ROW_COUNT;
-  RETURN v_deleted;
-END;
-$$;
-`;
+try {
+  await client.connect();
+  console.log('✅  Connected to database.');
 
-async function applyMigration() {
-  try {
-    console.log('🚀 Applying chat queue migration...');
+  // Check if the table already exists
+  const check = await client.query(`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public'
+         AND table_name   = 'chat_queue'
+    ) AS exists;
+  `);
 
-    // Try to execute the SQL directly
-    const { data, error } = await supabase.rpc('exec', { sql: CREATE_FUNCTION_SQL });
-
-    if (error) {
-      console.error('❌ Error applying migration:', error);
-      console.log('💡 You may need to run this SQL manually in your Supabase SQL Editor:');
-      console.log(CREATE_FUNCTION_SQL);
-      return false;
-    }
-
-    console.log('✅ Migration applied successfully!');
-    console.log('📊 Result:', data);
-    return true;
-  } catch (error) {
-    console.error('❌ Unexpected error:', error);
-    console.log('💡 You may need to run this SQL manually in your Supabase SQL Editor:');
-    console.log(CREATE_FUNCTION_SQL);
-    return false;
+  if (check.rows[0]?.exists) {
+    console.log('ℹ️   chat_queue table already exists — running migration anyway (all statements use IF NOT EXISTS / CREATE OR REPLACE).');
   }
+
+  await client.query(SQL);
+  console.log('✅  Migration applied successfully!');
+  console.log('    Tables created: chat_queue, chat_rooms');
+  console.log('    RPCs created:   enqueue_user, dequeue_and_match, end_chat_room, cleanup_stale_queue');
+} catch (err) {
+  console.error('❌  Migration failed:', err.message);
+  printManualInstructions();
+  process.exitCode = 1;
+} finally {
+  await client.end().catch(() => {});
 }
 
-applyMigration();</content>
-<parameter name="filePath">c:\Users\Korede Abdulsalam\Desktop\pornsite\backend\apply-migration.js
+// ---------------------------------------------------------------------------
+
+function printManualInstructions() {
+  console.log(`
+┌─────────────────────────────────────────────────────────────────┐
+│              Run this SQL in the Supabase SQL Editor            │
+│  Dashboard → SQL Editor → New query → paste → Run              │
+└─────────────────────────────────────────────────────────────────┘
+
+To skip this manual step in future, add to backend/.env:
+  DATABASE_URL=postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres
+
+--- BEGIN SQL ---
+
+${SQL}
+--- END SQL ---
+`);
+}
