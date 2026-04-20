@@ -24,41 +24,46 @@ export async function getHomeFeed(req, res) {
     });
   }
 
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const pagesCount = Math.min(MAX_PAGES, Math.max(MIN_PAGES, parseInt(req.query.pages, 10) || 3));
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pagesCount = Math.min(MAX_PAGES, Math.max(MIN_PAGES, parseInt(req.query.pages, 10) || 3));
 
-  const pageNumbers = Array.from({ length: pagesCount }, (_, i) => page + i);
-  const merged = [];
-  const seenIds = new Set();
+    const pageNumbers = Array.from({ length: pagesCount }, (_, i) => page + i);
+    const merged = [];
+    const seenIds = new Set();
 
-  for (const p of pageNumbers) {
-    const { ok, items } = await fetchXnxxBestPage(p);
-    if (!ok || !items?.length) break;
-    for (let i = 0; i < items.length; i++) {
-      const card = items[i];
-      if (!card) continue;
-      if (!card.videoSrc || typeof card.videoSrc !== 'string' || !card.videoSrc.startsWith('http')) {
-        console.warn('[Video API] Home-feed video missing or invalid video_url:', { id: card.id, index: merged.length });
+    for (const p of pageNumbers) {
+      const { ok, items } = await fetchXnxxBestPage(p);
+      if (!ok || !items?.length) break;
+      for (let i = 0; i < items.length; i++) {
+        const card = items[i];
+        if (!card) continue;
+        if (!card.videoSrc || typeof card.videoSrc !== 'string' || !card.videoSrc.startsWith('http')) {
+          console.warn('[Video API] Home-feed video missing or invalid video_url:', { id: card.id, index: merged.length });
+        }
+        const id = card.id;
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        merged.push(card);
       }
-      const id = card.id;
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-      merged.push(card);
     }
+
+    const hasMore = merged.length >= PER_PAGE_ESTIMATE * pagesCount;
+    const nextPage = page + pagesCount;
+    console.log('Video API Response: home-feed (xn/best)', { page, pagesCount, count: merged.length, hasMore });
+
+    ingestHomeFeedVideos(merged);
+
+    return res.json({
+      success: true,
+      data: merged,
+      hasMore,
+      nextPage,
+      page,
+      q: 'best',
+    });
+  } catch (err) {
+    console.error('[homeFeed] getHomeFeed error:', err?.message || err);
+    return res.status(500).json({ success: false, data: [], hasMore: false, error: err?.message || 'Failed to load home feed' });
   }
-
-  const hasMore = merged.length >= PER_PAGE_ESTIMATE * pagesCount;
-  const nextPage = page + pagesCount;
-  console.log('Video API Response: home-feed (xn/best)', { page, pagesCount, count: merged.length, hasMore });
-
-  ingestHomeFeedVideos(merged);
-
-  return res.json({
-    success: true,
-    data: merged,
-    hasMore,
-    nextPage,
-    page,
-    q: 'best',
-  });
 }

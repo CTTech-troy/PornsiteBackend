@@ -135,6 +135,39 @@ app.use('/api/payments', paymentRouter);
 // Creator messaging (authenticated users + creators)
 app.use('/api/messages', messagesRouter);
 
+// LiveKit access token — called by both host and viewer before connecting to a room
+app.post('/api/live/livekit-token', async (req, res) => {
+  try {
+    const { liveId, userId, isHost } = req.body;
+    if (!liveId || !userId) {
+      return res.status(400).json({ error: 'liveId and userId are required' });
+    }
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    if (!apiKey || !apiSecret) {
+      return res.status(503).json({ error: 'LiveKit is not configured on this server. Set LIVEKIT_API_KEY and LIVEKIT_API_SECRET.' });
+    }
+    const { AccessToken } = await import('livekit-server-sdk');
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity: String(userId),
+      ttl: '4h',
+    });
+    at.addGrant({
+      roomJoin: true,
+      room: String(liveId),
+      canPublish: !!isHost,
+      canSubscribe: true,
+      canPublishData: !!isHost,
+    });
+    const token = await at.toJwt();
+    console.log(`[LiveKit] Token issued — room:${liveId} identity:${userId} host:${!!isHost}`);
+    res.json({ token });
+  } catch (err) {
+    console.error('[LiveKit] Token error:', err?.message || err);
+    res.status(500).json({ error: String(err?.message || 'Token generation failed') });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 let supabaseWarned = false;
@@ -206,17 +239,26 @@ try {
     }
   });
 
-  // SEC-05: Socket.IO authentication middleware — verify token before connection
+  // SEC-05: Socket.IO authentication middleware — authenticated users get full access; guests can watch live
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.replace('Bearer ', '');
-      if (!token) return next(new Error('Authentication required'));
-      const uid = await resolveUidFromBearerToken(token);
-      if (!uid) return next(new Error('Invalid or expired token'));
-      socket.uid = uid;
+      if (token) {
+        const uid = await resolveUidFromBearerToken(token);
+        if (uid) {
+          socket.uid = uid;
+          socket.isGuest = false;
+          return next();
+        }
+      }
+      // Allow unauthenticated guests as read-only viewers (watch live, no comments/gifts)
+      socket.uid = `guest:${socket.id}`;
+      socket.isGuest = true;
       next();
     } catch (err) {
-      next(new Error('Authentication failed'));
+      socket.uid = `guest:${socket.id}`;
+      socket.isGuest = true;
+      next();
     }
   });
 
@@ -227,11 +269,43 @@ try {
   const userSocketMap = new Map();
   // userId  → { roomId }
   const userRoomMap   = new Map();
-  // liveId  → host socket.id  (for WebRTC live signaling)
+  // liveId  → host socket.id  (for thumbnail auth — only registered host may push thumbnails)
   const liveHostMap   = new Map();
 
+  // --- In-memory chat queue fallback ---
+  // Used when Supabase chat_queue schema is not applied yet.
+  // userId → { socketId, gender, ts }
+  const memQueue = new Map();
+
+  function memEnqueue(userId, gender, socketId) {
+    memQueue.set(userId, { socketId, gender, ts: Date.now() });
+  }
+
+  function memDequeue(userId) {
+    memQueue.delete(userId);
+  }
+
+  function memMatch(userId, gender) {
+    for (const [pid, entry] of memQueue) {
+      if (pid === userId) continue;
+      if (gender !== 'any' && entry.gender !== 'any' && entry.gender !== gender) continue;
+      memQueue.delete(pid);
+      memQueue.delete(userId);
+      const roomId = `mem-room-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      return { roomId, peerUserId: pid, peerSocketId: entry.socketId };
+    }
+    return null;
+  }
+
   // Periodic stale-queue cleanup (every 30 s)
-  setInterval(() => chatQueue.cleanupStaleQueue(30).catch(() => {}), 30_000);
+  setInterval(() => {
+    chatQueue.cleanupStaleQueue(30).catch(() => {});
+    // Also clean memory queue entries older than 60 s
+    const staleAge = Date.now() - 60_000;
+    for (const [uid, entry] of memQueue) {
+      if (entry.ts < staleAge) memQueue.delete(uid);
+    }
+  }, 30_000);
 
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id, 'uid:', socket.uid);
@@ -241,9 +315,11 @@ try {
 
   socket.on('join-live', async ({ liveId }) => {
     try {
-      const userId = socket.uid; // authenticated — never trust client
+      const userId = socket.uid;
       await socket.join(liveId);
-      await liveCtrl.joinLive(liveId, userId);
+      if (!socket.isGuest) {
+        await liveCtrl.joinLive(liveId, userId);
+      }
       const session = await liveCtrl.getLiveSession(liveId);
       const viewersCount = session?.viewersCount ?? 0;
       io.to(liveId).emit('update-viewers', { viewersCount });
@@ -258,7 +334,9 @@ try {
     try {
       const userId = socket.uid;
       await socket.leave(liveId);
-      await liveCtrl.leaveLive(liveId, userId);
+      if (!socket.isGuest) {
+        await liveCtrl.leaveLive(liveId, userId);
+      }
       const session = await liveCtrl.getLiveSession(liveId);
       const viewersCount = session?.viewersCount ?? 0;
       io.to(liveId).emit('update-viewers', { viewersCount });
@@ -281,6 +359,7 @@ try {
 
   socket.on('comment-live', async ({ liveId, message, authorName }) => {
     try {
+      if (socket.isGuest) return; // guests cannot comment
       const userId = socket.uid; // authenticated — never trust client for identity
       // Sanitise display name supplied by the client (trust for display only, not identity)
       const safeAuthorName = typeof authorName === 'string' ? authorName.trim().slice(0, 80) : '';
@@ -297,6 +376,7 @@ try {
 
   socket.on('gift-live', async ({ liveId, giftType, quantity }) => {
     try {
+      if (socket.isGuest) { socket.emit('error', { message: 'Sign in to send gifts' }); return; }
       const senderId = socket.uid; // authenticated — never trust client senderId
       const giftDef = giftCtrl.getGift(giftType);
       if (!giftDef) {
@@ -378,41 +458,45 @@ try {
   socket.on('chat:find-match', async ({ gender = 'any' } = {}) => {
     try {
       const userId = socket.uid;
-
-      // Update socket map (may have changed on reconnect)
       userSocketMap.set(userId, socket.id);
 
-      // Put caller into the queue
-      await chatQueue.enqueueUser(userId, gender, socket.id);
+      let match = null;
 
-      // Try to find a partner
-      const match = await chatQueue.dequeueAndMatch(userId, gender);
+      // Try Supabase-backed queue first; fall back to in-memory if unavailable
+      try {
+        await chatQueue.enqueueUser(userId, gender, socket.id);
+        match = await chatQueue.dequeueAndMatch(userId, gender);
+      } catch (_dbErr) {
+        // Supabase not configured or migration missing — use in-memory queue
+        if (process.env.NODE_ENV !== 'production') {
+          console.debug('[chat:find-match] Supabase queue unavailable — using in-memory fallback');
+        }
+        memEnqueue(userId, gender, socket.id);
+        match = memMatch(userId, gender);
+      }
 
       if (!match) {
-        // No partner yet — wait
+        console.debug(`[Chat] ${userId} entered queue — waiting for partner`);
         socket.emit('chat:waiting');
         return;
       }
 
       const { roomId, peerUserId, peerSocketId } = match;
+      console.log(`[Chat] Match created — room: ${roomId} | user: ${userId} | peer: ${peerUserId}`);
 
-      // Track room for both users
       userRoomMap.set(userId,     { roomId });
       userRoomMap.set(peerUserId, { roomId });
 
-      // Join both sockets into the room
       socket.join(roomId);
       const peerSocket = io.sockets.sockets.get(peerSocketId);
       if (peerSocket) peerSocket.join(roomId);
 
-      // Notify caller (initiator creates WebRTC offer)
+      // Caller is the initiator — sends the offer via simple-peer
       socket.emit('chat:matched', { roomId, initiator: true, peerId: peerUserId });
 
-      // Notify partner
       if (peerSocket) {
         peerSocket.emit('chat:matched', { roomId, initiator: false, peerId: userId });
       } else {
-        // Peer socket disconnected between queue entry and match — emit to room anyway
         io.to(roomId).emit('chat:matched', { roomId, initiator: false, peerId: userId });
       }
     } catch (err) {
@@ -427,7 +511,8 @@ try {
    */
   socket.on('chat:cancel', async () => {
     try {
-      await chatQueue.dequeueUser(socket.uid);
+      memDequeue(socket.uid);
+      await chatQueue.dequeueUser(socket.uid).catch(() => {});
       userRoomMap.delete(socket.uid);
     } catch (err) {
       console.error('chat:cancel error:', err?.message || err);
@@ -481,7 +566,8 @@ try {
         socket.leave(roomId);
       }
 
-      await chatQueue.dequeueUser(userId);
+      memDequeue(userId);
+      await chatQueue.dequeueUser(userId).catch(() => {});
       userRoomMap.delete(userId);
       socket.emit('chat:ended', { roomId });
     } catch (err) {
@@ -504,46 +590,24 @@ try {
   });
 
   // -----------------------------------------------------------------------
-  // WebRTC live-stream signaling (host → viewers, peer-to-peer video)
+  // Live thumbnail relay (host → live-list browsers)
+  // Video streaming is handled by LiveKit — only thumbnails go through Socket.IO
   // -----------------------------------------------------------------------
 
-  // Host explicitly registers their socket after creating/resuming a live session.
-  // More reliable than inferring from join-live (which has async DB calls).
+  // Host registers their socket so thumbnail auth works.
   socket.on('live:host-register', ({ liveId } = {}) => {
-    if (!liveId) return;
+    if (!liveId || socket.isGuest) return;
     liveHostMap.set(liveId, socket.id);
     if (process.env.NODE_ENV !== 'production') {
-      console.log(`[WebRTC] Host ${socket.uid} registered for live ${liveId}`);
+      console.log(`[LiveKit] Host ${socket.uid} registered socket for live ${liveId}`);
     }
   });
 
-  // Relay periodic thumbnail snapshots from host camera to all live-list browsers.
+  // Relay periodic canvas snapshots from host → live-list cards.
   socket.on('live:thumbnail-update', ({ liveId, thumbnail } = {}) => {
     if (!liveId || !thumbnail || typeof thumbnail !== 'string') return;
-    // Only the registered host for this live may push thumbnails
-    if (liveHostMap.get(liveId) !== socket.id) return;
-    // Broadcast to everyone (live-list browsers + viewers in room)
+    if (liveHostMap.get(liveId) !== socket.id) return; // only registered host may push
     io.emit('live:thumbnail-update', { liveId, thumbnail });
-  });
-
-  socket.on('live:viewer-ready', ({ liveId } = {}) => {
-    if (!liveId) return;
-    const hostSocketId = liveHostMap.get(liveId);
-    if (!hostSocketId) return;
-    const hostSocket = io.sockets.sockets.get(hostSocketId);
-    if (hostSocket) hostSocket.emit('live:viewer-joined', { viewerSocketId: socket.id });
-  });
-
-  socket.on('live:signal', ({ liveId, signal, targetSocketId } = {}) => {
-    if (!signal || !targetSocketId) return;
-    const target = io.sockets.sockets.get(targetSocketId);
-    if (target) target.emit('live:signal', { signal, fromSocketId: socket.id });
-  });
-
-  socket.on('live:ice', ({ candidate, targetSocketId } = {}) => {
-    if (!candidate || !targetSocketId) return;
-    const target = io.sockets.sockets.get(targetSocketId);
-    if (target) target.emit('live:ice', { candidate, fromSocketId: socket.id });
   });
 
   socket.on('disconnect', async () => {
@@ -570,6 +634,7 @@ try {
     }
 
     // Remove from queue if still waiting
+    memDequeue(userId);
     try { await chatQueue.dequeueUser(userId); } catch (_) {}
   });
   });
