@@ -1,12 +1,25 @@
 import express from 'express';
 import multer from 'multer';
+import os from 'os';
+import path from 'path';
 import * as videoPublish from '../controller/videoPublish.controller.js';
 import { listPosts } from '../controller/posts.controller.js';
 import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 
+// Disk storage keeps large files off the Node.js heap (supports up to 1 GB)
+const diskStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname) || '';
+    cb(null, `upload-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
+  },
+});
+
+const ONE_GB = 1 * 1024 * 1024 * 1024;
+
 const uploadVideoWithThumb = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 }, // MED-04: Reduced to 50MB
+  storage: diskStorage,
+  limits: { fileSize: ONE_GB, fieldSize: 12 * 1024 * 1024 },
 }).fields([
   { name: 'video', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 },

@@ -16,9 +16,19 @@
  *   - Either service can be down without crashing the other.
  */
 
-const PAYMENT_SERVICE_URL = (
-  process.env.PAYMENT_SERVICE_URL || 'http://localhost:5001'
-).replace(/\/$/, '');
+const _rawUrl = process.env.PAYMENT_SERVICE_URL;
+
+// Warn loudly in production if the env var is missing — a silent localhost
+// fallback in production produces confusing "fetch failed" errors.
+if (!_rawUrl && process.env.NODE_ENV === 'production') {
+  console.error(
+    '[paymentService] ❌ PAYMENT_SERVICE_URL is not set.\n' +
+    '   All checkout requests will fail.\n' +
+    '   Set PAYMENT_SERVICE_URL to your payment service URL in the Render env vars.'
+  );
+}
+
+const PAYMENT_SERVICE_URL = (_rawUrl || 'http://localhost:5001').replace(/\/$/, '');
 
 const CHECKOUT_TIMEOUT_MS = 20_000;
 const HEALTH_TIMEOUT_MS   = 5_000;

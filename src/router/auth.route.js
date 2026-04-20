@@ -53,6 +53,7 @@ router.post('/signup', ...limitSignup, signupVal, authController.signup);
 router.post('/login', ...limitAuth, loginVal, authController.login);
 router.post('/google', ...limitAuth, googleVal, authController.google);
 router.post('/age-consent', ...limitAuth, ageConsentVal, authController.submitAgeConsent);
+router.get('/me', requireAuth, authController.me);
 
 // Creator application endpoints
 // Accept multipart/form-data for creator applications (forms + optional files).
