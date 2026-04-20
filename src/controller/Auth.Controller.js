@@ -333,7 +333,9 @@ export async function applyCreator(req, res) {
 
     // Supabase creators row (no PII in profile)
     try {
-      const creatorProfile = { verified: false, profile: {}, applied_at: new Date().toISOString() };
+      const rawType = String(applicationData?.creator_type || '').trim();
+      const creatorType = rawType === 'channel' ? 'channel' : 'pstar';
+      const creatorProfile = { verified: false, profile: {}, applied_at: new Date().toISOString(), creator_type: creatorType };
       await upsertCreator(uid, creatorProfile);
     } catch (upErr) {
       console.warn('Supabase upsert creator:', upErr?.message || upErr);

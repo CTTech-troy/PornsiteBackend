@@ -1,10 +1,11 @@
 export const MAIN_ORIENTATION_CATEGORIES = [
-  'Straight',
-  'Gay',
-  'Lesbian',
-  'Trans',
-  'Bisexual',
-  'Other',
+  'AI', 'Amateur', 'Anal', 'Arab', 'Asian', 'ASMR', 'Ass', 'BBW', 'Bi',
+  'Big Ass', 'Big Cock', 'Big Tits', 'Black', 'Blonde', 'Blowjob', 'Brunette',
+  'Cam Porn', 'Creampie', 'Cuckold/Hotwife', 'Cumshot', 'Femdom', 'Fisting',
+  'Taboo', 'Gangbang', 'Gapes', 'Gay', 'Indian', 'Interracial', 'Latina',
+  'Lesbian', 'Lingerie', 'Mature', 'MILF', 'Oiled', 'Redhead', 'Shemale',
+  'Solo', 'Squirting', 'Stockings', 'Straight', 'Teen', 'Trans',
+  'Gay Porn', 'Shemale Porn',
 ];
 
 export const DEFAULT_MAIN_ORIENTATION_CATEGORY = 'Straight';
@@ -15,6 +16,7 @@ export const MAX_UPLOAD_TAGS = 20;
 
 export function normalizeMainOrientationCategory(value) {
   const v = String(value || '').trim();
+  if (!v) return DEFAULT_MAIN_ORIENTATION_CATEGORY;
   return MAIN_ORIENTATION_CATEGORIES.includes(v) ? v : DEFAULT_MAIN_ORIENTATION_CATEGORY;
 }
 

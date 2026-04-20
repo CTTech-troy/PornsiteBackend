@@ -78,9 +78,25 @@ async function computeEarningsForHost(hostId) {
 	return { total, companyShare, hostShare };
 }
 
+// Fetch all platform creators filtered by type ('channel' | 'pstar').
+async function getCreatorsByType(type, limit = 100) {
+	if (!isConfigured()) throw new Error('Supabase not configured');
+	const safeType = type === 'channel' ? 'channel' : 'pstar';
+	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+	const { data, error } = await supabase
+		.from('creators')
+		.select('user_id, display_name, bio, creator_type, created_at')
+		.eq('creator_type', safeType)
+		.order('created_at', { ascending: false })
+		.limit(safeLimit);
+	if (error) throw error;
+	return data || [];
+}
+
 export {
 	getCreator,
 	upsertCreator,
+	getCreatorsByType,
 	getWallet,
 	incrementWallet,
 	debitWallet,
