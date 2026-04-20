@@ -93,6 +93,7 @@ export async function uploadAndPublish(req, res) {
       }
     })() : []);
     const allowPeopleToComment = parseBodyBoolean(req.body?.allowPeopleToComment, true);
+    const isPremiumContent = req.body?.isPremiumContent === 'true' || req.body?.isPremiumContent === true;
 
     if (!mainOrientationCategory) {
       return res.status(400).json({ success: false, message: 'Main category is required' });
@@ -165,6 +166,7 @@ export async function uploadAndPublish(req, res) {
       consentQuestion: CONSENT_QUESTION,
       consentGiven,
       isLive,
+      isPremiumContent,
       totalLikes: 0,
       totalComments: 0,
       createdAt: Date.now(),
