@@ -24,7 +24,7 @@ import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
 import { printFirebaseStartupSummary } from './src/config/firebase.js';
 import { pingServices } from './src/utils/servicePing.js';
-import { pingPaymentService } from './src/services/paymentServiceClient.js';
+import { pingPaymentService, STARTUP_HEALTH_TIMEOUT_MS } from './src/services/paymentServiceClient.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
 import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
 
@@ -207,17 +207,16 @@ async function checkConnections() {
   logServicePing(supabase);
 
   // --- Payment service health ---
-  // Checkout creation is fully delegated to the C# payment service.
-  // This is a non-blocking check — the backend starts regardless of whether
-  // the payment service is reachable.
-  const paymentHealth = await pingPaymentService();
+  // Non-blocking warmup ping — allows up to 60s for Render free-tier cold starts.
+  console.log(`⏳ Payment service: warming up (up to 60s for cold start)…`);
+  const paymentHealth = await pingPaymentService({ timeoutMs: STARTUP_HEALTH_TIMEOUT_MS });
   if (paymentHealth.ok) {
     console.log(`✅ Payment service: ${paymentHealth.detail}`);
   } else {
     console.warn(
       `⚠️  Payment service: ${paymentHealth.detail}\n` +
-      `   → Checkout will fail until the service is running.\n` +
-      `   → Set PAYMENT_SERVICE_URL in backend/.env and start the payment service.`
+      `   → Checkout requests will fail until the service responds.\n` +
+      `   → Check https://pornsite-paymentsystem-1.onrender.com/health`
     );
   }
 }

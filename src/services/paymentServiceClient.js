@@ -30,8 +30,9 @@ if (!_rawUrl && process.env.NODE_ENV === 'production') {
 
 const PAYMENT_SERVICE_URL = (_rawUrl || 'http://localhost:5001').replace(/\/$/, '');
 
-const CHECKOUT_TIMEOUT_MS = 20_000;
-const HEALTH_TIMEOUT_MS   = 5_000;
+const CHECKOUT_TIMEOUT_MS       = 20_000;
+const HEALTH_TIMEOUT_MS         =  5_000;
+const STARTUP_HEALTH_TIMEOUT_MS = 60_000; // Render free-tier cold starts take up to 60s
 
 // ---------------------------------------------------------------------------
 // createCheckout
@@ -126,10 +127,10 @@ export async function createCheckout(params) {
  *
  * @returns {Promise<{ ok: boolean, detail: string }>}
  */
-export async function pingPaymentService() {
+export async function pingPaymentService({ timeoutMs = HEALTH_TIMEOUT_MS } = {}) {
   const url = `${PAYMENT_SERVICE_URL}/health`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (res.ok) {
       return { ok: true, detail: `reachable at ${PAYMENT_SERVICE_URL}` };
     }
@@ -138,3 +139,5 @@ export async function pingPaymentService() {
     return { ok: false, detail: `${err.message} (${PAYMENT_SERVICE_URL})` };
   }
 }
+
+export { STARTUP_HEALTH_TIMEOUT_MS };
