@@ -184,28 +184,52 @@ async function insertMedia(metadata) {
 async function getPublicProfile(userId) {
   if (!userId) return null;
   const rawId = String(userId).trim();
-  // Supabase users.id is UUID in this project; Firebase UIDs should go to RTDB fallback.
-  if (isConfigured() && isUuidLike(rawId)) {
-    try {
-      // Select only columns that typically exist (followers may not exist; return 0)
-      const { data, error } = await supabase.from('users').select('id, username').eq('id', rawId).maybeSingle();
-      if (error) throw error;
-      if (data) return { id: data.id, displayName: data.username || data.id, followers: 0 };
-      return null;
-    } catch (err) {
-      console.warn('Supabase getPublicProfile failed:', err && err.message ? err.message : err);
-    }
-  }
-  const rtdb = getFirebaseRtdb();
-  if (!rtdb) return null;
-  try {
-    const snap = await rtdb.ref(`users/${rawId}`).once('value');
-    const val = snap.val();
-    if (!val) return null;
-    return { id: rawId, displayName: val.username || val.displayName || rawId, followers: Number(val.followers) || 0 };
-  } catch (err) {
-    return null;
-  }
+
+  // Run Supabase + RTDB fetches in parallel
+  const [supaRow, rtdbVal] = await Promise.all([
+    // Supabase — source of truth for balances & verified fields
+    (async () => {
+      if (!isConfigured() || !isUuidLike(rawId)) return null;
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('id, username, avatar, followers, following, coin_balance, creator, verified')
+          .eq('id', rawId)
+          .maybeSingle();
+        if (error) throw error;
+        return data;
+      } catch (err) {
+        console.warn('Supabase getPublicProfile failed:', err?.message ?? err);
+        return null;
+      }
+    })(),
+    // Firebase RTDB — source of truth for avatar/displayName when not in Supabase
+    (async () => {
+      const rtdb = getFirebaseRtdb();
+      if (!rtdb) return null;
+      try {
+        const snap = await rtdb.ref(`users/${rawId}`).once('value');
+        return snap.val();
+      } catch {
+        return null;
+      }
+    })(),
+  ]);
+
+  if (!supaRow && !rtdbVal) return null;
+
+  // Merge: Supabase wins for numeric/balance fields; RTDB fills avatar/displayName gaps
+  return {
+    id:           rawId,
+    displayName:  supaRow?.username || rtdbVal?.username || rtdbVal?.displayName || rawId,
+    avatar:       supaRow?.avatar   || rtdbVal?.avatar   || rtdbVal?.photoURL    || null,
+    followers:    Number(supaRow?.followers    ?? rtdbVal?.followers  ?? 0),
+    following:    Number(supaRow?.following    ?? rtdbVal?.following  ?? 0),
+    tokenBalance: Number(supaRow?.coin_balance ?? 0),
+    coinBalance:  Number(supaRow?.coin_balance ?? 0),
+    creator:      !!(supaRow?.creator ?? rtdbVal?.creator),
+    creatorStatus: supaRow?.verified ?? rtdbVal?.creatorStatus ?? 'none',
+  };
 }
 
 async function incrementFollow(userId) {
@@ -273,11 +297,14 @@ async function syncRtdbToSupabase() {
       const rows = Object.entries(usersVal).map(([id, v]) => {
         const o = typeof v === 'object' && v !== null ? v : {};
         return {
-          id: id,
-          username: o.username ?? o.displayName ?? o.email ?? id,
-          creator: !!o.creator,
-          verified: o.verified ?? o.creatorStatus ?? null,
+          id,
+          username:            o.username ?? o.displayName ?? o.email ?? id,
+          creator:             !!o.creator,
+          verified:            o.verified ?? o.creatorStatus ?? null,
           creator_application: o.creator_application ?? null,
+          followers:           Number(o.followers) || 0,
+          following:           Number(o.following) || 0,
+          avatar:              o.avatar || o.photoURL || null,
         };
       });
       if (rows.length > 0) {

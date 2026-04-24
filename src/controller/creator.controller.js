@@ -1,4 +1,5 @@
 import { supabase, isConfigured } from '../config/supabase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 
 // Creator management + wallet helpers
 
@@ -93,10 +94,62 @@ async function getCreatorsByType(type, limit = 100) {
 	return data || [];
 }
 
+async function getTopPlatformCreators(limit = 5) {
+	if (!isConfigured()) throw new Error('Supabase not configured');
+
+	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 20);
+
+	const { data: creators, error } = await supabase
+		.from('creators')
+		.select('user_id, display_name')
+		.limit(100);
+	if (error) throw error;
+	if (!creators || !creators.length) return [];
+
+	// Count each creator's uploaded videos
+	const withCounts = await Promise.all(
+		creators.map(async (c) => {
+			const { count } = await supabase
+				.from('media')
+				.select('id', { count: 'exact', head: true })
+				.eq('user_id', c.user_id);
+			return { ...c, videoCount: count || 0 };
+		})
+	);
+
+	const top = withCounts
+		.sort((a, b) => b.videoCount - a.videoCount)
+		.slice(0, safeLimit);
+
+	// Fetch profile pictures from Firebase RTDB
+	const rtdb = getFirebaseRtdb();
+	const result = await Promise.all(
+		top.map(async (c) => {
+			let avatar = null;
+			if (rtdb) {
+				try {
+					const snap = await rtdb.ref(`users/${c.user_id}`).once('value');
+					const val = snap.val();
+					avatar = val?.avatar || val?.photoURL || null;
+				} catch { /* no avatar — use null, frontend will fall back to dicebear */ }
+			}
+			return {
+				id: c.user_id,
+				name: c.display_name || 'Creator',
+				avatar,
+				videoCount: c.videoCount,
+			};
+		})
+	);
+
+	return result;
+}
+
 export {
 	getCreator,
 	upsertCreator,
 	getCreatorsByType,
+	getTopPlatformCreators,
 	getWallet,
 	incrementWallet,
 	debitWallet,
