@@ -5,6 +5,7 @@
 import crypto from 'crypto';
 import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
+import { creditViewMilestone } from './earnings.controller.js';
 
 const VIDEOS_TABLE = 'tiktok_videos';
 const LIKES_TABLE = 'tiktok_video_likes';
@@ -281,7 +282,21 @@ export async function recordView(req, res) {
         p_stat_name: 'views_count',
         p_delta: 1
       });
-      return res.json({ success: true, viewsCount: newCount || 0, newView: true });
+      const updatedViews = newCount || 0;
+
+      // 1000-view milestone: credit $0.65 to the video's creator
+      if (updatedViews === 1000) {
+        const { data: vidRow } = await supabase
+          .from(VIDEOS_TABLE)
+          .select('user_id')
+          .eq('video_id', videoId)
+          .maybeSingle();
+        if (vidRow?.user_id) {
+          creditViewMilestone(vidRow.user_id, videoId).catch(() => {});
+        }
+      }
+
+      return res.json({ success: true, viewsCount: updatedViews, newView: true });
     }
 
     return res.json({ success: true, viewsCount: Math.max(0, video.views_count || 0), newView: false });

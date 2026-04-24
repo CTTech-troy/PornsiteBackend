@@ -16,7 +16,9 @@ import contentRemovalRouter from './src/router/ContentRemoval.route.js';
 import paymentRouter from './src/router/payment.route.js';
 import tokensRouter  from './src/router/tokens.route.js';
 import messagesRouter from './src/router/messages.route.js';
+import earningsRouter from './src/router/earnings.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
+import { creditLiveEarnings } from './src/controller/earnings.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
 import * as walletsystem from './src/controller/walletsystem.controller.js';
 import * as chatQueue from './src/controller/chatQueue.controller.js';
@@ -137,6 +139,8 @@ app.use('/api/payments', paymentRouter);
 app.use('/api/tokens', tokensRouter);
 // Creator messaging (authenticated users + creators)
 app.use('/api/messages', messagesRouter);
+// Creator earnings
+app.use('/api/earnings', earningsRouter);
 
 // LiveKit access token — called by both host and viewer before connecting to a room
 app.post('/api/live/livekit-token', async (req, res) => {
@@ -438,6 +442,17 @@ try {
       }
       const payout = await liveCtrl.endLive(liveId, { requesterId: socket.uid });
       liveHostMap.delete(liveId);
+
+      // Credit 70% of total gifts to creator earnings (gifts are in NGN, converted to USD)
+      if (live?.host_id) {
+        const totalGiftsNgn = live.total_gifts_amount ?? 0;
+        if (totalGiftsNgn > 0) {
+          creditLiveEarnings(live.host_id, totalGiftsNgn, liveId).catch((e) =>
+            console.warn('[earnings] creditLiveEarnings failed:', e?.message)
+          );
+        }
+      }
+
       io.to(liveId).emit('live_ended', { sessionId: liveId, payout });
       io.to(liveId).emit('live-ended', payout);
       io.emit('live_ended', { sessionId: liveId, payout });
