@@ -49,7 +49,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:3000',
   'https://xstreamvideos.netlify.app',
-  'https://pornsite-two.vercel.app/',
+  'https://pornsite-two.vercel.app',
 ];
 
 function parseAllowedOrigins(rawOrigins) {
