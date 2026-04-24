@@ -14,6 +14,7 @@ import postsRouter from './src/router/posts.route.js';
 import pornhubRouter from './src/router/pornhubRoutes.js';
 import contentRemovalRouter from './src/router/ContentRemoval.route.js';
 import paymentRouter from './src/router/payment.route.js';
+import tokensRouter  from './src/router/tokens.route.js';
 import messagesRouter from './src/router/messages.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
@@ -132,6 +133,8 @@ app.use('/api/posts', postsRouter);
 app.use('/api/contentRemoval', contentRemovalRouter);
 // Payments (membership plans, checkout, webhooks — Paystack + Monnify)
 app.use('/api/payments', paymentRouter);
+// Token system (balance, send-gift, purchase packages)
+app.use('/api/tokens', tokensRouter);
 // Creator messaging (authenticated users + creators)
 app.use('/api/messages', messagesRouter);
 
@@ -373,23 +376,52 @@ try {
     }
   });
 
-  socket.on('gift-live', async ({ liveId, giftType, quantity }) => {
+  socket.on('gift-live', async ({ liveId, giftType, quantity, amount, name, emoji, senderName, tokenPaid }) => {
     try {
       if (socket.isGuest) { socket.emit('error', { message: 'Sign in to send gifts' }); return; }
-      const senderId = socket.uid; // authenticated — never trust client senderId
-      const giftDef = giftCtrl.getGift(giftType);
-      if (!giftDef) {
-        socket.emit('error', { message: 'Unknown gift type' });
-        return;
+      const senderId = socket.uid;
+      const qty      = Math.max(1, Number(quantity) || 1);
+      const giftAmt  = Number(amount) || 0;
+
+      // Resolve gift definition; token-system gifts aren't in the old catalog so fall back to payload data
+      const giftDef = giftCtrl.getGift(giftType) || { id: giftType, name: name || giftType, emoji: emoji || '🎁' };
+
+      let totalGiftsAmount = giftAmt;
+      if (tokenPaid) {
+        // Payment already processed via HTTP /api/tokens/send-gift — just update the live total
+        try {
+          await liveCtrl.sendGift(liveId, senderId, giftType, giftAmt);
+          const live = await liveCtrl.getLive(liveId);
+          totalGiftsAmount = live?.total_gifts_amount ?? giftAmt;
+        } catch { /* ignore DB update failures — broadcast still happens */ }
+      } else {
+        // Legacy coin-based path
+        try {
+          const paymentResult = await walletsystem.processGiftPayment({ liveId, senderId, giftType, quantity: qty });
+          const live = await liveCtrl.getLive(liveId);
+          totalGiftsAmount = live?.total_gifts_amount ?? paymentResult.totalAmount;
+        } catch (payErr) {
+          console.error('gift-live payment error:', payErr?.message || payErr);
+          socket.emit('error', { message: String(payErr?.message || payErr) });
+          return;
+        }
       }
-      const qty = Math.max(1, Number(quantity) || 1);
-      
-      const paymentResult = await walletsystem.processGiftPayment({ liveId, senderId, giftType, quantity: qty });
-      
-      const live = await liveCtrl.getLive(liveId);
+
       io.to(liveId).emit('new-gift', {
-        gift: { ...giftDef, quantity: qty, amount: paymentResult.totalAmount, record: paymentResult.result },
-        totalGiftsAmount: live?.total_gifts_amount || 0
+        gift: {
+          ...giftDef,
+          quantity:   qty,
+          amount:     giftAmt,
+          senderId,
+          senderName: senderName || 'Viewer',
+          emoji:      emoji || giftDef.emoji || '🎁',
+          name:       name  || giftDef.name  || 'Gift',
+        },
+        senderName:       senderName || 'Viewer',
+        emoji:            emoji || giftDef.emoji || '🎁',
+        giftName:         name  || giftDef.name  || 'Gift',
+        amount:           giftAmt,
+        totalGiftsAmount,
       });
     } catch (err) {
       console.error('gift-live error', err && err.message ? err.message : err);

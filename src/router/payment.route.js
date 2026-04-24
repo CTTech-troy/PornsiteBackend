@@ -27,6 +27,7 @@ import {
   getUserMembership,
   activatePlan,
 } from '../controller/membership.controller.js';
+import { addTokens } from '../controller/tokens.controller.js';
 import { createCheckout as createPaymentServiceCheckout } from '../services/paymentServiceClient.js';
 
 const router = express.Router();
@@ -165,14 +166,16 @@ router.post('/webhooks/paystack', async (req, res) => {
 
     try {
       await _verifyPaystackTransaction(reference);
-      await activatePlan(userId, planId, {
-        reference,
-        provider:      'paystack',
-        amountPaidUsd: amountUsd,
-      });
-      console.log(`[paystack-webhook] Plan "${planId}" activated for user "${userId}"`);
+      if (planId.startsWith('tokens_')) {
+        const tokenAmount = _parseTokenAmount(planId);
+        await addTokens(userId, tokenAmount, { reference, paymentAmount: amountUsd, currency: 'USD' });
+        console.log(`[paystack-webhook] ${tokenAmount} tokens added for user "${userId}"`);
+      } else {
+        await activatePlan(userId, planId, { reference, provider: 'paystack', amountPaidUsd: amountUsd });
+        console.log(`[paystack-webhook] Plan "${planId}" activated for user "${userId}"`);
+      }
     } catch (err) {
-      console.error('[paystack-webhook] activatePlan failed:', err.message);
+      console.error('[paystack-webhook] fulfillment failed:', err.message);
     }
   }
 
@@ -237,12 +240,14 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
         return res.status(200).end();
       }
 
-      await activatePlan(userId, planId, {
-        reference:     txRef ?? payRef,
-        provider:      'monnify',
-        amountPaidUsd: amountUsd,
-      });
-      console.log(`[monnify-webhook] Plan "${planId}" activated for user "${userId}"`);
+      if (planId.startsWith('tokens_')) {
+        const tokenAmount = _parseTokenAmount(planId);
+        await addTokens(userId, tokenAmount, { reference: txRef ?? payRef, paymentAmount: amountUsd, currency: 'NGN' });
+        console.log(`[monnify-webhook] ${tokenAmount} tokens added for user "${userId}"`);
+      } else {
+        await activatePlan(userId, planId, { reference: txRef ?? payRef, provider: 'monnify', amountPaidUsd: amountUsd });
+        console.log(`[monnify-webhook] Plan "${planId}" activated for user "${userId}"`);
+      }
     } catch (err) {
       console.error('[monnify-webhook] activatePlan failed:', err.message);
     }
@@ -262,6 +267,12 @@ router.post('/webhooks/monnify', express.json(), async (req, res) => {
  * Plan IDs may contain underscores (e.g. "coins_30", "coins_120").
  * The timestamp is always the last numeric segment.
  */
+/** Extract numeric token amount from planId like "tokens_30" → 30 */
+function _parseTokenAmount(planId) {
+  const n = parseInt((planId ?? '').replace('tokens_', ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 function _parseOrderId(orderId) {
   if (!orderId) return null;
   const parts = orderId.split('_');

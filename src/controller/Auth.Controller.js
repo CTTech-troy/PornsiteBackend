@@ -1,5 +1,27 @@
 import { getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { supabase, isConfigured } from '../config/supabase.js';
+
+/** Fetch balance + social counts from Supabase for a given uid. Never throws. */
+async function _getSupabaseProfile(uid) {
+  if (!uid || !isConfigured() || !supabase) return {};
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('avatar, followers, following, coin_balance')
+      .eq('id', uid)
+      .maybeSingle();
+    if (error || !data) return {};
+    return {
+      avatar:       data.avatar       ?? null,
+      followers:    Number(data.followers   ?? 0),
+      following:    Number(data.following   ?? 0),
+      tokenBalance: Number(data.coin_balance ?? 0),
+      coinBalance:  Number(data.coin_balance ?? 0),
+    };
+  } catch {
+    return {};
+  }
+}
 import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
 import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -530,10 +552,11 @@ export async function me(req, res) {
       return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
     }
 
-    const [userRecord, creatorPack, userDoc] = await Promise.all([
+    const [userRecord, creatorPack, userDoc, supaProfile] = await Promise.all([
       auth.getUser(uid),
       getUserCreatorStatus(uid),
       db ? db.collection('users').doc(uid).get().catch(() => null) : null,
+      _getSupabaseProfile(uid),
     ]);
 
     const cleanEmail = (userRecord.email || '').trim().toLowerCase();
@@ -541,6 +564,7 @@ export async function me(req, res) {
       userRecord.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
 
     const profileAvatar =
+      supaProfile.avatar ||
       userRecord.photoURL ||
       (userDoc?.exists ? userDoc.data()?.avatar || userDoc.data()?.photoURL : null) ||
       null;
@@ -551,11 +575,15 @@ export async function me(req, res) {
       email: cleanEmail,
       displayName,
       userData: {
-        email: cleanEmail,
-        name: displayName,
-        avatar: profileAvatar,
-        creator: !!creatorPack.creator,
+        email:        cleanEmail,
+        name:         displayName,
+        avatar:       profileAvatar,
+        creator:      !!creatorPack.creator,
         creatorStatus: creatorPack.creatorStatus || 'none',
+        followers:    supaProfile.followers    ?? 0,
+        following:    supaProfile.following    ?? 0,
+        tokenBalance: supaProfile.tokenBalance ?? 0,
+        coinBalance:  supaProfile.coinBalance  ?? 0,
       },
     });
   } catch (error) {
@@ -631,8 +659,11 @@ export async function login(req, res) {
       userRecord = await auth.getUser(uid);
       cleanEmail = (userRecord.email || '').trim().toLowerCase();
       mark('getUser(email only)');
-      const creatorPack = await getUserCreatorStatus(uid);
-      mark('getUserCreatorStatus');
+      const [creatorPack, supaProfile] = await Promise.all([
+        getUserCreatorStatus(uid),
+        _getSupabaseProfile(uid),
+      ]);
+      mark('getUserCreatorStatus+supaProfile');
       const sessionToken = mintSessionToken(uid, cleanEmail);
       mark('mintSessionToken');
       const displayName =
@@ -646,18 +677,26 @@ export async function login(req, res) {
         displayName,
         ...(sessionToken && { sessionToken }),
         userData: {
-          email: cleanEmail,
-          name: displayName,
-          avatar: userRecord.photoURL || null,
-          creator: !!creatorPack.creator,
+          email:        cleanEmail,
+          name:         displayName,
+          avatar:       supaProfile.avatar || userRecord.photoURL || null,
+          creator:      !!creatorPack.creator,
           creatorStatus: creatorPack.creatorStatus || 'none',
+          followers:    supaProfile.followers    ?? 0,
+          following:    supaProfile.following    ?? 0,
+          tokenBalance: supaProfile.tokenBalance ?? 0,
+          coinBalance:  supaProfile.coinBalance  ?? 0,
         },
       });
     }
 
-    const [ur, creatorPack] = await Promise.all([auth.getUser(uid), getUserCreatorStatus(uid)]);
+    const [ur, creatorPack, supaProfile] = await Promise.all([
+      auth.getUser(uid),
+      getUserCreatorStatus(uid),
+      _getSupabaseProfile(uid),
+    ]);
     userRecord = ur;
-    mark('getUser+getUserCreatorStatus(parallel)');
+    mark('getUser+getUserCreatorStatus+supaProfile(parallel)');
 
     const sessionToken = mintSessionToken(uid, cleanEmail);
     mark('mintSessionToken');
@@ -673,11 +712,15 @@ export async function login(req, res) {
       displayName,
       ...(sessionToken && { sessionToken }),
       userData: {
-        email: cleanEmail,
-        name: displayName,
-        avatar: userRecord.photoURL || null,
-        creator: !!creatorPack.creator,
+        email:        cleanEmail,
+        name:         displayName,
+        avatar:       supaProfile.avatar || userRecord.photoURL || null,
+        creator:      !!creatorPack.creator,
         creatorStatus: creatorPack.creatorStatus || 'none',
+        followers:    supaProfile.followers    ?? 0,
+        following:    supaProfile.following    ?? 0,
+        tokenBalance: supaProfile.tokenBalance ?? 0,
+        coinBalance:  supaProfile.coinBalance  ?? 0,
       },
     });
   } catch (error) {
