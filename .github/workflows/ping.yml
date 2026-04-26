@@ -1,13 +1,1 @@
-name: Ping Render Every Hour
 
-on:
-  schedule:
-    - cron: "10 * * * *"  # every 10 min
-  workflow_dispatch:
-
-jobs:
-  ping:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Ping Render Server
-        run: curl -I https://pornsitebackend.onrender.com/api/health/services
