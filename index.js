@@ -62,6 +62,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://xstreamvideos.netlify.app',
   'https://pornsite-two.vercel.app',
   'https://xstreamvideos.site',
+  'https://adminxstramvideos.netlify.app'
 ];
 
 
