@@ -17,6 +17,15 @@ import paymentRouter from './src/router/payment.route.js';
 import tokensRouter  from './src/router/tokens.route.js';
 import messagesRouter from './src/router/messages.route.js';
 import earningsRouter from './src/router/earnings.route.js';
+import adminRouter from './src/router/admin.route.js';
+import adsRouter from './src/router/ads.route.js';
+import { publicMembershipsRouter, adminMembershipsRouter } from './src/router/memberships.route.js';
+import financeRouter from './src/router/finance.route.js';
+import creatorStudioRouter from './src/router/creatorStudio.route.js';
+import adminUsersRouter from './src/router/adminUsers.route.js';
+import adminContentRouter from './src/router/adminContent.route.js';
+import adminModerationRouter from './src/router/adminModeration.route.js';
+import adminSystemRouter from './src/router/adminSystem.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
@@ -47,19 +56,25 @@ app.use(compression());
 // Includes local dev + primary production frontend as safe defaults.
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5176',
   'http://localhost:3000',
   'https://xstreamvideos.netlify.app',
   'https://pornsite-two.vercel.app',
+  'https://xstreamvideos.site',
 ];
 
+
 function parseAllowedOrigins(rawOrigins) {
-  const input = typeof rawOrigins === 'string' && rawOrigins.trim()
-    ? rawOrigins
-    : DEFAULT_ALLOWED_ORIGINS.join(',');
-  return input
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const envList =
+    typeof rawOrigins === 'string' && rawOrigins.trim()
+      ? rawOrigins
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+  // Always include safe defaults, even if env is set.
+  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...envList]));
 }
 
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ORIGINS);
@@ -117,6 +132,12 @@ app.get('/api/health/auth-metrics', (req, res) => {
 
 // Auth routes
 app.use('/api/auth', authRouter);
+app.use('/api/admin', adminRouter);
+app.use('/api/admin/finance', financeRouter);
+app.use('/api/admin', adminUsersRouter);
+app.use('/api/admin/content', adminContentRouter);
+app.use('/api/admin/moderation', adminModerationRouter);
+app.use('/api/admin/system', adminSystemRouter);
 app.get('/api/videos/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
 // Videos proxy routes
 app.use('/api/videos', videosRouter);
@@ -142,6 +163,13 @@ app.use('/api/tokens', tokensRouter);
 app.use('/api/messages', messagesRouter);
 // Creator earnings
 app.use('/api/earnings', earningsRouter);
+// Creator Studio (analytics, withdrawals, settings)
+app.use('/api/studio', creatorStudioRouter);
+// Ads system (ad serving + impression/click tracking)
+app.use('/api/ads', adsRouter);
+// Membership plans (public read + admin CRUD)
+app.use('/api/memberships', publicMembershipsRouter);
+app.use('/api/admin/memberships', adminMembershipsRouter);
 
 // LiveKit access token — called by both host and viewer before connecting to a room
 app.post('/api/live/livekit-token', async (req, res) => {
@@ -176,7 +204,42 @@ app.post('/api/live/livekit-token', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+// LiveKit access token for random 1-on-1 chat rooms.
+// Unlike live streaming, BOTH participants can publish and subscribe.
+app.post('/api/chat/livekit-token', async (req, res) => {
+  try {
+    const { roomId, userId } = req.body;
+    if (!roomId || !userId) {
+      return res.status(400).json({ error: 'roomId and userId are required' });
+    }
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    if (!apiKey || !apiSecret) {
+      return res.status(503).json({ error: 'LiveKit is not configured on this server. Set LIVEKIT_API_KEY and LIVEKIT_API_SECRET.' });
+    }
+    const { AccessToken } = await import('livekit-server-sdk');
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity: String(userId),
+      ttl: '2h',
+    });
+    at.addGrant({
+      roomJoin: true,
+      room: String(roomId),
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    const token = await at.toJwt();
+    console.log(`[LiveKit] Chat token issued — room:${roomId} identity:${userId}`);
+    res.json({ token });
+  } catch (err) {
+    console.error('[LiveKit] Chat token error:', err?.message || err);
+    res.status(500).json({ error: String(err?.message || 'Token generation failed') });
+  }
+});
+
+// Default to 5043 for local/dev consistency (override with PORT env).
+const PORT = process.env.PORT || 5043;
 
 let supabaseWarned = false;
 
@@ -278,6 +341,18 @@ try {
   const userRoomMap   = new Map();
   // liveId  → host socket.id  (for thumbnail auth — only registered host may push thumbnails)
   const liveHostMap   = new Map();
+  // socketId → Set<liveId>  (tracks which live rooms each socket joined, for disconnect cleanup)
+  const socketLiveRooms = new Map();
+
+  // Returns the number of viewers in a live room using Socket.IO's authoritative room size.
+  // The host's own socket is excluded from the count.
+  function roomViewerCount(liveId) {
+    const room = io.sockets.adapter.rooms.get(liveId);
+    if (!room) return 0;
+    const hostSocketId = liveHostMap.get(liveId);
+    if (hostSocketId && room.has(hostSocketId)) return Math.max(0, room.size - 1);
+    return room.size;
+  }
 
   // --- In-memory chat queue fallback ---
   // Used when Supabase chat_queue schema is not applied yet.
@@ -324,13 +399,20 @@ try {
     try {
       const userId = socket.uid;
       await socket.join(liveId);
+
+      // Track this socket's live membership for disconnect cleanup
+      if (!socketLiveRooms.has(socket.id)) socketLiveRooms.set(socket.id, new Set());
+      socketLiveRooms.get(socket.id).add(liveId);
+
+      // Update DB in the background (fire-and-forget) — count comes from Socket.IO room
       if (!socket.isGuest) {
-        await liveCtrl.joinLive(liveId, userId);
+        liveCtrl.joinLive(liveId, userId).catch(() => {});
       }
-      const session = await liveCtrl.getLiveSession(liveId);
-      const viewersCount = session?.viewersCount ?? 0;
+
+      // Use Socket.IO room size as the single source of truth — counts guests + auth users
+      const viewersCount = roomViewerCount(liveId);
       io.to(liveId).emit('update-viewers', { viewersCount });
-      io.to(liveId).emit('user_joined', { userId, session });
+      io.to(liveId).emit('user_joined', { userId, viewersCount });
     } catch (err) {
       console.error('join-live error', err && err.message ? err.message : err);
       socket.emit('error', { message: String(err) });
@@ -341,13 +423,16 @@ try {
     try {
       const userId = socket.uid;
       await socket.leave(liveId);
+
+      socketLiveRooms.get(socket.id)?.delete(liveId);
+
       if (!socket.isGuest) {
-        await liveCtrl.leaveLive(liveId, userId);
+        liveCtrl.leaveLive(liveId, userId).catch(() => {});
       }
-      const session = await liveCtrl.getLiveSession(liveId);
-      const viewersCount = session?.viewersCount ?? 0;
+
+      const viewersCount = roomViewerCount(liveId);
       io.to(liveId).emit('update-viewers', { viewersCount });
-      io.to(liveId).emit('user_left', { userId, session });
+      io.to(liveId).emit('user_left', { userId, viewersCount });
     } catch (err) {
       console.error('leave-live error', err && err.message ? err.message : err);
       socket.emit('error', { message: String(err) });
@@ -665,6 +750,21 @@ try {
     // Clean up any live host registration
     for (const [lid, sid] of liveHostMap) {
       if (sid === socket.id) { liveHostMap.delete(lid); break; }
+    }
+
+    // Broadcast updated viewer count for every live room this socket was in.
+    // Socket.IO removes the socket from all rooms BEFORE firing 'disconnect',
+    // so roomViewerCount() already reflects the departure.
+    const liveRooms = socketLiveRooms.get(socket.id);
+    if (liveRooms) {
+      for (const liveId of liveRooms) {
+        if (!socket.isGuest) {
+          liveCtrl.leaveLive(liveId, userId).catch(() => {});
+        }
+        const viewersCount = roomViewerCount(liveId);
+        io.to(liveId).emit('update-viewers', { viewersCount });
+      }
+      socketLiveRooms.delete(socket.id);
     }
 
     // Clean up any active chat room

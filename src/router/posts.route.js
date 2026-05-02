@@ -38,6 +38,10 @@ function attachPublishFiles(req, res, next) {
 const router = express.Router();
 
 router.get('/', optionalAuth, listPosts);
+// Direct-upload flow: browser PUTs video straight to Supabase Storage
+router.post('/prepare-upload', requireAuth, videoPublish.prepareUpload);
+router.post('/publish',        requireAuth, videoPublish.publishFromStoragePath);
+// Legacy multer-based upload (fallback / advanced editor path)
 router.post('/', requireAuth, attachPublishFiles, videoPublish.uploadAndPublish);
 
 router.use((err, req, res, next) => {

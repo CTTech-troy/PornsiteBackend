@@ -56,6 +56,7 @@ export async function uploadVideo(req, res) {
       storage_url: storageUrl,
       title,
       description,
+      status: 'published',
       likes_count: 0,
       views_count: 0,
       comments_count: 0,
@@ -95,7 +96,16 @@ export async function getFeed(req, res) {
 
     if (error) throw error;
 
-    return res.json({ success: true, data: data || [], page, limit });
+    const videos = data || [];
+    const userIds = [...new Set(videos.map(v => v.user_id).filter(Boolean))];
+    let usernameMap = {};
+    if (userIds.length > 0) {
+      const { data: users } = await supabase.from('users').select('id, username').in('id', userIds);
+      if (users) users.forEach(u => { usernameMap[u.id] = u.username; });
+    }
+    const enriched = videos.map(v => ({ ...v, creator_username: usernameMap[v.user_id] || null }));
+
+    return res.json({ success: true, data: enriched, page, limit });
   } catch (err) {
     console.error('tiktokVideo.getFeed error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed', data: [] });
@@ -125,7 +135,15 @@ export async function getVideosByUser(req, res) {
 
     if (error) throw error;
 
-    return res.json({ success: true, data: data || [], page, limit });
+    const videos = data || [];
+    let creatorUsername = null;
+    if (userId) {
+      const { data: u } = await supabase.from('users').select('username').eq('id', userId).maybeSingle();
+      creatorUsername = u?.username || null;
+    }
+    const enriched = videos.map(v => ({ ...v, creator_username: creatorUsername }));
+
+    return res.json({ success: true, data: enriched, page, limit });
   } catch (err) {
     console.error('tiktokVideo.getVideosByUser error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed', data: [] });
@@ -329,7 +347,16 @@ export async function getComments(req, res) {
 
     if (error) throw error;
 
-    return res.json({ success: true, data: data || [] });
+    const comments = data || [];
+    const userIds = [...new Set(comments.map(c => c.user_id).filter(Boolean))];
+    let usernameMap = {};
+    if (userIds.length > 0) {
+      const { data: users } = await supabase.from('users').select('id, username').in('id', userIds);
+      if (users) users.forEach(u => { usernameMap[u.id] = u.username; });
+    }
+    const enriched = comments.map(c => ({ ...c, username: usernameMap[c.user_id] || null }));
+
+    return res.json({ success: true, data: enriched });
   } catch (err) {
     console.error('tiktokVideo.getComments error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed', data: [] });
@@ -368,12 +395,15 @@ export async function addComment(req, res) {
       p_delta: 1
     });
 
+    const { data: commenter } = await supabase.from('users').select('username').eq('id', uid).maybeSingle();
+
     return res.status(201).json({
       success: true,
       comment: {
         id: commentRow.id,
         video_id: commentRow.video_id,
         user_id: commentRow.user_id,
+        username: commenter?.username || null,
         comment: commentRow.comment,
         created_at: commentRow.created_at,
       },

@@ -21,20 +21,29 @@ export async function getTrending(req, res) {
   }
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   try {
-    const { ok, items, status, raw } = await fetchXnxxBestPage(page);
+    const result = await fetchXnxxBestPage(page);
+    const { ok, items, status, stale, cached } = result;
+
     if (!ok) {
-      console.warn('[trending] xn/best failed', status, typeof raw === 'string' ? raw.slice(0, 200) : '');
+      if (status === 429) {
+        console.warn('[trending] RapidAPI monthly quota exceeded (429). Upgrade plan or wait for reset.');
+      } else {
+        console.warn('[trending] xn/best failed', status, typeof result.raw === 'string' ? result.raw.slice(0, 200) : '');
+      }
       return res.json({
         success: true,
         data: [],
         hasMore: false,
-        _warning: 'XNXX best feed unavailable',
+        _warning: status === 429 ? 'API quota exceeded' : 'Feed temporarily unavailable',
       });
     }
+
     ingestHomeFeedVideos(items);
     const hasMore = items.length >= PER_PAGE_HINT;
-    console.log('Video API Response: trending (xn/best)', { page, count: items.length, hasMore });
-    return res.json({ success: true, data: items, hasMore, page });
+    if (!cached && !stale) {
+      console.log('Video API Response: trending (xn/best)', { page, count: items.length, hasMore });
+    }
+    return res.json({ success: true, data: items, hasMore, page, stale: stale || undefined });
   } catch (err) {
     console.warn('trending.controller getTrending:', err?.message || err);
     return res.json({

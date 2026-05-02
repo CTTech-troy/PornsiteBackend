@@ -194,8 +194,13 @@ export async function cleanupStaleQueue(secondsOld = 30) {
       _markSchemaUnavailable('cleanupStaleQueue');
       return; // no re-throw — this is a background job
     }
-    // Unexpected error — log but do not throw (background job must not crash the interval)
-    console.warn('[chatQueue] cleanupStaleQueue unexpected error:', error.message);
+    // Throttle noisy network errors: log at most once per 5 minutes
+    const now = Date.now();
+    const isNetworkErr = /fetch failed|ECONNREFUSED|ENOTFOUND|AbortError|timeout/i.test(error.message || '');
+    if (!isNetworkErr || !cleanupStaleQueue._lastWarnTs || now - cleanupStaleQueue._lastWarnTs > 5 * 60 * 1000) {
+      cleanupStaleQueue._lastWarnTs = now;
+      console.warn('[chatQueue] cleanupStaleQueue unexpected error:', error.message);
+    }
   } else {
     _schemaAvailable = true;
   }

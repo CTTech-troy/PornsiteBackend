@@ -90,8 +90,13 @@ export async function getEarnings(req, res) {
 
     return res.json({ success: true, totalUsd, liveUsd, viewsUsd, rows });
   } catch (err) {
-    console.error('[earnings] getEarnings error:', err?.message);
-    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
+    const msg = err?.message || '';
+    console.error('[earnings] getEarnings error:', msg);
+    const isNetworkErr = /fetch failed|ECONNREFUSED|ENOTFOUND|AbortError|timeout/i.test(msg);
+    return res.status(isNetworkErr ? 503 : 500).json({
+      success: false,
+      message: isNetworkErr ? 'Database temporarily unavailable. Try again shortly.' : msg || 'Failed',
+    });
   }
 }
 

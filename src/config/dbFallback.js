@@ -229,6 +229,7 @@ async function getPublicProfile(userId) {
     coinBalance:  Number(supaRow?.coin_balance ?? 0),
     creator:      !!(supaRow?.creator ?? rtdbVal?.creator),
     creatorStatus: supaRow?.verified ?? rtdbVal?.creatorStatus ?? 'none',
+    createdAt:    rtdbVal?.createdAt || rtdbVal?.created_at || null,
   };
 }
 

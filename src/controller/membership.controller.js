@@ -14,6 +14,7 @@
  */
 
 import { supabase, isConfigured } from '../config/supabase.js';
+import { getFirebaseRtdbPlan } from './membershipPlans.controller.js';
 
 const GRACE_PERIOD_DAYS = 3;
 
@@ -121,6 +122,32 @@ export async function getUserMembership(userId) {
 }
 
 // ---------------------------------------------------------------------------
+// Idempotency check — prevent duplicate plan activation on webhook retries
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the payment_reference was already processed (i.e. a
+ * membership row already exists for it). Used by webhook handlers to skip
+ * duplicate Paystack / Monnify delivery attempts.
+ *
+ * @param {string} reference — Paystack or Monnify payment reference
+ * @returns {Promise<boolean>}
+ */
+export async function isPaymentAlreadyProcessed(reference) {
+  if (!reference || !isConfigured()) return false;
+  try {
+    const { data } = await supabase
+      .from('user_memberships')
+      .select('id')
+      .eq('payment_reference', reference)
+      .maybeSingle();
+    return !!data;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Activate plan after successful payment (called from webhook handler)
 // ---------------------------------------------------------------------------
 
@@ -134,15 +161,25 @@ export async function getUserMembership(userId) {
 export async function activatePlan(userId, planId, { reference, provider, amountPaidUsd }) {
   if (!isConfigured()) throw new Error('Supabase not configured');
 
-  // Fetch plan definition
-  const { data: plan, error: planErr } = await supabase
+  // Fetch plan definition — try Supabase first, then Firebase RTDB for admin-managed plans
+  const { data: supabasePlan, error: planErr } = await supabase
     .from('membership_plans')
     .select('*')
     .eq('id', planId)
     .maybeSingle();
 
   if (planErr) throw planErr;
-  if (!plan)   throw new Error(`Unknown plan: "${planId}"`);
+
+  let plan = supabasePlan;
+  if (!plan) {
+    const rtdbPlan = await getFirebaseRtdbPlan(planId);
+    if (rtdbPlan) {
+      const durationDays = _parseDurationDays(rtdbPlan.duration);
+      plan = { id: planId, name: rtdbPlan.title || planId, description: rtdbPlan.description || '', coins: 0, duration_days: durationDays };
+    }
+  }
+
+  if (!plan) throw new Error(`Unknown plan: "${planId}"`);
 
   const now         = new Date();
   const expiresAt   = new Date(now);
@@ -231,6 +268,18 @@ export async function spendCoins(userId, amount) {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Parse a duration string like "30 Days" or "Monthly" into a number of days.
+ * Defaults to 30 if unparseable.
+ * @private
+ */
+function _parseDurationDays(duration) {
+  if (typeof duration === 'number') return duration;
+  if (!duration) return 30;
+  const match = String(duration).match(/(\d+)/);
+  return match ? parseInt(match[1], 10) : 30;
+}
 
 /**
  * Revert the user's plan to 'basic' (called when grace period expires).

@@ -2,7 +2,7 @@
  * Secure video upload & publish: Supabase Storage + Firebase RTDB.
  * Consent required; only consentGiven === true sets isLive. Public feed returns only isLive === true.
  */
-import { getFirebaseRtdb } from '../config/firebase.js';
+import { getFirebaseRtdb, getFirebaseDb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import crypto from 'crypto';
@@ -18,8 +18,74 @@ import {
   normalizeMainOrientationCategory,
   normalizeAllowPeopleToComment,
 } from '../constants/uploadMetadata.js';
+import {
+  calculateCreatorLevel,
+  getPremiumUploadLimit,
+  getCurrentMonth,
+  LEVEL_CONFIG,
+} from '../utils/creatorLevel.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
+
+// ── Creator-level helpers ─────────────────────────────────────────────────────
+
+/** Fetch followers + sum video likes for a creator, then apply the upload gate. */
+async function checkPremiumUploadGate(uid) {
+  try {
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb) return { allowed: true }; // can't check → don't block
+
+    const [userSnap, videosSnap] = await Promise.all([
+      rtdb.ref(`users/${uid}`).once('value'),
+      rtdb.ref('videos').orderByChild('userId').equalTo(uid).once('value'),
+    ]);
+
+    const userData = userSnap.val() || {};
+    const followers = Number(userData.followers || userData.followersCount || 0);
+
+    let totalLikes = 0;
+    const vData = videosSnap.val() || {};
+    Object.values(vData).forEach((v) => {
+      if (v && v.isLive) totalLikes += Number(v.totalLikes || 0);
+    });
+
+    const level = calculateCreatorLevel(followers, totalLikes);
+    const limit = getPremiumUploadLimit(level);
+    const currentMonth = getCurrentMonth();
+    const storedMonth = userData.premiumUploadMonth || '';
+    const used = storedMonth === currentMonth ? Number(userData.monthlyPremiumUploads || 0) : 0;
+
+    if (limit !== -1 && used >= limit) {
+      return {
+        allowed: false,
+        level,
+        limit,
+        used,
+        message: `You have reached your premium upload limit for this month (${limit} videos). Grow your audience to unlock more premium upload slots.`,
+      };
+    }
+    return { allowed: true, level, limit, used };
+  } catch {
+    return { allowed: true }; // on error, don't block
+  }
+}
+
+/** Increment the creator's monthly premium upload counter after a successful publish. */
+async function incrementPremiumUploads(uid) {
+  try {
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb) return;
+    const currentMonth = getCurrentMonth();
+    const snap = await rtdb.ref(`users/${uid}`).once('value');
+    const u = snap.val() || {};
+    const storedMonth = u.premiumUploadMonth || '';
+    const currentCount = storedMonth === currentMonth ? Number(u.monthlyPremiumUploads || 0) : 0;
+    await rtdb.ref(`users/${uid}`).update({
+      monthlyPremiumUploads: currentCount + 1,
+      premiumUploadMonth: currentMonth,
+    });
+  } catch (_) {} // non-critical
+}
 
 function parseSupabasePublicStoragePath(url) {
   if (!url || typeof url !== 'string' || !url.includes('/storage/v1/object/public/')) return null;
@@ -72,6 +138,170 @@ function parseBodyBoolean(value, fallback = true) {
 }
 
 /**
+ * Step 1 of direct-upload flow: generate signed upload URLs so the browser can
+ * PUT the video (and optional thumbnail) straight to Supabase Storage, bypassing
+ * the backend entirely.  Returns { videoUploadUrl, videoPath, thumbnailUploadUrl?, thumbnailPath? }.
+ */
+export async function prepareUpload(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (!isSupabaseConfigured()) return res.status(503).json({ success: false, message: 'Storage not configured' });
+
+    const videoFilename    = String(req.body?.videoFilename    || 'video').trim() || 'video';
+    const videoContentType = String(req.body?.videoContentType || 'video/mp4').trim();
+    const hasThumbnail     = req.body?.hasThumbnail === true || req.body?.hasThumbnail === 'true';
+
+    const timestamp   = Date.now();
+    const safeName    = ensureVideoFilenameForStorage(videoFilename, videoContentType);
+    const videoPath   = `${uid}/${timestamp}-${safeName}`;
+    const thumbPath   = hasThumbnail ? `${uid}/${timestamp}-thumb.jpg` : null;
+
+    const { data: videoData, error: videoErr } = await supabase.storage
+      .from(VIDEO_BUCKET)
+      .createSignedUploadUrl(videoPath);
+    if (videoErr) {
+      console.error('[prepareUpload] signed URL error:', videoErr.message);
+      return res.status(500).json({ success: false, message: videoErr.message || 'Failed to create upload URL' });
+    }
+
+    let thumbnailUploadUrl = null;
+    if (thumbPath) {
+      const { data: thumbData } = await supabase.storage
+        .from(IMAGE_BUCKET)
+        .createSignedUploadUrl(thumbPath);
+      if (thumbData) thumbnailUploadUrl = thumbData.signedUrl;
+    }
+
+    return res.json({
+      success: true,
+      videoUploadUrl: videoData.signedUrl,
+      videoPath,
+      thumbnailUploadUrl,
+      thumbnailPath: thumbPath,
+    });
+  } catch (err) {
+    console.error('[prepareUpload] error:', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed to prepare upload' });
+  }
+}
+
+/**
+ * Step 2 of direct-upload flow: browser has already PUT the file to Supabase.
+ * Receives metadata + storage paths, builds public URLs, saves to RTDB.
+ */
+export async function publishFromStoragePath(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (!isSupabaseConfigured()) return res.status(503).json({ success: false, message: 'Storage not configured' });
+
+    const {
+      videoPath, thumbnailPath,
+      title: rawTitle, description: rawDesc,
+      mainOrientationCategory: rawCat, tags: rawTags,
+      allowPeopleToComment: rawAllow, isPremiumContent: rawPremium,
+      consentGiven: rawConsent, durationSeconds: rawDur,
+      tokenPrice: rawTokenPrice,
+    } = req.body || {};
+
+    if (!videoPath) return res.status(400).json({ success: false, message: 'videoPath is required' });
+
+    const title                = normalizeTitle(rawTitle || '');
+    const description          = normalizeDescription(rawDesc || '');
+    const mainOrientationCategory = normalizeMainOrientationCategory(rawCat);
+    const tags                 = normalizeTags(typeof rawTags === 'string'
+      ? (() => { try { return JSON.parse(rawTags); } catch { return rawTags; } })()
+      : rawTags);
+    const allowPeopleToComment = parseBodyBoolean(rawAllow, true);
+    const isPremiumContent     = rawPremium === true || rawPremium === 'true';
+    const consentGiven         = rawConsent === true || rawConsent === 'true';
+    const tokenPrice           = isPremiumContent ? Math.max(0, parseInt(String(rawTokenPrice || '0'), 10) || 0) : 0;
+
+    if (!mainOrientationCategory)
+      return res.status(400).json({ success: false, message: 'Main category is required' });
+    if (!Array.isArray(tags) || tags.length < 1)
+      return res.status(400).json({ success: false, message: 'At least one tag is required' });
+
+    // Premium upload gate — check level and monthly quota
+    if (isPremiumContent) {
+      const gate = await checkPremiumUploadGate(uid);
+      if (!gate.allowed) {
+        return res.status(403).json({
+          success: false,
+          error: 'PREMIUM_UPLOAD_LIMIT_REACHED',
+          message: gate.message,
+          level: gate.level,
+          limit: gate.limit,
+          used: gate.used,
+        });
+      }
+    }
+
+    let durationSeconds = 0;
+    if (rawDur != null) {
+      const n = parseInt(String(rawDur), 10);
+      if (!Number.isNaN(n) && n >= 0) durationSeconds = Math.min(n, 86400 * 48);
+    }
+
+    const baseUrl      = process.env.SUPABASE_URL?.replace(/\/$/, '');
+    const videoUrl     = getPublicUrl(VIDEO_BUCKET, videoPath)
+      || (baseUrl ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${videoPath.split('/').map(encodeURIComponent).join('/')}` : null);
+    const thumbnailUrl = thumbnailPath
+      ? (getPublicUrl(IMAGE_BUCKET, thumbnailPath)
+          || (baseUrl ? `${baseUrl}/storage/v1/object/public/${IMAGE_BUCKET}/${thumbnailPath}` : null))
+      : null;
+
+    if (!videoUrl) return res.status(500).json({ success: false, message: 'Could not resolve video URL' });
+    if (!videosRef()) return res.status(503).json({ success: false, message: 'Video metadata storage is temporarily unavailable.' });
+
+    const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
+    const videoId = crypto.randomUUID();
+    const isLive  = consentGiven;
+
+    await videosRef().child(videoId).set({
+      title,
+      description: description || getDescriptionFallback(title),
+      mainOrientationCategory,
+      category: mainOrientationCategory,
+      tags,
+      allowPeopleToComment,
+      videoUrl,
+      streamUrl: videoUrl,
+      thumbnailUrl,
+      durationSeconds,
+      userId: uid,
+      creatorDisplayName: creatorDisplayName || null,
+      creatorAvatarUrl:   creatorAvatarUrl   || null,
+      consentQuestion: CONSENT_QUESTION,
+      consentGiven,
+      isLive,
+      isPremiumContent,
+      tokenPrice,
+      totalLikes:    0,
+      totalComments: 0,
+      createdAt: Date.now(),
+    });
+
+    // Track monthly premium upload count (fire-and-forget)
+    if (isPremiumContent) incrementPremiumUploads(uid);
+
+    return res.status(201).json({
+      success: true,
+      videoId,
+      videoUrl,
+      thumbnailUrl,
+      durationSeconds,
+      isLive,
+      message: isLive ? 'Video published' : 'Video saved as draft (consent not given)',
+    });
+  } catch (err) {
+    console.error('[publishFromStoragePath] error:', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Publish failed' });
+  }
+}
+
+/**
  * Upload video to Supabase Storage and save metadata to RTDB.
  * req.uid from auth middleware; req.file from multer; body: title, description, consentGiven.
  */
@@ -94,6 +324,7 @@ export async function uploadAndPublish(req, res) {
     })() : []);
     const allowPeopleToComment = parseBodyBoolean(req.body?.allowPeopleToComment, true);
     const isPremiumContent = req.body?.isPremiumContent === 'true' || req.body?.isPremiumContent === true;
+    const tokenPrice = isPremiumContent ? Math.max(0, parseInt(String(req.body?.tokenPrice || '0'), 10) || 0) : 0;
 
     if (!mainOrientationCategory) {
       return res.status(400).json({ success: false, message: 'Main category is required' });
@@ -110,6 +341,21 @@ export async function uploadAndPublish(req, res) {
     if (!file) return res.status(400).json({ success: false, message: 'Video file is required' });
     if (req.body?.consentGiven === undefined && req.body?.consentGiven !== false)
       return res.status(400).json({ success: false, message: 'You must answer the consent question' });
+
+    // Premium upload gate — check level and monthly quota before uploading file
+    if (isPremiumContent) {
+      const gate = await checkPremiumUploadGate(uid);
+      if (!gate.allowed) {
+        return res.status(403).json({
+          success: false,
+          error: 'PREMIUM_UPLOAD_LIMIT_REACHED',
+          message: gate.message,
+          level: gate.level,
+          limit: gate.limit,
+          used: gate.used,
+        });
+      }
+    }
 
     const rawDur = req.body?.durationSeconds ?? req.body?.duration;
     let durationSeconds = 0;
@@ -158,11 +404,11 @@ export async function uploadAndPublish(req, res) {
       title,
       description: description || getDescriptionFallback(title),
       mainOrientationCategory,
-      category: mainOrientationCategory, // backward compatibility for old clients
+      category: mainOrientationCategory,
       tags,
       allowPeopleToComment,
       videoUrl,
-      streamUrl: videoUrl, // direct playable URL for HTML5 player
+      streamUrl: videoUrl,
       thumbnailUrl,
       durationSeconds,
       userId: uid,
@@ -172,6 +418,7 @@ export async function uploadAndPublish(req, res) {
       consentGiven,
       isLive,
       isPremiumContent,
+      tokenPrice,
       totalLikes: 0,
       totalComments: 0,
       createdAt: Date.now(),
@@ -182,6 +429,10 @@ export async function uploadAndPublish(req, res) {
     }
 
     await videosRef().child(videoId).set(metadata);
+
+    // Track monthly premium upload count (fire-and-forget)
+    if (isPremiumContent) incrementPremiumUploads(uid);
+
     return res.status(201).json({
       success: true,
       videoId,
@@ -209,9 +460,13 @@ export async function getPublicVideos(req, res) {
     if (!videosRef()) {
       return res.json({ success: true, data: [] });
     }
+    const premiumOnly = req.query?.premium === 'true';
     const snap = await videosRef().once('value');
     const val = snap.val();
-    const list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
+    let list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
+    if (premiumOnly) {
+      list = list.filter((v) => v.isPremiumContent === true);
+    }
     list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     const enriched = await Promise.all(list.map((v) => mergeCreatorIntoPublicVideo(v)));
     return res.json({ success: true, data: enriched });
@@ -516,6 +771,101 @@ export async function getComments(req, res) {
 }
 
 /**
+ * Purchase a premium video using tokens. Atomically deducts tokens from Firestore
+ * and records the purchase in RTDB.
+ */
+export async function purchaseVideo(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb || !videosRef()) return res.status(503).json({ success: false, message: 'Storage unavailable' });
+
+    const videoSnap = await videosRef().child(videoId).once('value');
+    const video = videoSnap.val();
+    if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (!video.isLive) return res.status(400).json({ success: false, message: 'Video not available' });
+    if (!video.isPremiumContent) return res.status(400).json({ success: false, message: 'Video is not premium content' });
+
+    const tokenPrice = Number(video.tokenPrice) || 0;
+
+    // Already purchased?
+    const purchaseSnap = await rtdb.ref(`purchases/${uid}/${videoId}`).once('value');
+    if (purchaseSnap.val()) {
+      return res.json({ success: true, alreadyPurchased: true, message: 'Already purchased' });
+    }
+
+    let newTokenBalance;
+    if (tokenPrice > 0) {
+      const firestoreDb = getFirebaseDb();
+      if (!firestoreDb) {
+        return res.status(503).json({ success: false, message: 'Database unavailable for token deduction' });
+      }
+      const userRef = firestoreDb.collection('users').doc(uid);
+      try {
+        newTokenBalance = await firestoreDb.runTransaction(async (t) => {
+          const userDoc = await t.get(userRef);
+          const userData = userDoc.exists ? userDoc.data() : {};
+          const balance = Number(userData.tokenBalance ?? userData.coinBalance ?? 0);
+          if (balance < tokenPrice) throw new Error('INSUFFICIENT_TOKENS');
+          const updated = balance - tokenPrice;
+          t.update(userRef, { tokenBalance: updated });
+          return updated;
+        });
+      } catch (err) {
+        if (err.message === 'INSUFFICIENT_TOKENS') {
+          return res.status(402).json({ success: false, message: 'Insufficient tokens. Please purchase more tokens.' });
+        }
+        throw err;
+      }
+    }
+
+    await rtdb.ref(`purchases/${uid}/${videoId}`).set({
+      purchasedAt: Date.now(),
+      tokenPrice,
+      videoId,
+      userId: uid,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Purchase successful',
+      ...(newTokenBalance !== undefined ? { newTokenBalance } : {}),
+    });
+  } catch (err) {
+    console.error('videoPublish.purchaseVideo error:', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Purchase failed' });
+  }
+}
+
+/**
+ * Check if the authenticated user has purchased a specific premium video.
+ */
+export async function getVideoPurchaseStatus(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.json({ success: true, purchased: false });
+
+    const { videoId } = req.params;
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb) return res.json({ success: true, purchased: false });
+
+    const snap = await rtdb.ref(`purchases/${uid}/${videoId}`).once('value');
+    const data = snap.val();
+    return res.json({ success: true, purchased: !!data, purchasedAt: data?.purchasedAt || null });
+  } catch (err) {
+    console.error('videoPublish.getVideoPurchaseStatus error:', err?.message || err);
+    return res.json({ success: true, purchased: false });
+  }
+}
+
+/**
  * Check if current user liked a video (for UI state).
  */
 export async function getLikeStatus(req, res) {
@@ -531,5 +881,60 @@ export async function getLikeStatus(req, res) {
     return res.json({ success: true, liked: !!snap.val() });
   } catch (err) {
     return res.json({ success: true, liked: false });
+  }
+}
+
+/**
+ * GET /api/videos/creator-level — return authenticated creator's level, quota, and progress.
+ */
+export async function getCreatorLevel(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    const [userSnap, videosSnap] = await Promise.all([
+      rtdb.ref(`users/${uid}`).once('value'),
+      rtdb.ref('videos').orderByChild('userId').equalTo(uid).once('value'),
+    ]);
+
+    const userData = userSnap.val() || {};
+    const followers = Number(userData.followers || userData.followersCount || 0);
+
+    let totalLikes = 0;
+    const vData = videosSnap.val() || {};
+    Object.values(vData).forEach((v) => {
+      if (v && v.isLive) totalLikes += Number(v.totalLikes || 0);
+    });
+
+    const level = calculateCreatorLevel(followers, totalLikes);
+    const limit = getPremiumUploadLimit(level);
+    const currentMonth = getCurrentMonth();
+    const storedMonth = userData.premiumUploadMonth || '';
+    const uploadsUsed = storedMonth === currentMonth ? Number(userData.monthlyPremiumUploads || 0) : 0;
+
+    const nextLevel = level < 3 ? level + 1 : null;
+    const nextConfig = nextLevel ? LEVEL_CONFIG[nextLevel] : null;
+
+    return res.json({
+      success: true,
+      level,
+      levelName: LEVEL_CONFIG[level].name,
+      premiumUploadLimit: limit,
+      premiumUploadsUsed: uploadsUsed,
+      premiumUploadsRemaining: limit === -1 ? null : Math.max(0, limit - uploadsUsed),
+      unlimited: limit === -1,
+      followersCount: followers,
+      totalLikes,
+      nextLevel,
+      nextLevelName: nextConfig?.name || null,
+      nextLevelFollowers: nextLevel === 2 ? 1000 : nextLevel === 3 ? 10000 : null,
+      nextLevelLikes: nextLevel === 2 ? 1000 : null,
+    });
+  } catch (err) {
+    console.error('videoPublish.getCreatorLevel error:', err?.message || err);
+    return res.status(500).json({ success: false, message: err?.message || 'Failed' });
   }
 }

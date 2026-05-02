@@ -55,6 +55,9 @@ router.post('/upload', requireAuth, attachPublishFiles, videoPublish.uploadAndPu
 // ——— TikTok-style: Supabase Storage + Postgres (feed, upload, likes, views, comments) ———
 router.use('/tiktok', tiktokVideoRouter);
 
+// GET /api/videos/creator-level — authenticated creator's level, quota, progress
+router.get('/creator-level', requireAuth, videoPublish.getCreatorLevel);
+
 // GET /api/videos/public — public feed (only isLive === true)
 router.get('/public', videoPublish.getPublicVideos);
 // GET /api/videos/public/:videoId (Bearer optional: owners can load drafts)
@@ -72,6 +75,12 @@ router.delete('/public/:videoId/like', requireAuth, videoPublish.unlikeVideo);
 router.get('/public/:videoId/like-status', videoPublish.getLikeStatus);
 // POST /api/videos/public/:videoId/comments
 router.post('/public/:videoId/comments', requireAuth, videoPublish.addComment);
+// POST /api/videos/public/:videoId/view (optional auth, dedup by uid or sessionId)
+router.post('/public/:videoId/view', optionalAuth, videoInteractions.recordPublicVideoView);
+// POST /api/videos/public/:videoId/purchase — buy a premium video with tokens
+router.post('/public/:videoId/purchase', requireAuth, videoPublish.purchaseVideo);
+// GET /api/videos/public/:videoId/purchase-status — check if current user purchased
+router.get('/public/:videoId/purchase-status', requireAuth, videoPublish.getVideoPurchaseStatus);
 
 // GET /api/videos/search/pornstar?q=...&page=1 — stub (empty; xnxx-api has no pornstar route)
 router.get('/search/pornstar', search.searchPornstars);
