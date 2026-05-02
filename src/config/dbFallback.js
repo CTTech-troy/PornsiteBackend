@@ -46,18 +46,15 @@ async function insertUser(user) {
 
 async function insertCreatorApplication(payload) {
   if (isConfigured()) {
-    try {
-      const { data, error } = await supabase.from('creator_applications').insert([payload]);
-      if (error) throw error;
-      return { source: 'supabase', data };
-    } catch (err) {
-      console.warn('Supabase insertCreatorApplication failed, falling back to RTDB:', err && err.message ? err.message : err);
-    }
+    const { data, error } = await supabase.from('creator_applications').insert([payload]);
+    if (error) throw error;
+    return { source: 'supabase', data };
   }
 
+  // Supabase not configured — use RTDB as the sole fallback
   const rtdb = getFirebaseRtdb();
   if (!rtdb) {
-    throw new Error('Creator application save failed: Firebase Realtime Database is not available.');
+    throw new Error('Creator application save failed: neither Supabase nor Firebase Realtime Database is available.');
   }
   try {
     await rtdb.ref(`creator_applications/${payload.id}`).set(payload);

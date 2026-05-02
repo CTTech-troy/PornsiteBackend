@@ -77,6 +77,7 @@ router.post('/google', ...limitAuth, googleVal, authController.google);
 router.post('/age-consent', ...limitAuth, ageConsentVal, authController.submitAgeConsent);
 router.get('/me', requireAuth, authController.me);
 router.post('/verify-email', verifyEmailVal, authController.verifyEmail);
+router.get('/verify-email/:token', authController.verifyEmail);
 router.post('/resend-verification-email', ...limitAuth, resendVerificationVal, authController.resendVerificationEmail);
 
 // OTP endpoints — 5 sends/min burst, 20/15min window to prevent abuse

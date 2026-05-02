@@ -1,19 +1,16 @@
-import { getFirebaseDb, isFirebaseAdminReady } from '../config/firebase.js';
+import { supabase } from '../config/supabase.js';
 
 export async function getCreatorPublicFields(uid) {
-  const db = getFirebaseDb();
-  if (!uid || !isFirebaseAdminReady || !db) {
-    return { creatorDisplayName: null, creatorAvatarUrl: null };
-  }
+  if (!uid || !supabase) return { creatorDisplayName: null, creatorAvatarUrl: null };
   try {
-    const snap = await db.collection('users').doc(uid).get();
-    const d = snap.exists ? snap.data() : {};
-    const name = String(d.displayName || d.name || '').trim();
-    const avatar = String(d.avatar || d.photoURL || '').trim();
-    return {
-      creatorDisplayName: name || null,
-      creatorAvatarUrl: avatar || null,
-    };
+    const { data } = await supabase
+      .from('users')
+      .select('username, display_name, avatar_url')
+      .eq('id', uid)
+      .maybeSingle();
+    const name   = String(data?.display_name || data?.username || '').trim();
+    const avatar = String(data?.avatar_url   || '').trim();
+    return { creatorDisplayName: name || null, creatorAvatarUrl: avatar || null };
   } catch {
     return { creatorDisplayName: null, creatorAvatarUrl: null };
   }
@@ -21,13 +18,13 @@ export async function getCreatorPublicFields(uid) {
 
 export async function mergeCreatorIntoPublicVideo(video) {
   if (!video?.userId) return video;
-  const hasName = video.creatorDisplayName && String(video.creatorDisplayName).trim();
-  const hasAvatar = video.creatorAvatarUrl && String(video.creatorAvatarUrl).trim();
+  const hasName   = video.creatorDisplayName && String(video.creatorDisplayName).trim();
+  const hasAvatar = video.creatorAvatarUrl   && String(video.creatorAvatarUrl).trim();
   if (hasName && hasAvatar) return video;
   const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(video.userId);
   return {
     ...video,
-    creatorDisplayName: hasName ? String(video.creatorDisplayName).trim() : (creatorDisplayName || null),
-    creatorAvatarUrl: hasAvatar ? String(video.creatorAvatarUrl).trim() : (creatorAvatarUrl || null),
+    creatorDisplayName: hasName   ? String(video.creatorDisplayName).trim() : (creatorDisplayName || null),
+    creatorAvatarUrl:   hasAvatar ? String(video.creatorAvatarUrl).trim()   : (creatorAvatarUrl   || null),
   };
 }

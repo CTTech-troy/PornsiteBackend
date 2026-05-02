@@ -7,6 +7,7 @@ import {
   updateUserCoins,
   getPlatformCreators,
   updateCreatorStatus,
+  updateCreatorType,
   getCreatorApplications,
   getApplicationById,
   updateApplicationStatus,
@@ -23,6 +24,7 @@ router.put('/users/:id/coins', requireAdminAuth, updateUserCoins);
 
 router.get('/creators', requireAdminAuth, getPlatformCreators);
 router.put('/creators/:id/status', requireAdminAuth, updateCreatorStatus);
+router.put('/users/:id/creator-type', requireAdminAuth, updateCreatorType);
 
 router.get('/applications', requireAdminAuth, getCreatorApplications);
 router.get('/applications/:id', requireAdminAuth, getApplicationById);

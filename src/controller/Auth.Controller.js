@@ -128,7 +128,7 @@ export async function signup(req, res) {
     try {
       const rawToken = await _createVerificationToken(uid, emailNorm);
       const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-      const verificationUrl = `${frontendUrl}/verify-email?token=${rawToken}`;
+      const verificationUrl = `${frontendUrl}/verify-email/${rawToken}`;
       await sendVerificationEmail({ to: emailNorm, name: name.trim(), verificationUrl });
       verificationEmailSent = true;
     } catch (emailErr) {
@@ -792,7 +792,7 @@ export async function login(req, res) {
 
 export async function verifyEmail(req, res) {
   try {
-    const { token } = req.body;
+    const token = req.params?.token || req.body?.token;
     if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ success: false, message: 'Verification token is required.' });
     }
@@ -913,7 +913,7 @@ export async function resendVerificationEmail(req, res) {
 
     const rawToken = await _createVerificationToken(uid, emailNorm);
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-    const verificationUrl = `${frontendUrl}/verify-email?token=${rawToken}`;
+    const verificationUrl = `${frontendUrl}/verify-email/${rawToken}`;
     const displayName = userRecord.displayName || emailNorm.split('@')[0];
 
     await sendVerificationEmail({ to: emailNorm, name: displayName, verificationUrl });

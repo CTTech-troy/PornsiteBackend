@@ -3,6 +3,8 @@ import { supabase } from '../config/supabase.js';
 import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { decryptApplicationData, encryptApplicationData } from '../config/encrypt.js';
 import { sendApplicationDecisionEmail } from '../services/emailService.js';
+import { updateUserCreatorStatus } from '../config/dbFallback.js';
+import { upsertCreator } from './creator.controller.js';
 
 function detectMissingFields(appData) {
   const missing = [];
@@ -528,6 +530,7 @@ export async function updateApplicationStatus(req, res) {
     let emailAddress = '';
     let displayName = 'Creator';
     let missingFields = [];
+    let userId = null;
 
     try {
       const { data: app } = await supabase
@@ -536,6 +539,7 @@ export async function updateApplicationStatus(req, res) {
         .eq('id', id)
         .maybeSingle();
       if (app) {
+        userId = app.user_id;
         let appData = {};
         try { appData = decryptApplicationData(app.data || {}); } catch (_) {}
         missingFields = detectMissingFields(appData);
@@ -625,6 +629,32 @@ export async function updateApplicationStatus(req, res) {
         });
         await supabase.from('creator_applications').update({ email_sent: true }).eq('id', id);
       } catch (_) {}
+    }
+
+    // Update the user's creator flag + creators table when approved / rejected
+    if (userId && (status === 'approved' || status === 'rejected')) {
+      try {
+        await updateUserCreatorStatus(userId, status === 'approved');
+      } catch (e) {
+        console.error('[updateApplicationStatus] Failed to update user creator flag:', e?.message);
+      }
+      if (status === 'approved') {
+        try {
+          // Fetch the creator_type from the application data so the creators row reflects it
+          const { data: appRow } = await supabase
+            .from('creator_applications').select('data').eq('id', id).maybeSingle();
+          let creator_type = 'pstar';
+          if (appRow) {
+            try {
+              const d = decryptApplicationData(appRow.data || {});
+              if (d.creator_type === 'channel') creator_type = 'channel';
+            } catch (_) {}
+          }
+          await upsertCreator(userId, { verified: true, creator_type });
+        } catch (e) {
+          console.error('[updateApplicationStatus] Failed to update creators table:', e?.message);
+        }
+      }
     }
 
     return res.json({ message: `Application ${status} successfully.` });
@@ -725,6 +755,27 @@ export async function updateApplicationByToken(req, res) {
     if (updateError) return res.status(500).json({ message: updateError.message });
 
     return res.json({ message: 'Your application has been updated and resubmitted for review. We will get back to you shortly.' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+// ── PUT /api/admin/users/:id/creator-type ─────────────────────────────────────
+
+export async function updateCreatorType(req, res) {
+  try {
+    const { id } = req.params; // user_id
+    const { creator_type } = req.body;
+    if (!['pstar', 'channel'].includes(creator_type)) {
+      return res.status(400).json({ message: "creator_type must be 'pstar' or 'channel'." });
+    }
+    try {
+      await upsertCreator(id, { creator_type });
+    } catch (e) {
+      return res.status(500).json({ message: e.message });
+    }
+    await logAction(req.admin?.id, req.admin?.name, 'Creator type changed', 'creator', id, { creator_type });
+    return res.json({ message: `Creator type updated to ${creator_type}.` });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
