@@ -31,11 +31,31 @@ if (typeof globalThis.fetch === 'undefined') {
   }
 }
 
+// Wrap fetch with a per-request timeout so hung Supabase connections fail fast
+// rather than blocking Node for minutes. Storage uploads are excluded (they
+// pass their own signal) so large files still work.
+const SUPABASE_TIMEOUT_MS = parseInt(process.env.SUPABASE_TIMEOUT_MS || '20000', 10);
+
+function supabaseFetch(url, options = {}) {
+  // Skip timeout for storage uploads (they can be legitimately slow)
+  // and for requests that already carry an abort signal.
+  const urlStr = typeof url === 'string' ? url : (url?.toString?.() || '');
+  const isStorageOp = urlStr.includes('/storage/v1/object');
+  if (options.signal || isStorageOp) {
+    return (globalThis.fetch)(url, options);
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SUPABASE_TIMEOUT_MS);
+  return (globalThis.fetch)(url, { ...options, signal: ctrl.signal })
+    .finally(() => clearTimeout(timer));
+}
+
 if (supabaseUrl && supabaseServiceRoleKey) {
   supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
     auth: { autoRefreshToken: false },
     global: {
       headers: { 'x-application-name': 'letstream-backend' },
+      fetch: supabaseFetch,
     },
   });
 } else {

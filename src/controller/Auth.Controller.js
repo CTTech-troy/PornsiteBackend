@@ -1,26 +1,45 @@
 import { getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { supabase, isConfigured } from '../config/supabase.js';
+import { sendVerificationEmail } from '../services/emailService.js';
 
-/** Fetch balance + social counts from Supabase for a given uid. Never throws. */
+/** Fetch balance + social counts + email_verified from Supabase for a given uid. Never throws. */
 async function _getSupabaseProfile(uid) {
   if (!uid || !isConfigured() || !supabase) return {};
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('avatar, followers, following, coin_balance')
+      .select('avatar, followers, following, coin_balance, email_verified')
       .eq('id', uid)
       .maybeSingle();
     if (error || !data) return {};
     return {
-      avatar:       data.avatar       ?? null,
-      followers:    Number(data.followers   ?? 0),
-      following:    Number(data.following   ?? 0),
-      tokenBalance: Number(data.coin_balance ?? 0),
-      coinBalance:  Number(data.coin_balance ?? 0),
+      avatar:        data.avatar        ?? null,
+      followers:     Number(data.followers    ?? 0),
+      following:     Number(data.following    ?? 0),
+      tokenBalance:  Number(data.coin_balance ?? 0),
+      coinBalance:   Number(data.coin_balance ?? 0),
+      emailVerified: data.email_verified ?? true,
     };
   } catch {
     return {};
   }
+}
+
+/** Generate a raw verification token, store its hash in Supabase, return the raw token. */
+async function _createVerificationToken(uid, email) {
+  const rawToken  = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+  if (isConfigured() && supabase) {
+    await supabase.from('email_verification_tokens').insert({
+      user_id:    uid,
+      email:      email,
+      token_hash: tokenHash,
+      expires_at: expiresAt.toISOString(),
+    });
+  }
+  return rawToken;
 }
 import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
 import { encryptApplicationData } from '../config/encrypt.js';
@@ -72,6 +91,8 @@ export async function signup(req, res) {
     const userPayload = {
       id: uid,
       username: name.trim().replace(/\s+/g, '_').toLowerCase(),
+      email: emailNorm,
+      email_verified: false,
       creator: false,
       created_at: new Date().toISOString(),
     };
@@ -102,6 +123,19 @@ export async function signup(req, res) {
       console.error('insertUser on signup:', err?.message || err);
     });
 
+    // Generate verification token and send email (non-blocking — don't fail signup if email fails)
+    let verificationEmailSent = false;
+    try {
+      const rawToken = await _createVerificationToken(uid, emailNorm);
+      const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+      const verificationUrl = `${frontendUrl}/verify-email?token=${rawToken}`;
+      await sendVerificationEmail({ to: emailNorm, name: name.trim(), verificationUrl });
+      verificationEmailSent = true;
+    } catch (emailErr) {
+      console.error('Failed to send verification email on signup:', emailErr?.message || emailErr);
+    }
+    mark('verificationEmail');
+
     const sessionToken = mintSessionToken(uid, emailNorm);
     let customToken;
     try {
@@ -117,6 +151,8 @@ export async function signup(req, res) {
       uid,
       email: emailNorm,
       displayName: name.trim(),
+      emailVerified: false,
+      verificationEmailSent,
       ...(customToken && { token: customToken }),
       ...(sessionToken && { sessionToken }),
     });
@@ -574,16 +610,19 @@ export async function me(req, res) {
       uid,
       email: cleanEmail,
       displayName,
+      emailVerified: supaProfile.emailVerified ?? true,
       userData: {
-        email:        cleanEmail,
-        name:         displayName,
-        avatar:       profileAvatar,
-        creator:      !!creatorPack.creator,
+        email:         cleanEmail,
+        name:          displayName,
+        avatar:        profileAvatar,
+        creator:       !!creatorPack.creator,
         creatorStatus: creatorPack.creatorStatus || 'none',
-        followers:    supaProfile.followers    ?? 0,
-        following:    supaProfile.following    ?? 0,
-        tokenBalance: supaProfile.tokenBalance ?? 0,
-        coinBalance:  supaProfile.coinBalance  ?? 0,
+        followers:     supaProfile.followers    ?? 0,
+        following:     supaProfile.following    ?? 0,
+        tokenBalance:  supaProfile.tokenBalance ?? 0,
+        coinBalance:   supaProfile.coinBalance  ?? 0,
+        emailVerified: supaProfile.emailVerified ?? true,
+        createdAt:     (userDoc?.exists ? userDoc.data()?.createdAt : null) ?? null,
       },
     });
   } catch (error) {
@@ -664,6 +703,16 @@ export async function login(req, res) {
         _getSupabaseProfile(uid),
       ]);
       mark('getUserCreatorStatus+supaProfile');
+
+      if (supaProfile.emailVerified === false) {
+        recordAuth('loginFail');
+        return res.status(403).json({
+          success: false,
+          message: 'Please verify your email before logging in.',
+          emailVerified: false,
+        });
+      }
+
       const sessionToken = mintSessionToken(uid, cleanEmail);
       mark('mintSessionToken');
       const displayName =
@@ -675,6 +724,7 @@ export async function login(req, res) {
         uid,
         email: cleanEmail,
         displayName,
+        emailVerified: true,
         ...(sessionToken && { sessionToken }),
         userData: {
           email:        cleanEmail,
@@ -698,6 +748,15 @@ export async function login(req, res) {
     userRecord = ur;
     mark('getUser+getUserCreatorStatus+supaProfile(parallel)');
 
+    if (supaProfile.emailVerified === false) {
+      recordAuth('loginFail');
+      return res.status(403).json({
+        success: false,
+        message: 'Please verify your email before logging in.',
+        emailVerified: false,
+      });
+    }
+
     const sessionToken = mintSessionToken(uid, cleanEmail);
     mark('mintSessionToken');
 
@@ -710,6 +769,7 @@ export async function login(req, res) {
       uid,
       email: cleanEmail,
       displayName,
+      emailVerified: true,
       ...(sessionToken && { sessionToken }),
       userData: {
         email:        cleanEmail,
@@ -727,6 +787,141 @@ export async function login(req, res) {
     console.error('Login error:', error);
     recordAuth('loginFail');
     return res.status(400).json({ success: false, message: error.message || 'Login failed.' });
+  }
+}
+
+export async function verifyEmail(req, res) {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ success: false, message: 'Verification token is required.' });
+    }
+
+    if (!isConfigured() || !supabase) {
+      return res.status(503).json({ success: false, message: 'Service temporarily unavailable.' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+
+    const { data: tokenRecord, error } = await supabase
+      .from('email_verification_tokens')
+      .select('*')
+      .eq('token_hash', tokenHash)
+      .maybeSingle();
+
+    if (error || !tokenRecord) {
+      return res.status(400).json({ success: false, message: 'Verification link is invalid or has expired.' });
+    }
+
+    if (tokenRecord.used_at) {
+      return res.status(400).json({ success: false, message: 'This verification link has already been used.' });
+    }
+
+    if (new Date(tokenRecord.expires_at) < new Date()) {
+      return res.status(400).json({ success: false, message: 'Verification link has expired. Please request a new one.' });
+    }
+
+    const uid = tokenRecord.user_id;
+
+    await Promise.all([
+      supabase.from('users').update({
+        email_verified:    true,
+        email_verified_at: new Date().toISOString(),
+      }).eq('id', uid),
+      supabase.from('email_verification_tokens').update({
+        used_at: new Date().toISOString(),
+      }).eq('id', tokenRecord.id),
+    ]);
+
+    try {
+      const auth = getFirebaseAuth();
+      if (auth) await auth.updateUser(uid, { emailVerified: true });
+    } catch (fbErr) {
+      console.warn('verifyEmail: could not update Firebase emailVerified:', fbErr?.message);
+    }
+
+    return res.status(200).json({ success: true, message: 'Email verified successfully. You can now log in.' });
+  } catch (err) {
+    console.error('verifyEmail error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to verify email.' });
+  }
+}
+
+export async function resendVerificationEmail(req, res) {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'Valid email is required.' });
+    }
+
+    const emailNorm = email.trim().toLowerCase();
+
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      return res.status(503).json({ success: false, message: 'Service temporarily unavailable.' });
+    }
+
+    let userRecord;
+    try {
+      userRecord = await auth.getUserByEmail(emailNorm);
+    } catch {
+      // Don't leak whether the user exists
+      return res.status(200).json({ success: true, message: 'If this email is registered and unverified, a new link has been sent.' });
+    }
+
+    const uid = userRecord.uid;
+
+    if (isConfigured() && supabase) {
+      const { data: userData } = await supabase
+        .from('users')
+        .select('email_verified')
+        .eq('id', uid)
+        .maybeSingle();
+
+      if (userData?.email_verified === true) {
+        return res.status(400).json({ success: false, message: 'This email is already verified.' });
+      }
+
+      // Cooldown: max one email per 60 seconds
+      const { data: recentToken } = await supabase
+        .from('email_verification_tokens')
+        .select('created_at')
+        .eq('user_id', uid)
+        .is('used_at', null)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (recentToken) {
+        const elapsedMs = Date.now() - new Date(recentToken.created_at).getTime();
+        if (elapsedMs < 60_000) {
+          const wait = Math.ceil((60_000 - elapsedMs) / 1000);
+          return res.status(429).json({
+            success: false,
+            message: `Please wait ${wait} seconds before requesting another verification email.`,
+          });
+        }
+      }
+
+      // Invalidate previous unused tokens
+      await supabase
+        .from('email_verification_tokens')
+        .update({ used_at: new Date().toISOString() })
+        .eq('user_id', uid)
+        .is('used_at', null);
+    }
+
+    const rawToken = await _createVerificationToken(uid, emailNorm);
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+    const verificationUrl = `${frontendUrl}/verify-email?token=${rawToken}`;
+    const displayName = userRecord.displayName || emailNorm.split('@')[0];
+
+    await sendVerificationEmail({ to: emailNorm, name: displayName, verificationUrl });
+
+    return res.status(200).json({ success: true, message: 'Verification email sent. Please check your inbox.' });
+  } catch (err) {
+    console.error('resendVerificationEmail error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to send verification email.' });
   }
 }
 

@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import * as authController from '../controller/Auth.Controller.js';
+import * as otpController from '../controller/OTP.Controller.js';
 import {
   authLoginBurst,
   authLoginWindow,
@@ -49,11 +50,38 @@ const approveCreatorVal = [
   validateRequest
 ];
 
+const verifyEmailVal = [
+  body('token').notEmpty().withMessage('token is required'),
+  validateRequest
+];
+
+const resendVerificationVal = [
+  body('email').trim().isEmail().withMessage('Valid email is required'),
+  validateRequest
+];
+
+const sendOTPVal = [
+  body('email').trim().isEmail().withMessage('Valid email is required'),
+  validateRequest
+];
+
+const verifyOTPVal = [
+  body('email').trim().isEmail().withMessage('Valid email is required'),
+  body('otp').notEmpty().withMessage('OTP is required'),
+  validateRequest
+];
+
 router.post('/signup', ...limitSignup, signupVal, authController.signup);
 router.post('/login', ...limitAuth, loginVal, authController.login);
 router.post('/google', ...limitAuth, googleVal, authController.google);
 router.post('/age-consent', ...limitAuth, ageConsentVal, authController.submitAgeConsent);
 router.get('/me', requireAuth, authController.me);
+router.post('/verify-email', verifyEmailVal, authController.verifyEmail);
+router.post('/resend-verification-email', ...limitAuth, resendVerificationVal, authController.resendVerificationEmail);
+
+// OTP endpoints — 5 sends/min burst, 20/15min window to prevent abuse
+router.post('/send-otp',   ...limitAuth, sendOTPVal,   otpController.sendOTP);
+router.post('/verify-otp', ...limitAuth, verifyOTPVal, otpController.verifyOTPHandler);
 
 // Creator application endpoints
 // Accept multipart/form-data for creator applications (forms + optional files).

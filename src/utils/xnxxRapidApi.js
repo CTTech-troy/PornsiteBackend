@@ -104,29 +104,68 @@ export function mapRawToHomeCard(v, index) {
   };
 }
 
+// Page-level cache for /xn/best — survives 429 quota exhaustion by serving stale data
+const bestPageCache = new Map(); // page -> { items, ts }
+const BEST_PAGE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes fresh TTL
+const BEST_PAGE_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days stale TTL (serves on 429/error)
+
 /**
  * GET https://{host}/xn/best?page=1
+ * Returns cached data on 429 or network failure so the app is never left empty.
  */
 export async function fetchXnxxBestPage(page = 1) {
   const { key, host } = getXnxxCredentials();
   if (!isXnxxApiConfigured()) {
     return { ok: false, error: 'not_configured', items: [], raw: null };
   }
+  const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+  const cacheKey = String(pageNum);
+
+  // Serve fresh cache immediately
+  const hit = bestPageCache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < BEST_PAGE_CACHE_TTL_MS) {
+    return { ok: true, items: hit.items, cached: true };
+  }
+
   const url = new URL(`https://${host}/xn/best`);
-  url.searchParams.set('page', String(Math.max(1, parseInt(String(page), 10) || 1)));
+  url.searchParams.set('page', String(pageNum));
   try {
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'x-rapidapi-key': key,
-        'x-rapidapi-host': host,
-        'Content-Type': 'application/json',
-      },
-    });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    let res;
+    try {
+      res = await fetch(url.toString(), {
+        method: 'GET',
+        signal: ctrl.signal,
+        headers: {
+          'x-rapidapi-key': key,
+          'x-rapidapi-host': host,
+          'Content-Type': 'application/json',
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
     const text = await res.text();
+
+    if (res.status === 429) {
+      // Quota exceeded — serve stale cache if available
+      if (hit && hit.items?.length > 0 && Date.now() - hit.ts < BEST_PAGE_STALE_TTL_MS) {
+        console.warn(`[xnxxBestPage] 429 quota exceeded for page ${pageNum}, serving stale cache (${hit.items.length} items)`);
+        return { ok: true, items: hit.items, stale: true, status: 429 };
+      }
+      return { ok: false, status: 429, items: [], raw: text };
+    }
+
     if (!res.ok) {
+      // Other error — try stale cache
+      if (hit && hit.items?.length > 0 && Date.now() - hit.ts < BEST_PAGE_STALE_TTL_MS) {
+        return { ok: true, items: hit.items, stale: true, status: res.status };
+      }
       return { ok: false, status: res.status, items: [], raw: text };
     }
+
     let data;
     try {
       data = JSON.parse(text);
@@ -135,8 +174,17 @@ export async function fetchXnxxBestPage(page = 1) {
     }
     const list = extractVideosFromXnxxResponse(data);
     const items = list.map((v, i) => mapRawToHomeCard(v, i)).filter(Boolean);
+
+    if (items.length > 0) {
+      bestPageCache.set(cacheKey, { items, ts: Date.now() });
+    }
     return { ok: true, items, raw: data };
   } catch (err) {
+    // Network/timeout failure — serve stale cache
+    if (hit && hit.items?.length > 0 && Date.now() - hit.ts < BEST_PAGE_STALE_TTL_MS) {
+      console.warn(`[xnxxBestPage] fetch error for page ${pageNum}, serving stale cache:`, err?.message || err);
+      return { ok: true, items: hit.items, stale: true, error: err?.message };
+    }
     return { ok: false, error: err?.message || String(err), items: [], raw: null };
   }
 }

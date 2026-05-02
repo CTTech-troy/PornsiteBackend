@@ -176,3 +176,51 @@ export async function addComment(req, res) {
     return res.status(500).json({ error: err?.message || 'Failed' });
   }
 }
+
+/**
+ * POST /api/videos/public/:videoId/view
+ * Records a video view with deduplication. Requires sessionId in body.
+ * Optional auth: if user is authenticated, uid is used as dedup key instead.
+ * Only counts once per session per user/sessionId pair.
+ */
+export async function recordPublicVideoView(req, res) {
+  try {
+    const { videoId } = req.params;
+    if (!isValidPathSegment(videoId)) {
+      return res.status(400).json({ error: 'videoId required' });
+    }
+
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb) {
+      return res.json({ success: true, views: 0 });
+    }
+
+    const sessionId = String(req.body?.sessionId || '').trim();
+    const uid = req.uid || null;
+
+    const rawKey = uid || sessionId;
+    if (!rawKey) {
+      return res.status(400).json({ error: 'sessionId required' });
+    }
+
+    const dedupKey = rawKey.replace(/[.#$[\]/]/g, '_').slice(0, 128);
+    const viewedRef = rtdb.ref(`videoViews/${videoId}/${dedupKey}`);
+    const snap = await viewedRef.once('value');
+
+    if (snap.val()) {
+      const totalSnap = await rtdb.ref(`videos/${videoId}/totalViews`).once('value');
+      return res.json({ success: true, views: Number(totalSnap.val()) || 0, duplicate: true });
+    }
+
+    await viewedRef.set(Date.now());
+    await ensureVideoRef(videoId);
+    const result = await rtdb.ref(`videos/${videoId}/totalViews`).transaction(
+      current => (Number(current) || 0) + 1
+    );
+
+    return res.json({ success: true, views: result.snapshot.val() || 0 });
+  } catch (err) {
+    console.error('videoInteractions.recordPublicVideoView', err?.message || err);
+    return res.status(500).json({ error: err?.message || 'Failed' });
+  }
+}

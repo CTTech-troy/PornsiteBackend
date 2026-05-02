@@ -26,9 +26,11 @@ import {
   getMembershipPlans,
   getUserMembership,
   activatePlan,
+  isPaymentAlreadyProcessed,
 } from '../controller/membership.controller.js';
 import { addTokens } from '../controller/tokens.controller.js';
 import { createCheckout as createPaymentServiceCheckout } from '../services/paymentServiceClient.js';
+import { getFirebaseRtdbPlan } from '../controller/membershipPlans.controller.js';
 
 const router = express.Router();
 
@@ -83,14 +85,34 @@ router.post('/checkout', requireAuth, async (req, res) => {
     if (!planId)      return res.status(400).json({ ok: false, error: 'planId is required' });
     if (!countryCode) return res.status(400).json({ ok: false, error: 'countryCode is required' });
 
-    // Fetch plan to get correct price / currency
+    // Fetch plan — try Supabase first, fall back to Firebase RTDB for admin-managed plans
     const plans = await getMembershipPlans();
-    const plan  = plans.find(p => p.id === planId);
+    let plan = plans.find(p => p.id === planId);
+
+    if (!plan) {
+      const rtdbPlan = await getFirebaseRtdbPlan(planId);
+      if (rtdbPlan) {
+        // Normalise Firebase RTDB plan (has price/currency) to checkout shape (price_usd/price_ngn).
+        // RTDB plans default currency to NGN since that's what both payment providers use.
+        const cur = (rtdbPlan.currency || 'NGN').toUpperCase();
+        plan = {
+          id:        planId,
+          name:      rtdbPlan.title || planId,
+          price_usd: cur === 'USD' ? Number(rtdbPlan.price) || 0 : 0,
+          price_ngn: cur === 'NGN' ? Number(rtdbPlan.price) || 0 : 0,
+        };
+      }
+    }
+
     if (!plan) return res.status(400).json({ ok: false, error: `Unknown plan: ${planId}` });
 
     const isNigeria = countryCode.trim().toUpperCase() === 'NG';
-    const amount    = isNigeria ? Number(plan.price_ngn) : Number(plan.price_usd);
-    const currency  = isNigeria ? 'NGN' : 'USD';
+    // Both Paystack (international) and Monnify (Nigeria) process in NGN.
+    // Paystack handles foreign-card currency conversion automatically.
+    // Sending currency: "USD" to Paystack fails on accounts without multi-currency enabled.
+    const NGN_PER_USD = 1600; // approximate fallback rate; set price_ngn on plans for accuracy
+    const amount      = Number(plan.price_ngn) || Math.round((Number(plan.price_usd) || 0) * NGN_PER_USD);
+    const currency    = 'NGN';
 
     // orderId encodes userId + planId so webhooks can recover them.
     // Firebase UIDs are 28 alphanumeric chars (no underscores), so the first
@@ -120,6 +142,27 @@ router.post('/checkout', requireAuth, async (req, res) => {
     // Surface service-down errors as 503 so the frontend can show a friendly message
     const status = /unreachable|timed out/i.test(err.message) ? 503 : 500;
     res.status(status).json({ ok: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/payments/verify/:reference  (requires auth)
+//
+// Frontend calls this after Paystack redirects to the callback page so it can
+// confirm whether the payment actually succeeded before showing a success UI.
+// Server-side re-verification prevents spoofed callback URLs.
+// ---------------------------------------------------------------------------
+router.get('/verify/:reference', requireAuth, async (req, res) => {
+  const reference = (req.params.reference || '').trim();
+  if (!reference) {
+    return res.status(400).json({ ok: false, error: 'reference is required' });
+  }
+  try {
+    await _verifyPaystackTransaction(reference);
+    res.json({ ok: true, verified: true, reference });
+  } catch (err) {
+    console.error('[payment] verify failed:', err.message);
+    res.status(400).json({ ok: false, verified: false, error: err.message });
   }
 });
 
@@ -165,7 +208,15 @@ router.post('/webhooks/paystack', async (req, res) => {
     }
 
     try {
+      // Idempotency guard — Paystack retries webhooks; skip if already processed.
+      const alreadyDone = await isPaymentAlreadyProcessed(reference);
+      if (alreadyDone) {
+        console.log(`[paystack-webhook] Already processed ${reference} — skipping`);
+        return res.status(200).json({ received: true });
+      }
+
       await _verifyPaystackTransaction(reference);
+
       if (planId.startsWith('tokens_')) {
         const tokenAmount = _parseTokenAmount(planId);
         await addTokens(userId, tokenAmount, { reference, paymentAmount: amountUsd, currency: 'USD' });
