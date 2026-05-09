@@ -3,6 +3,17 @@ import { supabase } from '../config/supabase.js';
 import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { decryptApplicationData, encryptApplicationData } from '../config/encrypt.js';
 import { sendApplicationDecisionEmail } from '../services/emailService.js';
+import { updateUserCreatorStatus } from '../config/dbFallback.js';
+import { upsertCreator } from './creator.controller.js';
+import {
+  enrichUsersFromFirebase,
+  rowToAdminUserDto,
+  paginateAdmin,
+  listUsersForAdminFromDirectory,
+  listPlatformCreatorsFromDirectory,
+  fetchUserRowForAdminById,
+  buildAdminUserFacetsByIds,
+} from '../services/userDirectoryService.js';
 
 function detectMissingFields(appData) {
   const missing = [];
@@ -33,52 +44,6 @@ function isMissingTable(err) {
     (typeof err?.message === 'string' && err.message.includes('schema cache'));
 }
 
-function normalizeSupabaseUser(u) {
-  return {
-    id: u.id,
-    username: u.username || u.displayName || u.id,
-    email: u.email || '',
-    display_name: u.username || u.displayName || u.id,
-    avatar_url: u.avatar || u.avatar_url || u.photoURL || null,
-    coin_balance: Number(u.coin_balance || u.coinBalance) || 0,
-    active_plan: u.active_plan || null,
-    plan_expires_at: u.plan_expires_at || null,
-    is_creator: !!(u.creator || u.is_creator),
-    creator_status: u.verified || u.creator_status || 'none',
-    status: u.banned ? 'banned' : u.suspended ? 'suspended' : 'active',
-    is_verified: !!(u.email_verified || u.emailVerified),
-    followers: Number(u.followers) || 0,
-    following: Number(u.following) || 0,
-    created_at: u.created_at || new Date().toISOString(),
-  };
-}
-
-function normalizeRtdbUser(id, u) {
-  return {
-    id,
-    username: u.username || u.displayName || id,
-    email: u.email || '',
-    display_name: u.username || u.displayName || id,
-    avatar_url: u.avatar || u.photoURL || null,
-    coin_balance: Number(u.coin_balance || u.coinBalance) || 0,
-    active_plan: null,
-    plan_expires_at: null,
-    is_creator: !!u.creator,
-    creator_status: u.creatorStatus || u.verified || 'none',
-    status: 'active',
-    is_verified: !!u.emailVerified || !!u.email_verified,
-    followers: Number(u.followers) || 0,
-    following: Number(u.following) || 0,
-    created_at: u.created_at || u.createdAt || new Date().toISOString(),
-  };
-}
-
-function paginate(page, limit) {
-  const p = Math.max(1, parseInt(page, 10) || 1);
-  const l = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
-  return { page: p, limit: l, offset: (p - 1) * l };
-}
-
 async function logAction(adminId, adminName, action, targetType, targetId, details = {}) {
   await supabase.from('admin_audit_logs').insert({
     id: randomUUID(),
@@ -96,66 +61,20 @@ async function logAction(adminId, adminName, action, targetType, targetId, detai
 
 export async function getUsers(req, res) {
   try {
-    const { search = '', statusFilter = '', planFilter = '', verifiedFilter = '' } = req.query;
-    const { page, limit, offset } = paginate(req.query.page, req.query.limit);
-
-    // users table columns (email lives in auth.users, not the public users table)
-    let countQ = supabase.from('users').select('*', { count: 'exact', head: true });
-    if (statusFilter === 'creator') countQ = countQ.eq('creator', true);
-    if (verifiedFilter === 'true') countQ = countQ.eq('email_verified', true);
-    if (search) countQ = countQ.ilike('username', `%${search}%`);
-
-    const { count, error: countErr } = await countQ;
-
-    // Use Supabase results whenever there is no error (count=0 is a valid empty result)
-    if (!countErr) {
-      const total = count || 0;
-      if (total === 0 || offset >= total) return res.json({ users: [], total, page, limit });
-
-      let q = supabase.from('users').select('*');
-      if (statusFilter === 'creator') q = q.eq('creator', true);
-      if (verifiedFilter === 'true') q = q.eq('email_verified', true);
-      if (search) q = q.ilike('username', `%${search}%`);
-      q = q.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
-
-      const { data, error } = await q;
-      if (error) return res.status(500).json({ message: error.message });
-
-      return res.json({ users: (data || []).map(normalizeSupabaseUser), total, page, limit });
+    const result = await listUsersForAdminFromDirectory(req.query);
+    if (result.error) {
+      return res.status(500).json({ message: typeof result.error === 'string' ? result.error : result.error?.message || 'Query failed' });
     }
-
-    // Fallback: read from Firebase RTDB only when Supabase itself errored
-    const rtdb = getFirebaseRtdb();
-    if (!rtdb) {
-      return res.json({ users: [], total: 0, page, limit });
-    }
-
-    const snap = await rtdb.ref('users').once('value');
-    const val = snap.val();
-    if (!val || typeof val !== 'object') {
-      return res.json({ users: [], total: 0, page, limit });
-    }
-
-    let allUsers = Object.entries(val).map(([id, u]) =>
-      normalizeRtdbUser(id, typeof u === 'object' && u !== null ? u : {})
-    );
-
-    if (search) {
-      const s = search.toLowerCase();
-      allUsers = allUsers.filter(u =>
-        u.username.toLowerCase().includes(s) || u.email.toLowerCase().includes(s)
-      );
-    }
-    if (statusFilter === 'creator') allUsers = allUsers.filter(u => u.is_creator);
-    if (statusFilter === 'banned') allUsers = allUsers.filter(u => u.status === 'banned');
-    if (statusFilter === 'suspended') allUsers = allUsers.filter(u => u.status === 'suspended');
-    if (statusFilter === 'active') allUsers = allUsers.filter(u => u.status === 'active');
-
-    allUsers.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-    const total = allUsers.length;
-    const paginated = allUsers.slice(offset, offset + limit);
-    return res.json({ users: paginated, total, page, limit });
+    return res.json({
+      users: result.users,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      supabaseTotal: result.supabaseTotal,
+      firebaseOnlyTotal: result.firebaseOnlyTotal,
+      firebaseOnlyUsers: result.firebaseOnlyUsers,
+      dataSource: result.source,
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -166,24 +85,8 @@ export async function getUsers(req, res) {
 export async function getUserById(req, res) {
   try {
     const { id } = req.params;
-    const { data: raw, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
-
-    // Fallback to RTDB if not in Supabase
-    let user;
-    if (error || !raw) {
-      const rtdb = getFirebaseRtdb();
-      if (rtdb) {
-        const snap = await rtdb.ref(`users/${id}`).once('value');
-        const val = snap.val();
-        if (val) user = normalizeRtdbUser(id, val);
-      }
-    } else {
-      user = normalizeSupabaseUser(raw);
-    }
+    const { row: mergedRow } = await fetchUserRowForAdminById(id);
+    const user = mergedRow ? rowToAdminUserDto(mergedRow) : null;
 
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
@@ -197,7 +100,7 @@ export async function getUserById(req, res) {
 
     // Creator earnings if creator
     let earnings = null;
-    if (user.is_creator) {
+    if (user.isCreator) {
       const { data: earns } = await supabase
         .from('creator_earnings')
         .select('amount_usd')
@@ -321,56 +224,16 @@ export async function updateUserCoins(req, res) {
 
 export async function getPlatformCreators(req, res) {
   try {
-    const { search = '', verifiedFilter = '', typeFilter = '' } = req.query;
-    const { page, limit, offset } = paginate(req.query.page, req.query.limit);
-
-    // Build count query
-    let countQ = supabase.from('creators').select('*', { count: 'exact', head: true });
-    if (search) countQ = countQ.ilike('display_name', `%${search}%`);
-    if (typeFilter === 'pstar' || typeFilter === 'channel') countQ = countQ.eq('creator_type', typeFilter);
-
-    const { count, error: countErr } = await countQ;
-    if (countErr) return res.status(500).json({ message: countErr.message });
-
-    const total = count || 0;
-    if (total === 0 || offset >= total) return res.json({ creators: [], total, page, limit });
-
-    let q = supabase.from('creators')
-      .select('id, user_id, display_name, bio, creator_type, created_at, updated_at');
-    if (search) q = q.ilike('display_name', `%${search}%`);
-    if (typeFilter === 'pstar' || typeFilter === 'channel') q = q.eq('creator_type', typeFilter);
-    q = q.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
-
-    const { data: creatorRows, error } = await q;
-    if (error) return res.status(500).json({ message: error.message });
-    if (!creatorRows?.length) return res.json({ creators: [], total, page, limit });
-
-    // Join users table for avatar, email, followers, verification status
-    const userIds = [...new Set(creatorRows.map(c => c.user_id).filter(Boolean))];
-    const { data: userRows } = await supabase.from('users').select('*').in('id', userIds);
-    const userMap = Object.fromEntries((userRows || []).map(u => [u.id, u]));
-
-    let creators = creatorRows.map(c => {
-      const u = userMap[c.user_id] || {};
-      const resolvedType = c.creator_type === 'channel' ? 'channel' : 'pstar';
-      return {
-        id:           c.id,
-        user_id:      c.user_id,
-        username:     u.username || c.user_id,
-        display_name: c.display_name || u.username || c.user_id,
-        creator_type: resolvedType,
-        email:        u.email || '',
-        avatar_url:   u.avatar || u.avatar_url || null,
-        status:       u.banned ? 'banned' : u.suspended ? 'suspended' : 'active',
-        is_verified:  !!(u.verified && u.verified !== 'none' && u.verified !== 'rejected' && u.verified !== 'pending'),
-        followers:    Number(u.followers) || 0,
-        created_at:   c.created_at,
-      };
+    const result = await listPlatformCreatorsFromDirectory(req.query);
+    if (result.error) {
+      return res.status(500).json({ message: result.error });
+    }
+    return res.json({
+      creators: result.creators,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
     });
-
-    if (verifiedFilter === 'true') creators = creators.filter(c => c.is_verified);
-
-    return res.json({ creators, total, page, limit });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -411,7 +274,7 @@ export async function updateCreatorStatus(req, res) {
 export async function getCreatorApplications(req, res) {
   try {
     const { search = '', statusFilter = '' } = req.query;
-    const { page, limit, offset } = paginate(req.query.page, req.query.limit);
+    const { page, limit, offset } = paginateAdmin(req.query.page, req.query.limit);
 
     // creator_applications table: id, user_id, data (encrypted jsonb), status, created_at
     // If search is provided, first resolve matching user_ids from users table
@@ -428,7 +291,39 @@ export async function getCreatorApplications(req, res) {
     if (searchUserIds) countQ = countQ.in('user_id', searchUserIds);
 
     const { count, error: countErr } = await countQ;
-    if (countErr) return res.status(500).json({ message: countErr.message });
+    if (countErr) {
+      // Supabase unavailable — fall back to Firebase RTDB
+      const rtdb = getFirebaseRtdb();
+      if (!rtdb) return res.status(500).json({ message: countErr.message });
+      try {
+        const snap = await rtdb.ref('creator_applications').once('value');
+        const val = snap.val();
+        if (!val) return res.json({ applications: [], total: 0, page, limit });
+        let allApps = Object.entries(val).map(([id, a]) => {
+          const app = (typeof a === 'object' && a) ? a : {};
+          return {
+            id: app.id || id,
+            user_id: app.user_id || '',
+            name: app.user_id || id,
+            username: app.user_id || id,
+            email: '',
+            avatar_url: null,
+            status: app.status || 'pending',
+            creator_type: '',
+            application_message: '',
+            is_verified: false,
+            created_at: app.created_at || new Date().toISOString(),
+            submitted_at: app.created_at || new Date().toISOString(),
+          };
+        });
+        if (statusFilter) allApps = allApps.filter(a => a.status === statusFilter);
+        const total = allApps.length;
+        const paginated = allApps.slice(offset, offset + limit);
+        return res.json({ applications: paginated, total, page, limit });
+      } catch (rtdbErr) {
+        return res.status(500).json({ message: countErr.message });
+      }
+    }
 
     const total = count || 0;
     if (total === 0 || offset >= total) return res.json({ applications: [], total, page, limit });
@@ -445,10 +340,9 @@ export async function getCreatorApplications(req, res) {
 
     // Fetch user details for applicants
     const userIds = [...new Set(appRows.map(a => a.user_id).filter(Boolean))];
-    const { data: userRows } = await supabase.from('users').select('*').in('id', userIds);
-    const userMap = Object.fromEntries((userRows || []).map(u => [u.id, u]));
+    const userMap = await buildAdminUserFacetsByIds(userIds);
 
-    const applications = appRows.map(a => {
+    let applications = appRows.map(a => {
       const u = userMap[a.user_id] || {};
       let appData = {};
       try { appData = decryptApplicationData(a.data || {}); } catch (_) {}
@@ -463,10 +357,33 @@ export async function getCreatorApplications(req, res) {
         name: fullName,
         username: u.username || a.user_id,
         email: appData.email || u.email || '',
-        avatar_url: u.avatar || u.avatar_url || null,
+        avatar_url: u.avatar || null,
         status: a.status,
         creator_type: appData.creator_type || '',
+        application_message: appData.message || appData.application_message || appData.applicationMessage || '',
+        is_verified: !!u.email_verified,
         created_at: a.created_at,
+        submitted_at: a.created_at,
+      };
+    });
+
+    // Enrich missing email/avatar/is_verified from Firebase Auth/Firestore when available.
+    const rowsForEnrich = applications.map((a) => ({
+      id: a.user_id,
+      email: a.email,
+      avatar_url: a.avatar_url,
+      is_verified: a.is_verified,
+    }));
+    const enriched = await enrichUsersFromFirebase(rowsForEnrich);
+    const enrichedMap = new Map(enriched.map((r) => [r.id, r]));
+    applications = applications.map((a) => {
+      const e = enrichedMap.get(a.user_id);
+      if (!e) return a;
+      return {
+        ...a,
+        email: a.email || e.email,
+        avatar_url: a.avatar_url || e.avatar_url,
+        is_verified: a.is_verified || e.is_verified,
       };
     });
 
@@ -494,15 +411,18 @@ export async function getApplicationById(req, res) {
     let appData = {};
     try { appData = decryptApplicationData(app.data || {}); } catch (_) {}
 
-    const { data: user } = await supabase.from('users').select('*').eq('id', app.user_id).maybeSingle();
+    const facets = await buildAdminUserFacetsByIds([app.user_id]);
+    const f = facets[app.user_id] || {};
 
     return res.json({
       id: app.id,
       user_id: app.user_id,
       status: app.status,
       created_at: app.created_at,
-      username: user?.username || app.user_id,
-      avatar_url: user?.avatar || user?.avatar_url || null,
+      username: f.username || app.user_id,
+      avatar_url: f.avatar || null,
+      email: f.email || '',
+      is_verified: !!f.email_verified,
       data: appData,
     });
   } catch (err) {
@@ -528,6 +448,7 @@ export async function updateApplicationStatus(req, res) {
     let emailAddress = '';
     let displayName = 'Creator';
     let missingFields = [];
+    let userId = null;
 
     try {
       const { data: app } = await supabase
@@ -536,6 +457,7 @@ export async function updateApplicationStatus(req, res) {
         .eq('id', id)
         .maybeSingle();
       if (app) {
+        userId = app.user_id;
         let appData = {};
         try { appData = decryptApplicationData(app.data || {}); } catch (_) {}
         missingFields = detectMissingFields(appData);
@@ -627,7 +549,67 @@ export async function updateApplicationStatus(req, res) {
       } catch (_) {}
     }
 
-    return res.json({ message: `Application ${status} successfully.` });
+    // Update the user's creator flag + creators table when approved / rejected
+    let deleted = false;
+    if (userId && (status === 'approved' || status === 'rejected')) {
+      try {
+        await updateUserCreatorStatus(userId, status === 'approved');
+      } catch (e) {
+        console.error('[updateApplicationStatus] Failed to update user creator flag:', e?.message);
+      }
+
+      // Sync Firestore so the /me endpoint returns updated creatorStatus immediately
+      try {
+        const db = getFirebaseDb();
+        if (db) {
+          await db.collection('users').doc(userId).set({
+            creatorStatus: status === 'approved' ? 'approved' : 'rejected',
+            creator: status === 'approved',
+            updatedAt: new Date().toISOString(),
+          }, { merge: true });
+        }
+      } catch (firestoreErr) {
+        console.warn('[updateApplicationStatus] Firestore creatorStatus sync failed:', firestoreErr?.message);
+      }
+
+      if (status === 'approved') {
+        try {
+          // Fetch the creator_type from the application data so the creators row reflects it
+          const { data: appRow } = await supabase
+            .from('creator_applications').select('data').eq('id', id).maybeSingle();
+          let creator_type = 'pstar';
+          if (appRow) {
+            try {
+              const d = decryptApplicationData(appRow.data || {});
+              if (d.creator_type === 'channel') creator_type = 'channel';
+            } catch (_) {}
+          }
+          await upsertCreator(userId, { verified: true, creator_type });
+        } catch (e) {
+          console.error('[updateApplicationStatus] Failed to update creators table:', e?.message);
+        }
+      }
+
+      // Delete the application request to free DB space (required behavior).
+      try {
+        const { error: delErr } = await supabase.from('creator_applications').delete().eq('id', id);
+        if (!delErr) deleted = true;
+      } catch (_) {}
+
+      // Best-effort cleanup in Firestore fallback store (if used anywhere).
+      try {
+        const db = getFirebaseDb();
+        if (db) await db.collection('creatorApplications').doc(id).delete();
+      } catch (_) {}
+
+      // Best-effort cleanup in RTDB fallback.
+      try {
+        const rtdb = getFirebaseRtdb();
+        if (rtdb) await rtdb.ref(`creator_applications/${id}`).remove();
+      } catch (_) {}
+    }
+
+    return res.json({ message: `Application ${status} successfully.`, deleted });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -725,6 +707,27 @@ export async function updateApplicationByToken(req, res) {
     if (updateError) return res.status(500).json({ message: updateError.message });
 
     return res.json({ message: 'Your application has been updated and resubmitted for review. We will get back to you shortly.' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+// ── PUT /api/admin/users/:id/creator-type ─────────────────────────────────────
+
+export async function updateCreatorType(req, res) {
+  try {
+    const { id } = req.params; // user_id
+    const { creator_type } = req.body;
+    if (!['pstar', 'channel'].includes(creator_type)) {
+      return res.status(400).json({ message: "creator_type must be 'pstar' or 'channel'." });
+    }
+    try {
+      await upsertCreator(id, { creator_type });
+    } catch (e) {
+      return res.status(500).json({ message: e.message });
+    }
+    await logAction(req.admin?.id, req.admin?.name, 'Creator type changed', 'creator', id, { creator_type });
+    return res.json({ message: `Creator type updated to ${creator_type}.` });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

@@ -9,6 +9,7 @@ router.get('/feed', (req, res) => { req.params.placement = 'feed'; return ads.ge
 router.get('/sidebar', (req, res) => { req.params.placement = 'sidebar'; return ads.getAdsByPlacement(req, res); });
 router.get('/homepage', (req, res) => { req.params.placement = 'homepage_banner'; return ads.getAdsByPlacement(req, res); });
 router.get('/placement/:placement', ads.getAdsByPlacement);
+router.post('/campaign/:adId/impression', ads.trackCampaignImpression);
 router.post('/campaign/:adId/click', ads.trackCampaignClick);
 
 // Public: fetch next pre-roll ad (RTDB) + track events

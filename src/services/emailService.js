@@ -61,7 +61,7 @@ function buildVerificationEmailHtml({ name, verificationUrl, logoUrl }) {
               </table>
 
               <p style="margin:0 0 8px;font-size:13px;color:#9CA3AF;line-height:1.6;">
-                This link will expire in <strong>1 hour</strong>. If you did not create this account, you can safely ignore this email.
+                This link will expire in <strong>24 hours</strong>. If you did not create this account, you can safely ignore this email.
               </p>
             </td>
           </tr>
@@ -135,6 +135,44 @@ export async function sendVerificationEmail({ to, name, verificationUrl }) {
   console.log(`[email] ✓ Verification email sent to ${to} (id: ${data?.id ?? 'n/a'}, ${Date.now() - t0}ms)`);
 }
 
+export async function sendPasswordResetEmail({ to, name, resetUrl }) {
+  const resend = getResend();
+  if (!resend) {
+    console.error('[email] ✗ Email service not configured — RESEND_API_KEY is missing.');
+    throw new Error('Email service not configured — set RESEND_API_KEY in environment.');
+  }
+  const safeName = String(name || 'there').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  const safeUrl = String(resetUrl || '#').replace(/"/g, '%22');
+  const from = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+  const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Reset your password</title></head>
+<body style="margin:0;padding:0;background:#F0F2F5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F0F2F5;padding:40px 16px;"><tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(26,26,46,0.08);">
+<tr><td style="background:linear-gradient(135deg,#1A1A2E 0%,#16213E 100%);padding:32px 40px;text-align:center;">
+<span style="color:#FF4654;font-size:24px;font-weight:900;">Xstream</span></td></tr>
+<tr><td style="padding:40px 40px 32px;">
+<h1 style="margin:0 0 8px;font-size:22px;font-weight:800;color:#1A1A2E;">Reset your password</h1>
+<p style="margin:0 0 24px;font-size:15px;color:#6B7280;">Hi ${safeName}, we received a request to reset your password.</p>
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding-bottom:24px;">
+<a href="${safeUrl}" style="display:inline-block;background:linear-gradient(135deg,#FF4654 0%,#FF7043 100%);color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;padding:14px 36px;border-radius:10px;">Choose a new password</a>
+</td></tr></table>
+<p style="margin:0;font-size:12px;color:#9CA3AF;">If you did not request this, you can ignore this email.</p>
+<p style="margin:16px 0 0;font-size:12px;color:#FF4654;word-break:break-all;"><a href="${safeUrl}" style="color:#FF4654;">${safeUrl}</a></p>
+</td></tr>
+<tr><td style="background:#F9FAFB;padding:20px 40px;text-align:center;border-top:1px solid #E5E7EB;">
+<p style="margin:0;font-size:12px;color:#9CA3AF;">&copy; ${new Date().getFullYear()} Xstream</p>
+</td></tr></table></td></tr></table></body></html>`;
+  const { data, error } = await resend.emails.send({
+    from,
+    to,
+    subject: 'Reset your Xstream password',
+    html,
+  });
+  if (error) throw new Error(`Resend error: ${error.message}`);
+  console.log(`[email] ✓ Password reset email sent to ${to} (id: ${data?.id ?? 'n/a'})`);
+}
+
 export async function sendAdminInviteEmail({ to, name, inviteUrl, permissions }) {
   const resend = getResend();
   if (!resend) {
@@ -190,6 +228,8 @@ export async function sendApplicationDecisionEmail({ to, name, status, reason, m
   const isApproved = status === 'approved';
   const isRejected = status === 'rejected';
   const isInfoRequest = status === 'info_requested';
+  const isSubmitted = status === 'submitted';
+  const isReapplied = status === 'reapplied';
 
   const statusConfig = isApproved
     ? { emoji: '🎉', heading: 'Congratulations! Your application has been approved.', color: '#10B981', badge: 'Approved',
@@ -197,8 +237,17 @@ export async function sendApplicationDecisionEmail({ to, name, status, reason, m
     : isRejected
     ? { emoji: '😔', heading: 'Your creator application was not approved.', color: '#EF4444', badge: 'Not Approved',
         message: 'We appreciate your interest in joining XstreamVideos as a creator. Unfortunately, your application did not meet our current requirements. You are welcome to reapply in the future.' }
-    : { emoji: '📋', heading: 'Additional information required for your application.', color: '#F59E0B', badge: 'Info Requested',
-        message: 'Thank you for applying to become a creator on XstreamVideos! We need a bit more information before we can process your application. Please use the link below to provide the missing details.' };
+    : isInfoRequest
+    ? { emoji: '📋', heading: 'Additional information required for your application.', color: '#F59E0B', badge: 'Info Requested',
+        message: 'Thank you for applying to become a creator on XstreamVideos! We need a bit more information before we can process your application. Please use the link below to provide the missing details.' }
+    : isSubmitted
+    ? { emoji: '📝', heading: 'Your creator application has been submitted.', color: '#3B82F6', badge: 'Submitted',
+        message: 'Thank you for applying to become a creator on XstreamVideos! Your application is now under review. We will notify you once a decision has been made.' }
+    : isReapplied
+    ? { emoji: '🔄', heading: 'Your reapplication has been submitted.', color: '#8B5CF6', badge: 'Reapplied',
+        message: 'Thank you for reapplying to become a creator on XstreamVideos! Your new application is now under review. We will notify you once a decision has been made.' }
+    : { emoji: '❓', heading: 'Application status update.', color: '#6B7280', badge: 'Update',
+        message: 'There has been an update to your creator application status.' };
 
   // Build missing-fields list for info_requested emails
   const missingFieldsHtml = isInfoRequest && missingFields.length > 0
@@ -263,6 +312,8 @@ export async function sendApplicationDecisionEmail({ to, name, status, reason, m
     approved: '🎉 You\'re a creator on XstreamVideos! Application approved',
     rejected: 'Update on your XstreamVideos creator application',
     info_requested: 'Action required: Additional info needed for your XstreamVideos application',
+    submitted: '📝 Your creator application has been submitted',
+    reapplied: '🔄 Your reapplication has been submitted',
   };
   const { data, error } = await resend.emails.send({ from, to, subject: subjectMap[status] || 'Update on your creator application', html });
   if (error) console.error(`[email] ✗ Decision email failed: ${error.message}`);

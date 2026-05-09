@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { pingServices } from '../utils/servicePing.js';
+import { getUserDirectoryAggregateStats, safeCount } from '../services/userDirectoryService.js';
 
 function isMissingTable(err) {
   return err?.code === '42P01' || err?.code === 'PGRST200' ||
@@ -105,11 +106,10 @@ export async function getSystemHealth(req, res) {
       activeLives = count || 0;
     } catch (_) {}
 
-    // Count total users
     let totalUsers = 0;
     try {
-      const { count } = await supabase.from('users').select('*', { count: 'exact', head: true });
-      totalUsers = count || 0;
+      const u = await getUserDirectoryAggregateStats();
+      totalUsers = u.totalUsers;
     } catch (_) {}
 
     // Count active subscriptions
@@ -206,33 +206,17 @@ export async function getAdminUsers(req, res) {
 
 // ── GET /api/admin/system/stats ───────────────────────────────────────────────
 
-async function safeCount(queryBuilder) {
-  try {
-    const { count, error } = await queryBuilder;
-    if (error) return 0;
-    return count || 0;
-  } catch {
-    return 0;
-  }
-}
-
 export async function getStats(req, res) {
   try {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
+    const userDir = await getUserDirectoryAggregateStats(todayStart);
+
     const [
-      totalUsers, suspendedUsers, bannedUsers, newToday,
-      totalCreators, pstarCount, channelCount, pendingApps,
+      pendingApps,
       totalVideos, liveNow, activeMembers, activeAdCampaigns,
     ] = await Promise.all([
-      safeCount(supabase.from('users').select('*', { count: 'exact', head: true })),
-      safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).eq('suspended', true)),
-      safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).eq('banned', true)),
-      safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).gte('created_at', todayStart.toISOString())),
-      safeCount(supabase.from('creators').select('*', { count: 'exact', head: true })),
-      safeCount(supabase.from('creators').select('*', { count: 'exact', head: true }).eq('creator_type', 'pstar')),
-      safeCount(supabase.from('creators').select('*', { count: 'exact', head: true }).eq('creator_type', 'channel')),
       safeCount(supabase.from('creator_applications').select('*', { count: 'exact', head: true }).eq('status', 'pending')),
       safeCount(supabase.from('tiktok_videos').select('*', { count: 'exact', head: true })),
       safeCount(supabase.from('lives').select('*', { count: 'exact', head: true }).eq('status', 'live')),
@@ -240,12 +224,28 @@ export async function getStats(req, res) {
       safeCount(supabase.from('ad_campaigns').select('*', { count: 'exact', head: true }).eq('status', 'active')),
     ]);
 
-    // Active = total minus explicitly banned/suspended users
-    const activeUsers = Math.max(0, totalUsers - suspendedUsers - bannedUsers);
+    const activeUsers = Math.max(
+      0,
+      userDir.totalUsers - userDir.suspendedUsers - userDir.bannedUsers
+    );
 
     return res.json({
-      users:       { total: totalUsers, active: activeUsers, newToday, suspended: suspendedUsers },
-      creators:    { total: totalCreators, pstars: pstarCount, channels: channelCount, pendingApplications: pendingApps },
+      users: {
+        total: userDir.totalUsers,
+        totalIncludingFirebase: userDir.totalUsers + (userDir.firebaseOnlyUsers || 0),
+        firebaseOnly: userDir.firebaseOnlyUsers || 0,
+        verified: userDir.emailVerifiedUsers,
+        active: activeUsers,
+        newToday: userDir.newToday,
+        suspended: userDir.suspendedUsers,
+        banned: userDir.bannedUsers,
+      },
+      creators: {
+        total: userDir.creatorsTotal,
+        pstars: userDir.creatorsPstar,
+        channels: userDir.creatorsChannel,
+        pendingApplications: pendingApps,
+      },
       content:     { videos: totalVideos, liveNow },
       memberships: { active: activeMembers },
       ads:         { activeCampaigns: activeAdCampaigns },

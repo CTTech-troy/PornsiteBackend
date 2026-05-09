@@ -26,6 +26,7 @@ import adminUsersRouter from './src/router/adminUsers.route.js';
 import adminContentRouter from './src/router/adminContent.route.js';
 import adminModerationRouter from './src/router/adminModeration.route.js';
 import adminSystemRouter from './src/router/adminSystem.route.js';
+import adminAdsRouter from './src/router/adminAds.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
@@ -39,6 +40,8 @@ import { pingServices } from './src/utils/servicePing.js';
 import { pingPaymentService, STARTUP_HEALTH_TIMEOUT_MS } from './src/services/paymentServiceClient.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
 import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
+import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
+import { renderVideoSharePreview } from './src/controller/sharePreview.controller.js';
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
@@ -104,6 +107,10 @@ app.get('/', (req, res) => {
   res.send(`API running on port ${PORT}`);
 });
 
+// Social share preview endpoints (server-rendered OG/Twitter metadata).
+app.get('/watch/:id', renderVideoSharePreview);
+app.get('/video/:id', renderVideoSharePreview);
+
 app.get('/api/health/services', async (req, res) => {
   try {
     const { firebase, supabase } = await pingServices();
@@ -139,6 +146,7 @@ app.use('/api/admin', adminUsersRouter);
 app.use('/api/admin/content', adminContentRouter);
 app.use('/api/admin/moderation', adminModerationRouter);
 app.use('/api/admin/system', adminSystemRouter);
+app.use('/api/admin/ads', adminAdsRouter);
 app.get('/api/videos/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
 // Videos proxy routes
 app.use('/api/videos', videosRouter);
@@ -171,6 +179,8 @@ app.use('/api/ads', adsRouter);
 // Membership plans (public read + admin CRUD)
 app.use('/api/memberships', publicMembershipsRouter);
 app.use('/api/admin/memberships', adminMembershipsRouter);
+// Creators Main Application
+app.use('/api/creators-main-application', creatorsMainApplicationRouter);
 
 // LiveKit access token — called by both host and viewer before connecting to a room
 app.post('/api/live/livekit-token', async (req, res) => {
