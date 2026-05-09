@@ -3,6 +3,37 @@ import { getFirebaseRtdb, isFirebaseReady } from './firebase.js';
 
 let syncSkipLogged = false;
 
+const USER_UPSERT_KEYS = new Set([
+  'id',
+  'username',
+  'email',
+  'email_verified',
+  'creator',
+  'verified',
+  'creator_application',
+  'followers',
+  'following',
+  'balance',
+  'created_at',
+  'updated_at',
+  'avatar',
+  'avatar_url',
+  'display_name',
+  'full_name',
+  'role',
+  'coin_balance',
+  'monthly_premium_uploads',
+  'premium_upload_month',
+]);
+
+function slimUserPayload(user) {
+  const out = {};
+  for (const [k, v] of Object.entries(user || {})) {
+    if (USER_UPSERT_KEYS.has(k) && v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 function isUuidLike(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
@@ -19,9 +50,10 @@ async function isSupabaseReachable() {
 }
 
 async function insertUser(user) {
+  const row = slimUserPayload(user);
   if (isConfigured()) {
     try {
-      const { data, error } = await supabase.from('users').upsert([user], { onConflict: 'id' });
+      const { data, error } = await supabase.from('users').upsert([row], { onConflict: 'id' });
       if (error) throw error;
       return { source: 'supabase', data };
     } catch (err) {
@@ -34,10 +66,10 @@ async function insertUser(user) {
     throw new Error('User save failed: Firebase Realtime Database is not available.');
   }
   try {
-    if (!user.id && user.id !== 0) user.id = user.uid || Date.now().toString();
-    const id = user.id;
-    await rtdb.ref(`users/${id}`).set(user);
-    return { source: 'rtdb', data: user };
+    if (!row.id && row.id !== 0) row.id = user.uid || Date.now().toString();
+    const id = row.id;
+    await rtdb.ref(`users/${id}`).set(row);
+    return { source: 'rtdb', data: row };
   } catch (err) {
     console.error('RTDB insertUser failed:', err);
     throw err;
@@ -95,6 +127,8 @@ async function getUserCreatorStatus(userId) {
 }
 
 async function updateUserCreatorStatus(userId, approve) {
+  let supabaseUpdated = false;
+
   if (isConfigured()) {
     try {
       const { data, error } = await supabase.from('users').update({
@@ -102,25 +136,35 @@ async function updateUserCreatorStatus(userId, approve) {
         verified: approve ? 'approved' : 'rejected',
       }).eq('id', userId);
       if (error) throw error;
-      return { source: 'supabase', data };
+      supabaseUpdated = true;
     } catch (err) {
-      console.warn('Supabase updateUserCreatorStatus failed, falling back to RTDB:', err && err.message ? err.message : err);
+      console.warn('Supabase updateUserCreatorStatus failed:', err && err.message ? err.message : err);
     }
   }
 
+  // Always sync to RTDB — Firebase Auth UIDs are not UUID-format so getUserCreatorStatus
+  // skips the Supabase path and reads from RTDB. Without this sync, approved creators
+  // would still show creator: false in the /me response.
   const rtdb = getFirebaseRtdb();
-  if (!rtdb) {
+  if (rtdb) {
+    try {
+      await rtdb.ref(`users/${userId}/creator`).set(!!approve);
+      await rtdb.ref(`users/${userId}/creatorStatus`).set(approve ? 'approved' : 'rejected');
+      await rtdb.ref(`users/${userId}/verified`).set(approve ? 'approved' : 'rejected');
+    } catch (rtdbErr) {
+      if (!supabaseUpdated) {
+        console.error('RTDB updateUserCreatorStatus failed:', rtdbErr);
+        throw rtdbErr;
+      }
+      console.warn('RTDB creator status sync failed (Supabase succeeded):', rtdbErr?.message || rtdbErr);
+    }
+    return { source: supabaseUpdated ? 'supabase+rtdb' : 'rtdb', data: { userId, creator: !!approve } };
+  }
+
+  if (!supabaseUpdated) {
     throw new Error('Update failed: Firebase Realtime Database is not available.');
   }
-  try {
-    await rtdb.ref(`users/${userId}/creator`).set(!!approve);
-    await rtdb.ref(`users/${userId}/creatorStatus`).set(approve ? 'approved' : 'rejected');
-    await rtdb.ref(`users/${userId}/verified`).set(approve ? 'approved' : 'rejected');
-    return { source: 'rtdb', data: { userId, creator: !!approve } };
-  } catch (err) {
-    console.error('RTDB updateUserCreatorStatus failed:', err);
-    throw err;
-  }
+  return { source: 'supabase', data: { userId, creator: !!approve } };
 }
 
 async function updateUserWithCreatorApplication(userId, creatorApplicationData) {

@@ -52,7 +52,7 @@ const { default: pg } = await import('pg');
 const { Client } = pg;
 
 const sql = readFileSync(
-  resolve(__dirname, '../supabase/migrations/20250413_membership.sql'),
+  resolve(__dirname, '../supabase/migrations/20260503200000_creators_main_application.sql'),
   'utf8'
 );
 

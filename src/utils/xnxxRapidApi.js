@@ -447,5 +447,7 @@ export function homeCardToFeedVideoItem(card, index) {
     title: card.title || '',
     channel: card.channel || '',
     views: card.views ?? 0,
+    isPremiumContent: card.isPremiumContent === true,
+    tokenPrice: Number(card.tokenPrice) || 0,
   };
 }

@@ -5,11 +5,11 @@ export async function getCreatorPublicFields(uid) {
   try {
     const { data } = await supabase
       .from('users')
-      .select('username, display_name, avatar_url')
+      .select('username, display_name, avatar, avatar_url')
       .eq('id', uid)
       .maybeSingle();
     const name   = String(data?.display_name || data?.username || '').trim();
-    const avatar = String(data?.avatar_url   || '').trim();
+    const avatar = String(data?.avatar_url || data?.avatar || '').trim();
     return { creatorDisplayName: name || null, creatorAvatarUrl: avatar || null };
   } catch {
     return { creatorDisplayName: null, creatorAvatarUrl: null };

@@ -4,6 +4,5 @@
 [api]
 enabled = true
 
-[functions]
-# Firebase ID tokens verified in code; do not use Supabase JWT gate on these functions
-verify_jwt = false
+[functions.verify_jwt]
+enabled = false

@@ -29,7 +29,13 @@ const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?
 
 // ── Supabase row → API response shape ─────────────────────────────────────────
 
+function isPubliclyListedRow(row) {
+  return !!(row && (row.is_live === true || row.status === 'published'));
+}
+
 function mapVideo(row) {
+  const resolvedDuration =
+    Number(row.duration_seconds ?? row.duration ?? row.duration_sec ?? 0) || 0;
   return {
     videoId:                row.video_id,
     userId:                 row.user_id,
@@ -42,7 +48,7 @@ function mapVideo(row) {
     videoUrl:               row.storage_url            || row.stream_url || '',
     streamUrl:              row.stream_url             || row.storage_url || '',
     thumbnailUrl:           row.thumbnail_url          || null,
-    durationSeconds:        Number(row.duration        || 0),
+    durationSeconds:        resolvedDuration,
     creatorDisplayName:     row.creator_display_name   || null,
     creatorAvatarUrl:       row.creator_avatar_url     || null,
     consentQuestion:        CONSENT_QUESTION,
@@ -57,6 +63,56 @@ function mapVideo(row) {
   };
 }
 
+function isMissingColumnError(err, columnName) {
+  const msg = String(err?.message || '');
+  return (
+    err?.code === 'PGRST204' ||
+    err?.code === '42703' ||
+    (columnName && msg.includes(`'${columnName}'`)) ||
+    /schema cache|Could not find the .* column/i.test(msg)
+  );
+}
+
+function extractMissingColumnName(err) {
+  const msg = String(err?.message || '');
+  const quoted = msg.match(/'([^']+)'/);
+  if (quoted?.[1]) return quoted[1];
+  const named = msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?/i);
+  if (named?.[1]) return named[1];
+  return null;
+}
+
+async function insertPublishedVideoRow(baseRow, durationSeconds) {
+  const attempts = [
+    { ...baseRow, duration: durationSeconds },
+    { ...baseRow, duration_seconds: durationSeconds },
+    { ...baseRow },
+  ];
+
+  let lastError = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    let row = { ...attempts[i] };
+    for (let j = 0; j < 12; j += 1) {
+      const { error } = await supabase.from('tiktok_videos').insert([row]);
+      if (!error) return;
+      lastError = error;
+      const missingColumn = extractMissingColumnName(error);
+      if (!missingColumn || !(missingColumn in row)) {
+        if (
+          isMissingColumnError(error, 'duration') ||
+          isMissingColumnError(error, 'duration_seconds')
+        ) {
+          continue;
+        }
+        throw error;
+      }
+      // Remove unknown column and retry so legacy schemas still publish.
+      delete row[missingColumn];
+    }
+  }
+  throw lastError || new Error('Failed to insert video row');
+}
+
 // ── Premium upload gate ────────────────────────────────────────────────────────
 
 async function checkPremiumUploadGate(uid) {
@@ -65,7 +121,7 @@ async function checkPremiumUploadGate(uid) {
 
     const [{ data: user }, { data: videos }] = await Promise.all([
       supabase.from('users').select('followers, monthly_premium_uploads, premium_upload_month').eq('id', uid).maybeSingle(),
-      supabase.from('tiktok_videos').select('likes_count').eq('user_id', uid).eq('is_live', true),
+      supabase.from('tiktok_videos').select('likes_count').eq('user_id', uid).or('is_live.eq.true,status.eq.published'),
     ]);
 
     const followers  = Number(user?.followers || 0);
@@ -254,7 +310,7 @@ export async function publishFromStoragePath(req, res) {
     const videoId = crypto.randomUUID();
     const isLive  = consentGiven;
 
-    const { error: insertErr } = await supabase.from('tiktok_videos').insert([{
+    const insertRow = {
       video_id:                 videoId,
       user_id:                  uid,
       storage_url:              videoUrl,
@@ -265,7 +321,6 @@ export async function publishFromStoragePath(req, res) {
       tags,
       allow_people_to_comment:  allowPeopleToComment,
       thumbnail_url:            thumbnailUrl,
-      duration:                 durationSeconds,
       is_live:                  isLive,
       is_premium_content:       isPremiumContent,
       token_price:              tokenPrice,
@@ -273,8 +328,8 @@ export async function publishFromStoragePath(req, res) {
       creator_display_name:     creatorDisplayName || null,
       creator_avatar_url:       creatorAvatarUrl   || null,
       status:                   isLive ? 'published' : 'draft',
-    }]);
-    if (insertErr) throw insertErr;
+    };
+    await insertPublishedVideoRow(insertRow, durationSeconds);
 
     if (isPremiumContent) incrementPremiumUploads(uid);
 
@@ -361,7 +416,7 @@ export async function uploadAndPublish(req, res) {
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
     const isLive = consentGiven === true;
 
-    const { error: insertErr } = await supabase.from('tiktok_videos').insert([{
+    const insertRow = {
       video_id:                 videoId,
       user_id:                  uid,
       storage_url:              videoUrl,
@@ -372,7 +427,6 @@ export async function uploadAndPublish(req, res) {
       tags,
       allow_people_to_comment:  allowPeopleToComment,
       thumbnail_url:            thumbnailUrl,
-      duration:                 durationSeconds,
       is_live:                  isLive,
       is_premium_content:       isPremiumContent,
       token_price:              tokenPrice,
@@ -380,8 +434,8 @@ export async function uploadAndPublish(req, res) {
       creator_display_name:     creatorDisplayName || null,
       creator_avatar_url:       creatorAvatarUrl   || null,
       status:                   isLive ? 'published' : 'draft',
-    }]);
-    if (insertErr) throw insertErr;
+    };
+    await insertPublishedVideoRow(insertRow, durationSeconds);
 
     if (isPremiumContent) incrementPremiumUploads(uid);
 
@@ -408,20 +462,34 @@ export async function getPublicVideos(req, res) {
     let query = supabase
       .from('tiktok_videos')
       .select('*')
-      .eq('is_live', true)
+      .or('is_live.eq.true,status.eq.published')
       .order('created_at', { ascending: false });
 
     if (premiumOnly) query = query.eq('is_premium_content', true);
 
     const { data, error } = await query;
-    if (error) throw error;
+    if (error) {
+      const code = error.code;
+      const msg = String(error.message || '');
+      const missingRelation =
+        code === '42P01' ||
+        code === 'PGRST205' ||
+        code === 'PGRST204' ||
+        /does not exist|schema cache|Could not find the table/i.test(msg);
+      console.error('videoPublish.getPublicVideos supabase', code || '', msg);
+      if (missingRelation) {
+        return res.json({ success: true, data: [] });
+      }
+      return res.status(500).json({ success: false, data: [], message: msg || 'Feed query failed' });
+    }
 
-    const list    = (data || []).map(mapVideo);
+    const rows = data || [];
+    const list = rows.map(mapVideo);
     const enriched = await Promise.all(list.map((v) => mergeCreatorIntoPublicVideo(v)));
     return res.json({ success: true, data: enriched });
   } catch (err) {
     console.error('videoPublish.getPublicVideos error', err?.message || err);
-    return res.status(500).json({ success: false, data: [] });
+    return res.status(500).json({ success: false, data: [], message: err?.message || 'Failed' });
   }
 }
 
@@ -442,11 +510,10 @@ export async function getVideoById(req, res) {
     if (error) throw error;
     if (!data) return res.status(404).json({ success: false, message: 'Video not found' });
 
-    if (data.is_live !== true) {
+    if (!isPubliclyListedRow(data)) {
       const isOwner = requesterUid && data.user_id === requesterUid;
       if (!isOwner) return res.status(404).json({ success: false, message: 'Video not available' });
     }
-
     const merged = await mergeCreatorIntoPublicVideo(mapVideo(data));
     return res.json({ success: true, data: merged });
   } catch (err) {
@@ -581,9 +648,9 @@ export async function likeVideo(req, res) {
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
 
-    const { data: video } = await supabase.from('tiktok_videos').select('is_live, likes_count').eq('video_id', videoId).maybeSingle();
+    const { data: video } = await supabase.from('tiktok_videos').select('is_live, status, likes_count').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
-    if (video.is_live !== true) return res.status(400).json({ success: false, message: 'Video is not live' });
+    if (!isPubliclyListedRow(video)) return res.status(400).json({ success: false, message: 'Video is not live' });
 
     const { data: result, error } = await supabase.rpc('like_video', { p_video_id: videoId, p_user_id: uid });
     if (error) throw error;
@@ -628,9 +695,9 @@ export async function addComment(req, res) {
 
     const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
 
-    const { data: video } = await supabase.from('tiktok_videos').select('is_live, allow_people_to_comment').eq('video_id', videoId).maybeSingle();
+    const { data: video } = await supabase.from('tiktok_videos').select('is_live, status, allow_people_to_comment').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
-    if (video.is_live !== true) return res.status(400).json({ success: false, message: 'Video is not live' });
+    if (!isPubliclyListedRow(video)) return res.status(400).json({ success: false, message: 'Video is not live' });
     if (video.allow_people_to_comment === false) return res.status(403).json({ success: false, message: 'Comments are disabled for this video' });
 
     const { data: inserted, error: insErr } = await supabase
@@ -667,9 +734,9 @@ export async function getComments(req, res) {
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
 
-    const { data: video } = await supabase.from('tiktok_videos').select('is_live').eq('video_id', videoId).maybeSingle();
+    const { data: video } = await supabase.from('tiktok_videos').select('is_live, status').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
-    if (video.is_live !== true) return res.status(404).json({ success: false, message: 'Video not available' });
+    if (!isPubliclyListedRow(video)) return res.status(404).json({ success: false, message: 'Video not available' });
 
     const { data, error } = await supabase
       .from('tiktok_video_comments')
@@ -704,11 +771,11 @@ export async function purchaseVideo(req, res) {
 
     const { data: video } = await supabase
       .from('tiktok_videos')
-      .select('video_id, is_live, is_premium_content, token_price')
+      .select('video_id, is_live, status, is_premium_content, token_price')
       .eq('video_id', videoId)
       .maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
-    if (!video.is_live) return res.status(400).json({ success: false, message: 'Video not available' });
+    if (!isPubliclyListedRow(video)) return res.status(400).json({ success: false, message: 'Video not available' });
     if (!video.is_premium_content) return res.status(400).json({ success: false, message: 'Video is not premium content' });
 
     const tokenPrice = Number(video.token_price) || 0;
@@ -784,11 +851,20 @@ export async function getVideoPurchaseStatus(req, res) {
 
 export async function getLikeStatus(req, res) {
   try {
-    if (!supabase) return res.json({ success: true, liked: false });
+    if (!supabase) return res.json({ success: true, liked: false, totalLikes: 0, totalComments: 0 });
     const uid      = req.uid;
     const { videoId } = req.params;
-    if (!uid)      return res.json({ success: true, liked: false });
     if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+
+    const { data: vrow } = await supabase
+      .from('tiktok_videos')
+      .select('likes_count, comments_count')
+      .eq('video_id', videoId)
+      .maybeSingle();
+    const totalLikes = Number(vrow?.likes_count ?? 0) || 0;
+    const totalComments = Number(vrow?.comments_count ?? 0) || 0;
+
+    if (!uid) return res.json({ success: true, liked: false, totalLikes, totalComments });
 
     const { data: like } = await supabase
       .from('tiktok_video_likes')
@@ -796,9 +872,9 @@ export async function getLikeStatus(req, res) {
       .eq('video_id', videoId)
       .eq('user_id', uid)
       .maybeSingle();
-    return res.json({ success: true, liked: !!like });
+    return res.json({ success: true, liked: !!like, totalLikes, totalComments });
   } catch {
-    return res.json({ success: true, liked: false });
+    return res.json({ success: true, liked: false, totalLikes: 0, totalComments: 0 });
   }
 }
 
@@ -812,7 +888,7 @@ export async function getCreatorLevel(req, res) {
 
     const [{ data: user }, { data: videos }] = await Promise.all([
       supabase.from('users').select('followers, monthly_premium_uploads, premium_upload_month').eq('id', uid).maybeSingle(),
-      supabase.from('tiktok_videos').select('likes_count').eq('user_id', uid).eq('is_live', true),
+      supabase.from('tiktok_videos').select('likes_count').eq('user_id', uid).or('is_live.eq.true,status.eq.published'),
     ]);
 
     const followers  = Number(user?.followers || 0);

@@ -81,7 +81,7 @@ async function computeEarningsForHost(hostId) {
 
 // Fetch all platform creators filtered by type ('channel' | 'pstar').
 async function getCreatorsByType(type, limit = 100) {
-	if (!isConfigured()) throw new Error('Supabase not configured');
+	if (!isConfigured()) return [];
 	const safeType = type === 'channel' ? 'channel' : 'pstar';
 	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
 	const { data, error } = await supabase
@@ -95,7 +95,7 @@ async function getCreatorsByType(type, limit = 100) {
 }
 
 async function getTopPlatformCreators(limit = 5) {
-	if (!isConfigured()) throw new Error('Supabase not configured');
+	if (!isConfigured()) return [];
 
 	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 20);
 
