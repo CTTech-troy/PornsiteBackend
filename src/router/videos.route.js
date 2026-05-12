@@ -62,14 +62,11 @@ router.get('/', optionalAuth, async (req, res) => {
   }
 });
 
-<<<<<<< HEAD
 // ——— Consolidated Posts/User Dashboard Routes ———
 router.get('/posts', optionalAuth, listPosts);
-=======
 // ——— Secure upload & publish (Supabase Storage + RTDB), consent required ———
 // POST /api/videos/upload — multipart: video file; body: title, description, consentGiven
 router.post('/upload', requireAuth, requireVerifiedEmail, attachPublishFiles, videoPublish.uploadAndPublish);
->>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
 
 // ——— Consolidated Upload & Publish Routes (Direct and Legacy) ———
 router.post('/upload', requireAuth, attachPublishFiles, videoPublish.uploadAndPublish);
@@ -82,7 +79,6 @@ router.use('/tiktok', tiktokVideoRouter);
 // ——— Metadata & Levels ———
 router.get('/creator-level', requireAuth, videoPublish.getCreatorLevel);
 
-<<<<<<< HEAD
 // ——— Public Platform Feed ———
 router.get('/public', videoPublish.getPublicVideos);
 router.get('/public/:videoId', optionalAuth, videoPublish.getVideoById);
@@ -122,15 +118,12 @@ router.get('/public/:videoId/purchase-status', requireAuth, videoPublish.getVide
 router.get('/search/pornstar', search.searchPornstars);
 router.get('/search', search.searchVideos);
 router.get('/trending', trending.getTrending);
-<<<<<<< HEAD
 router.get('/home-feed', homeFeed.getHomeFeed);
-=======
 
 // GET /api/videos/home-feed?page=1&pages=3 — RapidAPI xnxx-api GET /xn/best (merged pages)
 router.get('/home-feed', optionalAuth, homeFeed.getHomeFeed);
 
 // GET /api/videos/todays-selection — RapidAPI xnxx-api today's selection (server-side key)
->>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
 router.get('/todays-selection', todaysSelection.getTodaysSelection);
 router.get('/pornstars', async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10) || 10, 1), 500);
@@ -144,14 +137,14 @@ router.get('/pornstars', async (req, res) => {
 
 // ——— Unified interactions by videoId ———
 router.get('/:videoId/like-status', videoInteractions.getLikeStatus);
-<<<<<<< HEAD
+
 router.post('/:videoId/like', requireAuth, videoInteractions.likeVideo);
 router.delete('/:videoId/like', requireAuth, videoInteractions.unlikeVideo);
 router.get('/:videoId/comments', videoInteractions.getComments);
 router.post('/:videoId/comments', requireAuth, videoInteractions.addComment);
 
 // GET /api/videos/:id — single video (from feed cache)
-router.get('/:id', async (req, res) => {
+router.get('/:id', async (req, res) => {})
 =======
 // POST /api/videos/:videoId/like
 router.post('/:videoId/like', requireAuth, requireVerifiedEmail, videoInteractions.likeVideo);
@@ -164,7 +157,6 @@ router.post('/:videoId/comments', requireAuth, requireVerifiedEmail, videoIntera
 
 // GET /api/videos/:id — single video (from feed cache) for detail page
 router.get('/:id', optionalAuth, async (req, res) => {
->>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
   try {
     const video = await getFeedVideoById(req.params.id, { viewerUid: req.uid || null });
     if (!video) return res.status(404).json({ error: 'Video not found' });
