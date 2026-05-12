@@ -457,17 +457,51 @@ export async function uploadAndPublish(req, res) {
  */
 export async function getPublicVideos(req, res) {
   try {
-    if (!videosRef()) {
-      return res.json({ success: true, data: [] });
-    }
     const premiumOnly = req.query?.premium === 'true';
-    const snap = await videosRef().once('value');
-    const val = snap.val();
-    let list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
-    if (premiumOnly) {
-      list = list.filter((v) => v.isPremiumContent === true);
+
+    // 1. Fetch from Firebase RTDB
+    let rtdbList = [];
+    if (videosRef()) {
+      const snap = await videosRef().once('value');
+      const val = snap.val();
+      rtdbList = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id, source: 'rtdb' })).filter((v) => v.isLive === true);
     }
-    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    // 2. Fetch from Supabase tiktok_videos
+    let supabaseList = [];
+    if (isSupabaseConfigured() && supabase) {
+      let q = supabase.from('tiktok_videos').select('*').eq('status', 'published');
+      if (premiumOnly) q = q.gt('coin_price', 0);
+
+      const { data, error } = await q.order('created_at', { ascending: false });
+      if (!error && data) {
+        supabaseList = data.map(v => ({
+          videoId: v.video_id,
+          id: v.video_id,
+          userId: v.user_id,
+          title: v.title,
+          description: v.description,
+          videoUrl: v.storage_url,
+          streamUrl: v.storage_url,
+          thumbnailUrl: v.thumbnail_url,
+          totalLikes: v.likes_count,
+          totalComments: v.comments_count,
+          createdAt: new Date(v.created_at).getTime(),
+          isLive: true,
+          isPremiumContent: v.coin_price > 0,
+          tokenPrice: v.coin_price,
+          source: 'supabase'
+        }));
+      }
+    }
+
+    if (premiumOnly) {
+      rtdbList = rtdbList.filter((v) => v.isPremiumContent === true);
+    }
+
+    // Merge and sort
+    let list = [...rtdbList, ...supabaseList].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
     const enriched = await Promise.all(list.map((v) => mergeCreatorIntoPublicVideo(v)));
     return res.json({ success: true, data: enriched });
   } catch (err) {

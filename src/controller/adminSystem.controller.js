@@ -355,7 +355,7 @@ const MONITORED_ROUTES = [
   { group: 'Live',         path: '/api/live' },
   { group: 'Creators',     path: '/api/creators' },
   { group: 'Creators',     path: '/api/creators/top' },
-  { group: 'Posts',        path: '/api/posts' },
+  { group: 'Posts',        path: '/api/videos/posts' },
   { group: 'Payments',     path: '/api/payments/plans' },
   { group: 'Memberships',  path: '/api/memberships' },
   { group: 'Gifts',        path: '/api/gifts' },

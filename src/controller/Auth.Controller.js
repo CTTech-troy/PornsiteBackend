@@ -44,7 +44,7 @@ async function _createVerificationToken(uid, email) {
 import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
 import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
-import { upsertCreator } from './creator.controller.js';
+import { upsertCreator } from './creators.controller.js';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { mintSessionToken, resolveUidFromBearerToken } from '../utils/sessionToken.js';

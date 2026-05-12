@@ -8,7 +8,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "exit-all-lives": "node scripts/exit-all-lives.js",
-    "stress-auth": "node scripts/stress-auth.mjs"
+    "stress-auth": "node scripts/stress-auth.mjs",
+    "docs": "python3 scripts/doc_generator.py"
   },
   "keywords": [],
   "author": "",

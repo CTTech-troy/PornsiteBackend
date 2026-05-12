@@ -40,24 +40,76 @@ export async function getVideosPaginated(page = 1, limit = 20) {
   const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
 
+  let platformVideos = [];
+  // Only inject platform videos on the first page
+  if (pageNum === 1) {
+    try {
+      // 1. Fetch from Firebase RTDB
+      let rtdbList = [];
+      const rtdb = getFirebaseRtdb();
+      if (rtdb) {
+        const snap = await rtdb.ref('videos').once('value');
+        const val = snap.val();
+        rtdbList = !val ? [] : Object.entries(val)
+          .map(([id, v]) => ({ ...v, id, videoId: id, source: 'rtdb' }))
+          .filter((v) => v.isLive === true);
+      }
+
+      // 2. Fetch from Supabase tiktok_videos
+      let supabaseList = [];
+      if (isSupabaseConfigured() && supabase) {
+        const { data, error } = await supabase
+          .from('tiktok_videos')
+          .select('*')
+          .eq('status', 'published')
+          .order('created_at', { ascending: false })
+          .limit(10);
+
+        if (!error && data) {
+          supabaseList = data.map(v => ({
+            id: v.video_id,
+            videoId: v.video_id,
+            userId: v.user_id,
+            title: v.title,
+            description: v.description,
+            videoUrl: v.storage_url,
+            thumbnailUrl: v.thumbnail_url,
+            totalLikes: v.likes_count,
+            totalComments: v.comments_count,
+            createdAt: new Date(v.created_at).getTime(),
+            isLive: true,
+            source: 'supabase'
+          }));
+        }
+      }
+      platformVideos = [...rtdbList, ...supabaseList].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    } catch (err) {
+      console.warn('Failed to fetch platform videos for feed:', err.message);
+    }
+  }
+
   if (!isXnxxApiConfigured()) {
-    return { data: [], total: 0, page: pageNum, totalPages: 0, hasMore: false };
+    return { data: platformVideos, total: platformVideos.length, page: pageNum, totalPages: 1, hasMore: false };
   }
 
   const { ok, items: cards } = await fetchXnxxBestPage(pageNum);
   if (!ok || !cards?.length) {
-    return { data: [], total: 0, page: pageNum, totalPages: 0, hasMore: false };
+    return { data: platformVideos, total: platformVideos.length, page: pageNum, totalPages: 1, hasMore: false };
   }
 
   ingestHomeFeedVideos(cards);
   const mapped = cards.map((c, i) => homeCardToFeedVideoItem(c, i)).filter(Boolean);
   const withThumb = mapped.filter((item) => item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '');
   mergeCache(withThumb);
-  const data = withThumb.slice(0, limitNum);
+
+  // Combine platform videos with external videos
+  const combinedData = pageNum === 1 ? [...platformVideos, ...withThumb] : withThumb;
+  const data = combinedData.slice(0, limitNum);
   const hasMore = withThumb.length >= PER_PAGE_HINT;
+
   return await withRtdbMerge({
     data,
-    total: data.length,
+    total: combinedData.length,
     page: pageNum,
     totalPages: hasMore ? pageNum + 1 : pageNum,
     hasMore,
