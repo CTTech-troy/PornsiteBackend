@@ -456,35 +456,17 @@ export async function uploadAndPublish(req, res) {
 
 export async function getPublicVideos(req, res) {
   try {
-    if (!supabase) return res.json({ success: true, data: [] });
-
-    const premiumOnly = req.query?.premium === 'true';
-    let query = supabase
-      .from('tiktok_videos')
-      .select('*')
-      .or('is_live.eq.true,status.eq.published')
-      .order('created_at', { ascending: false });
-
-    if (premiumOnly) query = query.eq('is_premium_content', true);
-
-    const { data, error } = await query;
-    if (error) {
-      const code = error.code;
-      const msg = String(error.message || '');
-      const missingRelation =
-        code === '42P01' ||
-        code === 'PGRST205' ||
-        code === 'PGRST204' ||
-        /does not exist|schema cache|Could not find the table/i.test(msg);
-      console.error('videoPublish.getPublicVideos supabase', code || '', msg);
-      if (missingRelation) {
-        return res.json({ success: true, data: [] });
-      }
-      return res.status(500).json({ success: false, data: [], message: msg || 'Feed query failed' });
+    if (!videosRef()) {
+      return res.json({ success: true, data: [] });
     }
-
-    const rows = data || [];
-    const list = rows.map(mapVideo);
+    const premiumOnly = req.query?.premium === 'true';
+    const snap = await videosRef().once('value');
+    const val = snap.val();
+    let list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
+    if (premiumOnly) {
+      list = list.filter((v) => v.isPremiumContent === true);
+    }
+    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     const enriched = await Promise.all(list.map((v) => mergeCreatorIntoPublicVideo(v)));
     return res.json({ success: true, data: enriched });
   } catch (err) {

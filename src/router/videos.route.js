@@ -1,5 +1,7 @@
 import express from 'express';
 import multer from 'multer';
+import os from 'os';
+import path from 'path';
 import { fetchPornstars } from '../controller/star.controller.js';
 import { getVideosPaginated, getVideoById as getFeedVideoById } from '../controller/videoFeed.controller.js';
 import * as videoPublish from '../controller/videoPublish.controller.js';
@@ -9,18 +11,27 @@ import * as trending from '../controller/trending.controller.js';
 import * as homeFeed from '../controller/homeFeed.controller.js';
 import * as todaysSelection from '../controller/todaysSelection.controller.js';
 import * as streamCtrl from '../controller/stream.controller.js';
+import { listPosts } from '../controller/videos.controller.js';
 import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail.js';
 import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
-router.get('/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
 
-// MED-04: Reduced from 200MB to 50MB to strictly manage Heap fragmentation Memory Leaks
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB
+// Disk storage for large files (supports up to 1 GB)
+const diskStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname) || '';
+    cb(null, `upload-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
+  },
+});
+
+const ONE_GB = 1 * 1024 * 1024 * 1024;
+
 const uploadVideoWithThumb = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024, fieldSize: 12 * 1024 * 1024 }, // MED-04: Reduced to 50MB
+  storage: diskStorage,
+  limits: { fileSize: ONE_GB, fieldSize: 12 * 1024 * 1024 },
 }).fields([
   { name: 'video', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 },
@@ -36,6 +47,8 @@ function attachPublishFiles(req, res, next) {
   });
 }
 
+router.get('/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
+
 // GET /api/videos?page=1&limit=20 — paginated feed for home
 router.get('/', optionalAuth, async (req, res) => {
   const page = req.query.page || 1;
@@ -49,16 +62,39 @@ router.get('/', optionalAuth, async (req, res) => {
   }
 });
 
+<<<<<<< HEAD
+// ——— Consolidated Posts/User Dashboard Routes ———
+router.get('/posts', optionalAuth, listPosts);
+=======
 // ——— Secure upload & publish (Supabase Storage + RTDB), consent required ———
 // POST /api/videos/upload — multipart: video file; body: title, description, consentGiven
 router.post('/upload', requireAuth, requireVerifiedEmail, attachPublishFiles, videoPublish.uploadAndPublish);
+>>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
 
-// ——— TikTok-style: Supabase Storage + Postgres (feed, upload, likes, views, comments) ———
+// ——— Consolidated Upload & Publish Routes (Direct and Legacy) ———
+router.post('/upload', requireAuth, attachPublishFiles, videoPublish.uploadAndPublish);
+router.post('/prepare-upload', requireAuth, videoPublish.prepareUpload);
+router.post('/publish',        requireAuth, videoPublish.publishFromStoragePath);
+
+// ——— TikTok-style API ———
 router.use('/tiktok', tiktokVideoRouter);
 
-// GET /api/videos/creator-level — authenticated creator's level, quota, progress
+// ——— Metadata & Levels ———
 router.get('/creator-level', requireAuth, videoPublish.getCreatorLevel);
 
+<<<<<<< HEAD
+// ——— Public Platform Feed ———
+router.get('/public', videoPublish.getPublicVideos);
+router.get('/public/:videoId', optionalAuth, videoPublish.getVideoById);
+router.delete('/public/:videoId', requireAuth, videoPublish.deleteVideo);
+router.patch('/public/:videoId', requireAuth, videoPublish.updateVideo);
+router.patch('/public/:videoId/draft', requireAuth, videoPublish.setVideoDraft);
+router.get('/public/:videoId/comments', videoPublish.getComments);
+router.post('/public/:videoId/like', requireAuth, videoPublish.likeVideo);
+router.delete('/public/:videoId/like', requireAuth, videoPublish.unlikeVideo);
+router.get('/public/:videoId/like-status', videoPublish.getLikeStatus);
+router.post('/public/:videoId/comments', requireAuth, videoPublish.addComment);
+=======
 // GET /api/videos/public — public feed (only isLive === true)
 router.get('/public', optionalAuth, videoPublish.getPublicVideos);
 // GET /api/videos/public/:videoId (Bearer optional: owners can load drafts)
@@ -77,29 +113,27 @@ router.get('/public/:videoId/like-status', videoPublish.getLikeStatus);
 // POST /api/videos/public/:videoId/comments
 router.post('/public/:videoId/comments', requireAuth, requireVerifiedEmail, videoPublish.addComment);
 // POST /api/videos/public/:videoId/view (optional auth, dedup by uid or sessionId)
+>>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
 router.post('/public/:videoId/view', optionalAuth, videoInteractions.recordPublicVideoView);
-// POST /api/videos/public/:videoId/purchase — buy a premium video with tokens
 router.post('/public/:videoId/purchase', requireAuth, videoPublish.purchaseVideo);
-// GET /api/videos/public/:videoId/purchase-status — check if current user purchased
 router.get('/public/:videoId/purchase-status', requireAuth, videoPublish.getVideoPurchaseStatus);
 
-// GET /api/videos/search/pornstar?q=...&page=1 — stub (empty; xnxx-api has no pornstar route)
+// ——— External API Search & Discovery ———
 router.get('/search/pornstar', search.searchPornstars);
-// GET /api/videos/search?q=...&page=1&filter=relevance — xnxx-api GET /xn/search, fallback porn-xnxx-api POST /search
 router.get('/search', search.searchVideos);
-
-// GET /api/videos/trending?page=1 — RapidAPI xnxx-api GET /xn/best
 router.get('/trending', trending.getTrending);
+<<<<<<< HEAD
+router.get('/home-feed', homeFeed.getHomeFeed);
+=======
 
 // GET /api/videos/home-feed?page=1&pages=3 — RapidAPI xnxx-api GET /xn/best (merged pages)
 router.get('/home-feed', optionalAuth, homeFeed.getHomeFeed);
 
 // GET /api/videos/todays-selection — RapidAPI xnxx-api today's selection (server-side key)
+>>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
 router.get('/todays-selection', todaysSelection.getTodaysSelection);
-
-// GET /api/videos/pornstars?limit=100
 router.get('/pornstars', async (req, res) => {
-  const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10) || 10, 1), 500); // clamp
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10) || 10, 1), 500);
   try {
     const data = await fetchPornstars(limit);
     res.status(200).json({ success: true, data });
@@ -108,9 +142,17 @@ router.get('/pornstars', async (req, res) => {
   }
 });
 
-// ——— Unified interactions by videoId (external API or upload) ———
-// GET /api/videos/:videoId/like-status (optional auth)
+// ——— Unified interactions by videoId ———
 router.get('/:videoId/like-status', videoInteractions.getLikeStatus);
+<<<<<<< HEAD
+router.post('/:videoId/like', requireAuth, videoInteractions.likeVideo);
+router.delete('/:videoId/like', requireAuth, videoInteractions.unlikeVideo);
+router.get('/:videoId/comments', videoInteractions.getComments);
+router.post('/:videoId/comments', requireAuth, videoInteractions.addComment);
+
+// GET /api/videos/:id — single video (from feed cache)
+router.get('/:id', async (req, res) => {
+=======
 // POST /api/videos/:videoId/like
 router.post('/:videoId/like', requireAuth, requireVerifiedEmail, videoInteractions.likeVideo);
 // DELETE /api/videos/:videoId/like
@@ -122,6 +164,7 @@ router.post('/:videoId/comments', requireAuth, requireVerifiedEmail, videoIntera
 
 // GET /api/videos/:id — single video (from feed cache) for detail page
 router.get('/:id', optionalAuth, async (req, res) => {
+>>>>>>> efdaf48896455d49bc299c66f15e2b95c00af19c
   try {
     const video = await getFeedVideoById(req.params.id, { viewerUid: req.uid || null });
     if (!video) return res.status(404).json({ error: 'Video not found' });
@@ -130,6 +173,18 @@ router.get('/:id', optionalAuth, async (req, res) => {
     console.error('get video by id error', err?.message || err);
     return res.status(500).json({ error: err?.message || 'Failed' });
   }
+});
+
+// Generic Error Handler for Multer
+router.use((err, req, res, next) => {
+  if (!err) return next();
+  if (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FIELD_VALUE' || err.code === 'LIMIT_PART_COUNT' || err.code === 'LIMIT_FIELD_KEY') {
+    return res.status(413).json({ success: false, message: 'Payload too large' });
+  }
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    return res.status(413).json({ success: false, message: 'Payload too large' });
+  }
+  return next(err);
 });
 
 export default router;

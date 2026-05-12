@@ -1,31 +1,50 @@
-import { Router } from 'express';
-import {
-  signupAdmin,
-  activateAdmin,
-  loginAdmin,
-  inviteAdmin,
-  verifyInviteToken,
-  completeInvite,
-  listAdminUsers,
-  deleteAdminUser,
-  updateUserPermissions,
-} from '../controller/admin.controller.js';
-import { createFounderAdmin } from '../controller/adminFounder.controller.js';
-import { requireAdminAuth, requireSuperAdmin } from '../middleware/adminAuth.js';
+import express from 'express';
+import * as adminCtrl from '../controller/admin.controller.js';
+import * as adminSystem from '../controller/adminSystem.controller.js';
+import * as adminUsers from '../controller/adminUsers.controller.js';
+import { adminContentRouter } from './adminContent.route.js';
+import { adminModerationRouter } from './adminModeration.route.js';
 
-const router = Router();
+const router = express.Router();
 
-// Founder bootstrap (protected by ADMIN_BOOTSTRAP_SECRET header)
-router.post('/auth/founder-create', createFounderAdmin);
-router.post('/auth/signup', signupAdmin);
-router.post('/auth/activate', activateAdmin);
-router.post('/auth/login', loginAdmin);
-router.get('/invite/verify/:token', verifyInviteToken);
-router.post('/invite/complete', completeInvite);
+// --- Admin Auth ---
+router.post('/signup', adminCtrl.signupAdmin);
+router.post('/activate', adminCtrl.activateAdmin);
+router.post('/login', adminCtrl.loginAdmin);
+router.post('/invite', adminCtrl.inviteAdmin);
+router.get('/invite/verify', adminCtrl.verifyInviteToken);
+router.post('/invite/complete', adminCtrl.completeInvite);
 
-router.get('/admin-users', requireAdminAuth, listAdminUsers);
-router.post('/invite', requireAdminAuth, requireSuperAdmin, inviteAdmin);
-router.delete('/admin-users/:id', requireAdminAuth, requireSuperAdmin, deleteAdminUser);
-router.put('/admin-users/:id/permissions', requireAdminAuth, requireSuperAdmin, updateUserPermissions);
+// --- Admin Management ---
+router.get('/admins', adminCtrl.listAdminUsers);
+router.delete('/admins/:id', adminCtrl.deleteAdminUser);
+router.patch('/admins/:id/permissions', adminCtrl.updateUserPermissions);
+router.patch('/admins/:id/toggle', adminCtrl.toggleAdminUser);
+
+// --- User & Creator Management ---
+router.get('/users', adminUsers.getUsers);
+router.get('/users/:id', adminUsers.getUserById);
+router.patch('/users/:id/status', adminUsers.updateUserStatus);
+router.patch('/users/:id/coins', adminUsers.updateUserCoins);
+
+router.get('/creators', adminUsers.getPlatformCreators);
+router.patch('/creators/:id/status', adminUsers.updateCreatorStatus);
+router.get('/applications', adminUsers.getCreatorApplications);
+router.get('/applications/:id', adminUsers.getApplicationById);
+router.patch('/applications/:id/status', adminUsers.updateApplicationStatus);
+
+// --- System & Stats ---
+router.get('/system/settings', adminSystem.getSettings);
+router.put('/system/settings', adminSystem.updateSettings);
+router.patch('/system/settings/:key', adminSystem.updateSetting);
+router.get('/system/health', adminSystem.getSystemHealth);
+router.get('/system/env', adminSystem.getEnvOverview);
+router.get('/system/stats', adminSystem.getStats);
+router.get('/system/api-health', adminSystem.getApiHealth);
+router.get('/system/latency', adminSystem.getRouteLatency);
+
+// --- Sub-routers ---
+router.use('/content', adminContentRouter);
+router.use('/moderation', adminModerationRouter);
 
 export default router;

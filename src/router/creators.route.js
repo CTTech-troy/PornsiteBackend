@@ -1,6 +1,6 @@
 import express from 'express';
 import { getCreatorsList, getCreatorBySlug } from '../controller/creators.controller.js';
-import { getCreatorsByType, getTopPlatformCreators } from '../controller/creator.controller.js';
+import { getCreatorsByType, getTopPlatformCreators } from '../controller/creators.controller.js';
 
 const router = express.Router();
 
