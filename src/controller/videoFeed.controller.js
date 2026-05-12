@@ -9,6 +9,7 @@ import {
   fetchXnxxBestPage,
   homeCardToFeedVideoItem,
 } from '../utils/xnxxRapidApi.js';
+import { fetchPublishedHomeCards, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
 
 const CACHE_MAX_ITEMS = 500;
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -36,7 +37,15 @@ function mergeCache(items) {
   cache = { items: merged.slice(0, CACHE_MAX_ITEMS), ts: Date.now() };
 }
 
-export async function getVideosPaginated(page = 1, limit = 20) {
+function feedItemHasRenderableMedia(item) {
+  if (!item) return false;
+  const thumb = item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '';
+  const url = item.videoUrl && String(item.videoUrl).trim().startsWith('http');
+  return thumb || url;
+}
+
+export async function getVideosPaginated(page = 1, limit = 20, options = {}) {
+  const { viewerUid = null } = options;
   const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
 
@@ -107,6 +116,37 @@ export async function getVideosPaginated(page = 1, limit = 20) {
   const data = combinedData.slice(0, limitNum);
   const hasMore = withThumb.length >= PER_PAGE_HINT;
 
+  const pagesForDb = Math.min(5, Math.max(1, Math.ceil(limitNum / 20)));
+  const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid });
+  if (cards.length) ingestHomeFeedVideos(cards);
+  let data = cards
+    .map((c, i) => homeCardToFeedVideoItem(c, i))
+    .filter(Boolean)
+    .filter(feedItemHasRenderableMedia);
+
+  if (data.length < limitNum && isXnxxApiConfigured()) {
+    const { ok, items: xcards } = await fetchXnxxBestPage(pageNum);
+    if (ok && xcards?.length) {
+      ingestHomeFeedVideos(xcards);
+      const seen = new Set(data.map((d) => String(d.id)));
+      for (let i = 0; i < xcards.length && data.length < limitNum; i++) {
+        const mapped = homeCardToFeedVideoItem(xcards[i], i);
+        if (!mapped || !feedItemHasRenderableMedia(mapped)) continue;
+        const k = String(mapped.id);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        data.push(mapped);
+      }
+    }
+  }
+
+  data = data.slice(0, limitNum);
+  mergeCache(data);
+  if (data.length === 0) {
+    return { data: [], total: 0, page: pageNum, totalPages: 0, hasMore: false };
+  }
+
+  const hasMore = data.length >= limitNum || data.length >= PER_PAGE_HINT;
   return await withRtdbMerge({
     data,
     total: combinedData.length,
@@ -152,7 +192,8 @@ async function withRtdbMerge(result) {
   return result;
 }
 
-export async function getVideoById(id) {
+export async function getVideoById(id, options = {}) {
+  const { viewerUid = null } = options;
   const videoId = String(id || '').trim();
   if (!videoId) return null;
 
@@ -193,21 +234,19 @@ export async function getVideoById(id) {
     return video;
   }
 
-  if (!isXnxxApiConfigured()) return null;
-
   let items = cache.items;
   const now = Date.now();
-  if (items.length === 0 || now - cache.ts >= CACHE_TTL_MS) {
+  if (isXnxxApiConfigured() && (items.length === 0 || now - cache.ts >= CACHE_TTL_MS)) {
     const { ok, items: cards } = await fetchXnxxBestPage(1);
     if (ok && cards?.length) {
       ingestHomeFeedVideos(cards);
       const mapped = cards.map((c, i) => homeCardToFeedVideoItem(c, i)).filter(Boolean);
-      items = mapped.filter((item) => item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '');
+      items = mapped.filter(feedItemHasRenderableMedia);
       mergeCache(items);
     }
   }
 
-  items = cache.items.filter((item) => item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '');
+  items = cache.items.filter(feedItemHasRenderableMedia);
   let video = items.find((item) => String(item.id) === videoId);
 
   if (!video) {
@@ -224,6 +263,10 @@ export async function getVideoById(id) {
         views: hf2.views ?? 0,
       };
     }
+  }
+
+  if (!video) {
+    video = await fetchPublishedVideoById(videoId, viewerUid);
   }
 
   if (!video) return null;

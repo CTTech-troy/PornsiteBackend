@@ -9,6 +9,7 @@ import {
   authSignupWindow,
 } from '../middleware/authRateLimit.js';
 import { requireAuth } from '../middleware/authFirebase.js';
+import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail.js';
 import { body } from 'express-validator';
 import { validateRequest } from '../middleware/validator.js';
 
@@ -24,7 +25,8 @@ const signupVal = [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').trim().isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-  validateRequest
+  body('acceptTerms').custom((v) => v === true || v === 'true').withMessage('You must accept the Terms and Conditions'),
+  validateRequest,
 ];
 
 const loginVal = [
@@ -60,6 +62,17 @@ const resendVerificationVal = [
   validateRequest
 ];
 
+const forgotPasswordVal = [
+  body('email').trim().isEmail().withMessage('Valid email is required'),
+  validateRequest,
+];
+
+const resetPasswordVal = [
+  body('oobCode').trim().notEmpty().withMessage('Reset code is required'),
+  body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  validateRequest,
+];
+
 const sendOTPVal = [
   body('email').trim().isEmail().withMessage('Valid email is required'),
   validateRequest
@@ -73,10 +86,14 @@ const verifyOTPVal = [
 
 router.post('/signup', ...limitSignup, signupVal, authController.signup);
 router.post('/login', ...limitAuth, loginVal, authController.login);
+router.post('/logout', authController.logout);
+router.post('/forgot-password', ...limitAuth, forgotPasswordVal, authController.forgotPassword);
+router.post('/reset-password', ...limitAuth, resetPasswordVal, authController.resetPassword);
 router.post('/google', ...limitAuth, googleVal, authController.google);
 router.post('/age-consent', ...limitAuth, ageConsentVal, authController.submitAgeConsent);
 router.get('/me', requireAuth, authController.me);
 router.post('/verify-email', verifyEmailVal, authController.verifyEmail);
+router.get('/verify-email/:token', authController.verifyEmail);
 router.post('/resend-verification-email', ...limitAuth, resendVerificationVal, authController.resendVerificationEmail);
 
 // OTP endpoints — 5 sends/min burst, 20/15min window to prevent abuse
@@ -86,24 +103,23 @@ router.post('/verify-otp', ...limitAuth, verifyOTPVal, otpController.verifyOTPHa
 // Creator application endpoints
 // Accept multipart/form-data for creator applications (forms + optional files).
 // Use the same `upload` instance (memory storage) so files are available as `req.files`.
-router.post('/apply-creator', ...limitAuth, upload.any(), authController.applyCreator);
+router.post('/apply-creator', ...limitAuth, requireAuth, requireVerifiedEmail, upload.any(), authController.applyCreator);
 router.post('/approve-creator', ...limitAuth, approveCreatorVal, authController.approveCreator);
 
 // Media upload (multipart/form-data with field `file`)
-router.post('/media/upload', requireAuth, upload.single('file'), authController.uploadMedia);
+router.post('/media/upload', requireAuth, requireVerifiedEmail, upload.single('file'), authController.uploadMedia);
+
+router.use((err, req, res, next) => {
+  if (!err) return next();
+  if (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FIELD_VALUE' || err.code === 'LIMIT_PART_COUNT' || err.code === 'LIMIT_FIELD_KEY') {
+    console.warn('Multer limit reached:', err.code, err.message);
+    return res.status(413).json({ success: false, message: 'Payload too large' });
+  }
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    console.warn('Payload too large (body-parser):', err.message || err);
+    return res.status(413).json({ success: false, message: 'Payload too large' });
+  }
+  return next(err);
+});
 
 export default router;
-
-// Multer-specific error handler for this router: return 413 for file/field size limits
-router.use((err, req, res, next) => {
-	if (!err) return next();
-	if (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FIELD_VALUE' || err.code === 'LIMIT_PART_COUNT' || err.code === 'LIMIT_FIELD_KEY') {
-		console.warn('Multer limit reached:', err.code, err.message);
-		return res.status(413).json({ success: false, message: 'Payload too large' });
-	}
-	if (err.type === 'entity.too.large' || err.status === 413) {
-		console.warn('Payload too large (body-parser):', err.message || err);
-		return res.status(413).json({ success: false, message: 'Payload too large' });
-	}
-	return next(err);
-});

@@ -57,6 +57,7 @@ export async function uploadVideo(req, res) {
       title,
       description,
       status: 'published',
+      is_live: true,
       likes_count: 0,
       views_count: 0,
       comments_count: 0,
@@ -254,14 +255,24 @@ export async function getLikeStatus(req, res) {
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
 
-    if (!uid) return res.json({ success: true, liked: false });
-
     ensureSupabase();
 
+    const { data: vrow } = await supabase
+      .from(VIDEOS_TABLE)
+      .select('likes_count, comments_count')
+      .eq('video_id', videoId)
+      .maybeSingle();
+    const likesCount = Math.max(0, Number(vrow?.likes_count ?? 0));
+    const commentsCount = Math.max(0, Number(vrow?.comments_count ?? 0));
+
+    if (!uid) {
+      return res.json({ success: true, liked: false, likesCount, commentsCount });
+    }
+
     const { data } = await supabase.from(LIKES_TABLE).select('video_id').eq('video_id', videoId).eq('user_id', uid).maybeSingle();
-    return res.json({ success: true, liked: !!data });
+    return res.json({ success: true, liked: !!data, likesCount, commentsCount });
   } catch (err) {
-    return res.json({ success: true, liked: false });
+    return res.json({ success: true, liked: false, likesCount: 0, commentsCount: 0 });
   }
 }
 
@@ -273,14 +284,20 @@ export async function recordView(req, res) {
     const uid = req.uid || null;
     const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId or session_id required for anonymous' });
-
-    if (!uid && !sessionId) return res.status(400).json({ success: false, message: 'Authentication or session_id required' });
+    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
 
     ensureSupabase();
 
     const { data: video } = await supabase.from(VIDEOS_TABLE).select('views_count').eq('video_id', videoId).single();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+
+    if (!uid && !sessionId) {
+      return res.json({
+        success: true,
+        viewsCount: Math.max(0, Number(video.views_count) || 0),
+        newView: false,
+      });
+    }
 
     let inserted = false;
     if (uid) {
@@ -467,7 +484,6 @@ export async function getPlaybackState(req, res) {
     const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
-    if (!uid && !sessionId) return res.status(400).json({ success: false, message: 'user or session_id required for playback state' });
 
     ensureSupabase();
 
@@ -478,6 +494,17 @@ export async function getPlaybackState(req, res) {
       .single();
 
     if (videoError || !video) return res.status(404).json({ success: false, message: 'Video not found' });
+
+    if (!uid && !sessionId) {
+      return res.json({
+        success: true,
+        video,
+        shouldPlayAd: false,
+        hasSeenAd: true,
+        adUrl: null,
+        skipAfterSeconds: 0,
+      });
+    }
 
     let historyRow = null;
     if (uid) {
@@ -549,7 +576,9 @@ export async function markAdCompleted(req, res) {
     const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
     const { videoId } = req.params;
     if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
-    if (!uid && !sessionId) return res.status(400).json({ success: false, message: 'user or session_id required' });
+    if (!uid && !sessionId) {
+      return res.json({ success: true, message: 'ok' });
+    }
 
     ensureSupabase();
 

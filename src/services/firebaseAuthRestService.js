@@ -14,6 +14,9 @@ const MESSAGE_MAP = {
   TOO_MANY_ATTEMPTS_TRY_LATER: 'Too many attempts. Try again later.',
   OPERATION_NOT_ALLOWED: 'Email/password sign-in is not enabled for this project.',
   PASSWORD_LOGIN_DISABLED: 'Email/password sign-in is not enabled for this project.',
+  INVALID_OOB_CODE: 'This reset link is invalid or has already been used.',
+  EXPIRED_OOB_CODE: 'This reset link has expired. Request a new one.',
+  WEAK_PASSWORD: 'Password is too weak. Choose a stronger password.',
 };
 
 export function mapIdentityToolkitMessage(raw) {
@@ -77,4 +80,34 @@ export async function signInWithPassword(email, password) {
     localId: data.localId || '',
     email: (data.email || emailNorm).trim().toLowerCase(),
   };
+}
+
+/**
+ * Complete password reset using an oobCode from the Firebase reset email link.
+ * @see https://firebase.google.com/docs/reference/rest/auth
+ */
+export async function confirmPasswordResetWithOobCode(oobCode, newPassword) {
+  const apiKey = (process.env.FIREBASE_WEB_API_KEY || '').trim();
+  if (!apiKey) {
+    const err = new Error('Authentication service is not configured.');
+    err.code = 'AUTH_SERVICE_CONFIG';
+    throw err;
+  }
+  const url = `${IDENTITY_BASE}/accounts:resetPassword?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      oobCode: String(oobCode || '').trim(),
+      newPassword: String(newPassword || ''),
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const raw = data?.error?.message || 'UNKNOWN_ERROR';
+    const err = new Error(mapIdentityToolkitMessage(raw) || raw);
+    err.code = raw;
+    throw err;
+  }
+  return data;
 }

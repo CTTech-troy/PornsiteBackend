@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
+import { buildAdminUserFacetsByIds } from '../services/userDirectoryService.js';
 
 function paginate(page, limit) {
   const p = Math.max(1, parseInt(page, 10) || 1);
@@ -33,12 +34,19 @@ async function logAction(adminId, adminName, action, targetType, targetId, detai
 // Maps a Supabase tiktok_videos row to the standard admin Video shape.
 // ID is plain — no prefix.
 function mapSupabaseVideo(v, userMap) {
+  const u = userMap[v.user_id] || {};
+  const display = u.display_name || u.username;
+  const resolvedPrice = Number(v.token_price ?? v.coin_price ?? 0);
+  const isPremiumContent =
+    v.is_premium_content === true ||
+    Number(v.token_price || 0) > 0 ||
+    Number(v.coin_price || 0) > 0;
   return {
     id: v.video_id,
     title: v.title || 'Untitled',
     thumbnail: v.thumbnail_url || null,
-    creatorName: userMap[v.user_id]?.username || 'Unknown',
-    channelName: userMap[v.user_id]?.username || '',
+    creatorName: display || 'Unknown',
+    channelName: u.username || display || '',
     uploadDate: v.created_at || null,
     status: v.status || 'published',
     visibility: v.visibility || 'public',
@@ -46,7 +54,9 @@ function mapSupabaseVideo(v, userMap) {
     likes: Number(v.likes_count || 0),
     reports: Number(v.reports_count || 0),
     earnings: Number(v.earnings || 0),
-    price: Number(v.coin_price || 0),
+    price: Number.isFinite(resolvedPrice) ? resolvedPrice : 0,
+    isPremiumContent,
+    tokenPrice: Number(v.token_price || 0),
     videoUrl: v.storage_url || null,
     duration: v.duration || null,
     description: v.description || '',
@@ -72,12 +82,22 @@ function mapRtdbVideo(videoId, v) {
     reports: 0,
     earnings: 0,
     price: Number(v.tokenPrice || 0),
+    isPremiumContent: v.isPremiumContent === true || Number(v.tokenPrice || 0) > 0,
+    tokenPrice: Number(v.tokenPrice || 0),
     videoUrl: v.videoUrl || v.streamUrl || null,
     duration: v.durationSeconds || null,
     description: v.description || '',
     tags: Array.isArray(v.tags) ? v.tags : [],
     source: 'rtdb',
   };
+}
+
+function isPremiumSupabaseRow(v) {
+  return (
+    v?.is_premium_content === true ||
+    Number(v?.token_price || 0) > 0 ||
+    Number(v?.coin_price || 0) > 0
+  );
 }
 
 // Fetch all videos from Firebase RTDB (isLive only), apply filters, return mapped array.
@@ -96,7 +116,11 @@ async function fetchRtdbVideos({ search, statusFilter, isPremium }) {
     if (statusFilter === 'published') list = list.filter(v => v.isLive === true);
     if (statusFilter === 'removed') list = list.filter(v => v.isLive === false);
 
-    if (isPremium === 'true') list = list.filter(v => v.isPremiumContent === true);
+    if (isPremium === 'true') {
+      list = list.filter(v => v.isPremiumContent === true);
+    } else {
+      list = list.filter(v => v.isPremiumContent !== true);
+    }
     if (search) {
       const q = search.toLowerCase();
       list = list.filter(v => (v.title || '').toLowerCase().includes(q));
@@ -112,7 +136,6 @@ async function fetchRtdbVideos({ search, statusFilter, isPremium }) {
 async function fetchSupabaseVideos({ search, statusFilter, isPremium }) {
   try {
     let q = supabase.from('tiktok_videos').select('*').order('created_at', { ascending: false });
-    if (isPremium === 'true') q = q.gt('coin_price', 0);
     if (statusFilter) q = q.eq('status', statusFilter);
     if (search) q = q.ilike('title', `%${search}%`);
 
@@ -129,13 +152,14 @@ async function fetchSupabaseVideos({ search, statusFilter, isPremium }) {
       }
     }
 
-    const rows = data || [];
-    const userIds = [...new Set(rows.map(v => v.user_id).filter(Boolean))];
-    let userMap = {};
-    if (userIds.length > 0) {
-      const { data: users } = await supabase.from('users').select('id, username, avatar').in('id', userIds);
-      (users || []).forEach(u => { userMap[u.id] = u; });
+    let rows = data || [];
+    if (isPremium === 'true') {
+      rows = rows.filter((v) => isPremiumSupabaseRow(v));
+    } else {
+      rows = rows.filter((v) => !isPremiumSupabaseRow(v));
     }
+    const userIds = [...new Set(rows.map(v => v.user_id).filter(Boolean))];
+    const userMap = userIds.length ? await buildAdminUserFacetsByIds(userIds) : {};
     return rows.map(v => mapSupabaseVideo(v, userMap));
   } catch {
     return [];
@@ -187,7 +211,9 @@ export async function getVideoById(req, res) {
     const { data, error } = await supabase.from('tiktok_videos').select('*').eq('video_id', id).maybeSingle();
     if (error) return res.status(500).json({ message: error.message });
     if (!data) return res.status(404).json({ message: 'Video not found.' });
-    return res.json({ video: mapSupabaseVideo(data, {}) });
+    const uid = data.user_id;
+    const userMap = uid ? await buildAdminUserFacetsByIds([uid]) : {};
+    return res.json({ video: mapSupabaseVideo(data, userMap) });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -278,18 +304,11 @@ export async function getLiveSessions(req, res) {
     // Enrich with host display names
     const lives = data || [];
     const hostIds = [...new Set(lives.map(l => l.host_id).filter(Boolean))];
-    let userMap = {};
-    if (hostIds.length > 0) {
-      const { data: users } = await supabase
-        .from('users')
-        .select('id, username, avatar')
-        .in('id', hostIds);
-      (users || []).forEach(u => { userMap[u.id] = u; });
-    }
+    const userMap = hostIds.length ? await buildAdminUserFacetsByIds(hostIds) : {};
 
     const enriched = lives.map(l => ({
       ...l,
-      hostName: userMap[l.host_id]?.username || 'Unknown',
+      hostName: userMap[l.host_id]?.display_name || userMap[l.host_id]?.username || 'Unknown',
       hostAvatar: userMap[l.host_id]?.avatar || null,
     }));
 
@@ -317,8 +336,8 @@ export async function getLiveSessionById(req, res) {
     // Enrich host info
     let host = null;
     if (live.host_id) {
-      const { data: u } = await supabase.from('users').select('id, username, avatar').eq('id', live.host_id).maybeSingle();
-      host = u;
+      const map = await buildAdminUserFacetsByIds([live.host_id]);
+      host = map[live.host_id] || null;
     }
 
     // Fetch gifts for this live
@@ -340,7 +359,7 @@ export async function getLiveSessionById(req, res) {
     return res.json({
       live: {
         ...live,
-        hostName: host?.username || 'Unknown',
+        hostName: host?.display_name || host?.username || 'Unknown',
         hostAvatar: host?.avatar || null,
       },
       gifts: gifts || [],

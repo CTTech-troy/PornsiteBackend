@@ -23,6 +23,7 @@ import financeRouter from './src/router/finance.route.js';
 import creatorStudioRouter from './src/router/creatorStudio.route.js';
 import adminContentRouter from './src/router/adminContent.route.js';
 import adminModerationRouter from './src/router/adminModeration.route.js';
+import adminSystemRouter from './src/router/adminSystem.route.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
 import * as giftCtrl from './src/controller/gift.controller.js';
@@ -36,6 +37,8 @@ import { pingServices } from './src/utils/servicePing.js';
 import { pingPaymentService, STARTUP_HEALTH_TIMEOUT_MS } from './src/services/paymentServiceClient.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
 import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
+import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
+import { renderVideoSharePreview } from './src/controller/sharePreview.controller.js';
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
@@ -68,7 +71,11 @@ app.use(cors({
 
 app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
 
-app.get('/', (req, res) => res.send(`API running on port ${PORT}`));
+console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode`);
+
+app.get('/', (req, res) => {
+  res.send(`API running on port ${PORT}`);
+});
 
 app.get('/api/health/services', async (req, res) => {
   try {
@@ -82,6 +89,9 @@ app.use('/api/admin', adminRouter);
 app.use('/api/admin/finance', financeRouter);
 app.use('/api/admin/content', adminContentRouter);
 app.use('/api/admin/moderation', adminModerationRouter);
+app.use('/api/admin/system', adminSystemRouter);
+app.get('/api/videos/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
+// Videos proxy routes
 app.use('/api/videos', videosRouter);
 app.use('/api/pornhub', pornhubRouter);
 app.use('/api/live', liveRouter);
@@ -97,6 +107,8 @@ app.use('/api/studio', creatorStudioRouter);
 app.use('/api/ads', adsRouter);
 app.use('/api/memberships', publicMembershipsRouter);
 app.use('/api/admin/memberships', adminMembershipsRouter);
+// Creators Main Application
+app.use('/api/creators-main-application', creatorsMainApplicationRouter);
 
 const PORT = process.env.PORT || 5043;
 import http from 'http';

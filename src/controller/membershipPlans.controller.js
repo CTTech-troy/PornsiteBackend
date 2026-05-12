@@ -1,24 +1,9 @@
 /**
- * Admin-managed membership plans — Firebase RTDB storage.
- * Plans are stored at: membershipPlans/{id}
- *
- * Schema per plan:
- *   id          string
- *   title       string
- *   description string
- *   price       number   (display price)
- *   currency    string   ("USD" | "NGN" | …)
- *   duration    string   ("30 Days", "Monthly", "Yearly", …)
- *   features    string[] (list of bullet-point benefits)
- *   image       string | null  (URL via Supabase storage)
- *   isActive    boolean  (false = hidden from public)
- *   sortOrder   number   (ascending = first)
- *   createdAt   number   (unix ms)
- *   updatedAt   number   (unix ms)
+ * Admin-managed membership plans — Supabase primary (membership_plans table).
+ * Firebase RTDB dependency removed.
  */
 
 import crypto from 'crypto';
-import { getFirebaseRtdb } from '../config/firebase.js';
 import {
   supabase,
   uploadFileToBucket,
@@ -27,35 +12,26 @@ import {
   isConfigured as isSupabaseConfigured,
 } from '../config/supabase.js';
 
-const PLANS_NODE = 'membershipPlans';
-const INVALID_PATH_RE = /[.#$[\]]/;
-
-function plansRef() {
-  const rtdb = getFirebaseRtdb();
-  return rtdb ? rtdb.ref(PLANS_NODE) : null;
-}
-
-function safeId(s) {
-  return typeof s === 'string' && s.length > 0 && !INVALID_PATH_RE.test(s);
-}
-
-function normalizePlan(id, raw) {
-  if (!raw || typeof raw !== 'object') return null;
+function normalizePlan(row) {
+  if (!row || typeof row !== 'object') return null;
   return {
-    id: String(id),
-    title: String(raw.title || '').trim(),
-    description: String(raw.description || '').trim(),
-    price: Number(raw.price) || 0,
-    currency: String(raw.currency || 'USD').toUpperCase(),
-    duration: String(raw.duration || '30 Days').trim(),
-    features: Array.isArray(raw.features)
-      ? raw.features.filter((f) => f && typeof f === 'string').map((f) => String(f).trim())
-      : [],
-    image: raw.image || null,
-    isActive: raw.isActive !== false,
-    sortOrder: Number(raw.sortOrder) || 0,
-    createdAt: Number(raw.createdAt) || Date.now(),
-    updatedAt: Number(raw.updatedAt) || Date.now(),
+    id:          String(row.id),
+    title:       String(row.name          || '').trim(),
+    description: String(row.description   || '').trim(),
+    price:       Number(row.price_usd)    || 0,
+    currency:    String(row.currency      || 'USD').toUpperCase(),
+    duration:    String(row.duration_label || `${row.duration_days || 30} Days`).trim(),
+    features:    Array.isArray(row.features) ? row.features : [],
+    image:       row.image_url            || null,
+    isActive:    row.is_active            !== false,
+    sortOrder:   Number(row.sort_order)   || 0,
+    createdAt:   row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+    updatedAt:   row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+    // Payment fields retained for callers that need them
+    price_usd:     Number(row.price_usd)     || 0,
+    price_ngn:     Number(row.price_ngn)     || 0,
+    duration_days: Number(row.duration_days) || 30,
+    coins:         Number(row.coins)         || 0,
   };
 }
 
@@ -71,24 +47,19 @@ function parseFeatures(raw) {
 // Public endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * GET /api/memberships
- * Returns only active plans, sorted by sortOrder then createdAt.
- */
 export async function getPublicPlans(req, res) {
   try {
-    const ref = plansRef();
-    if (!ref) return res.json({ success: true, data: [] });
+    if (!supabase) return res.json({ success: true, data: [] });
 
-    const snap = await ref.once('value');
-    const val = snap.val();
-    if (!val || typeof val !== 'object') return res.json({ success: true, data: [] });
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: true });
+    if (error) throw error;
 
-    const plans = Object.entries(val)
-      .map(([id, raw]) => normalizePlan(id, raw))
-      .filter((p) => p && p.isActive)
-      .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt);
-
+    const plans = (data || []).map(normalizePlan).filter(Boolean);
     return res.json({ success: true, data: plans });
   } catch (err) {
     console.error('membershipPlans.getPublicPlans', err?.message || err);
@@ -100,26 +71,18 @@ export async function getPublicPlans(req, res) {
 // Admin endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * GET /api/admin/memberships
- * Returns all plans (active + inactive) + aggregate stats.
- */
 export async function getAdminPlans(req, res) {
   try {
-    const ref = plansRef();
-    if (!ref) {
-      return res.json({ success: true, data: [], stats: { total: 0, active: 0, disabled: 0 } });
-    }
+    if (!supabase) return res.json({ success: true, data: [], stats: { total: 0, active: 0, disabled: 0 } });
 
-    const snap = await ref.once('value');
-    const val = snap.val();
-    const plans = !val
-      ? []
-      : Object.entries(val)
-          .map(([id, raw]) => normalizePlan(id, raw))
-          .filter(Boolean)
-          .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt);
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: true });
+    if (error) throw error;
 
+    const plans  = (data || []).map(normalizePlan).filter(Boolean);
     const active = plans.filter((p) => p.isActive).length;
     return res.json({
       success: true,
@@ -132,14 +95,9 @@ export async function getAdminPlans(req, res) {
   }
 }
 
-/**
- * POST /api/admin/memberships
- * Create a new membership plan.
- */
 export async function createPlan(req, res) {
   try {
-    const ref = plansRef();
-    if (!ref) return res.status(503).json({ success: false, error: 'Database unavailable' });
+    if (!supabase) return res.status(503).json({ success: false, error: 'Database unavailable' });
 
     const { title, description, price, currency, duration, features, image, isActive, sortOrder } = req.body || {};
 
@@ -150,92 +108,101 @@ export async function createPlan(req, res) {
       return res.status(400).json({ success: false, error: 'price is required and must be a number' });
     }
 
-    const id = `plan_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-    const now = Date.now();
+    const id          = `plan_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const cur         = String(currency || 'USD').toUpperCase();
+    const priceNum    = Number(price);
+    const now         = new Date().toISOString();
 
-    const plan = {
-      id,
-      title: String(title).trim(),
-      description: String(description || '').trim(),
-      price: Number(price),
-      currency: String(currency || 'USD').toUpperCase(),
-      duration: String(duration || '30 Days').trim(),
-      features: parseFeatures(features),
-      image: image || null,
-      isActive: isActive !== false && isActive !== 'false',
-      sortOrder: Number(sortOrder) || 0,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .insert([{
+        id,
+        name:           String(title).trim(),
+        description:    String(description || '').trim(),
+        price_usd:      cur === 'NGN' ? 0 : priceNum,
+        price_ngn:      cur === 'NGN' ? priceNum : 0,
+        coins:          0,
+        duration_days:  30,
+        is_active:      isActive !== false && isActive !== 'false',
+        currency:       cur,
+        duration_label: String(duration || '30 Days').trim(),
+        features:       parseFeatures(features),
+        image_url:      image || null,
+        sort_order:     Number(sortOrder) || 0,
+        created_at:     now,
+        updated_at:     now,
+      }])
+      .select()
+      .single();
+    if (error) throw error;
 
-    await ref.child(id).set(plan);
-    return res.status(201).json({ success: true, data: plan });
+    return res.status(201).json({ success: true, data: normalizePlan(data) });
   } catch (err) {
     console.error('membershipPlans.createPlan', err?.message || err);
     return res.status(500).json({ success: false, error: err?.message || 'Failed' });
   }
 }
 
-/**
- * PUT /api/admin/memberships/:id
- * Replace or partially update a plan.
- */
 export async function updatePlan(req, res) {
   try {
     const { id } = req.params;
-    if (!safeId(id)) return res.status(400).json({ success: false, error: 'Invalid plan id' });
+    if (!id)       return res.status(400).json({ success: false, error: 'Invalid plan id' });
+    if (!supabase) return res.status(503).json({ success: false, error: 'Database unavailable' });
 
-    const ref = plansRef();
-    if (!ref) return res.status(503).json({ success: false, error: 'Database unavailable' });
+    const { data: existing } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ success: false, error: 'Plan not found' });
 
-    const snap = await ref.child(id).once('value');
-    if (!snap.val()) return res.status(404).json({ success: false, error: 'Plan not found' });
+    const body    = req.body || {};
+    const updates = { updated_at: new Date().toISOString() };
 
-    const updates = { updatedAt: Date.now() };
-    const allowed = ['title', 'description', 'price', 'currency', 'duration', 'features', 'image', 'isActive', 'sortOrder'];
-
-    for (const key of allowed) {
-      if (!Object.prototype.hasOwnProperty.call(req.body || {}, key)) continue;
-      const val = req.body[key];
-      if (key === 'features') {
-        updates.features = parseFeatures(val);
-      } else if (key === 'title') {
-        updates.title = String(val).trim();
-      } else if (key === 'price') {
-        updates.price = Number(val) || 0;
-      } else if (key === 'sortOrder') {
-        updates.sortOrder = Number(val) || 0;
-      } else if (key === 'isActive') {
-        updates.isActive = val !== false && val !== 'false' && val !== 0;
-      } else {
-        updates[key] = val;
-      }
+    if (body.title       !== undefined) updates.name           = String(body.title).trim();
+    if (body.description !== undefined) updates.description    = String(body.description || '').trim();
+    if (body.features    !== undefined) updates.features       = parseFeatures(body.features);
+    if (body.image       !== undefined) updates.image_url      = body.image || null;
+    if (body.sortOrder   !== undefined) updates.sort_order     = Number(body.sortOrder)  || 0;
+    if (body.isActive    !== undefined) updates.is_active      = body.isActive !== false && body.isActive !== 'false' && body.isActive !== 0;
+    if (body.currency    !== undefined) updates.currency       = String(body.currency).toUpperCase();
+    if (body.duration    !== undefined) updates.duration_label = String(body.duration).trim();
+    if (body.price       !== undefined) {
+      const cur = updates.currency || existing.currency || 'USD';
+      updates.price_usd = cur === 'NGN' ? 0 : Number(body.price);
+      updates.price_ngn = cur === 'NGN' ? Number(body.price) : 0;
     }
 
-    await ref.child(id).update(updates);
-    const updated = (await ref.child(id).once('value')).val();
-    return res.json({ success: true, data: normalizePlan(id, updated) });
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+
+    return res.json({ success: true, data: normalizePlan(data) });
   } catch (err) {
     console.error('membershipPlans.updatePlan', err?.message || err);
     return res.status(500).json({ success: false, error: err?.message || 'Failed' });
   }
 }
 
-/**
- * DELETE /api/admin/memberships/:id
- */
 export async function deletePlan(req, res) {
   try {
     const { id } = req.params;
-    if (!safeId(id)) return res.status(400).json({ success: false, error: 'Invalid plan id' });
+    if (!id)       return res.status(400).json({ success: false, error: 'Invalid plan id' });
+    if (!supabase) return res.status(503).json({ success: false, error: 'Database unavailable' });
 
-    const ref = plansRef();
-    if (!ref) return res.status(503).json({ success: false, error: 'Database unavailable' });
+    const { data: existing } = await supabase
+      .from('membership_plans')
+      .select('id')
+      .eq('id', id)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ success: false, error: 'Plan not found' });
 
-    const snap = await ref.child(id).once('value');
-    if (!snap.val()) return res.status(404).json({ success: false, error: 'Plan not found' });
-
-    await ref.child(id).remove();
+    const { error } = await supabase.from('membership_plans').delete().eq('id', id);
+    if (error) throw error;
     return res.json({ success: true });
   } catch (err) {
     console.error('membershipPlans.deletePlan', err?.message || err);
@@ -243,27 +210,29 @@ export async function deletePlan(req, res) {
   }
 }
 
-/**
- * PATCH /api/admin/memberships/:id/toggle
- * Toggle or explicitly set isActive. Body: { isActive?: boolean }
- */
 export async function togglePlan(req, res) {
   try {
     const { id } = req.params;
-    if (!safeId(id)) return res.status(400).json({ success: false, error: 'Invalid plan id' });
+    if (!id)       return res.status(400).json({ success: false, error: 'Invalid plan id' });
+    if (!supabase) return res.status(503).json({ success: false, error: 'Database unavailable' });
 
-    const ref = plansRef();
-    if (!ref) return res.status(503).json({ success: false, error: 'Database unavailable' });
-
-    const snap = await ref.child(id).once('value');
-    const current = snap.val();
+    const { data: current } = await supabase
+      .from('membership_plans')
+      .select('id, is_active')
+      .eq('id', id)
+      .maybeSingle();
     if (!current) return res.status(404).json({ success: false, error: 'Plan not found' });
 
     const newActive = req.body?.isActive != null
       ? (req.body.isActive !== false && req.body.isActive !== 'false' && req.body.isActive !== 0)
-      : !current.isActive;
+      : !current.is_active;
 
-    await ref.child(id).update({ isActive: newActive, updatedAt: Date.now() });
+    const { error } = await supabase
+      .from('membership_plans')
+      .update({ is_active: newActive, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) throw error;
+
     return res.json({ success: true, id, isActive: newActive });
   } catch (err) {
     console.error('membershipPlans.togglePlan', err?.message || err);
@@ -272,16 +241,18 @@ export async function togglePlan(req, res) {
 }
 
 /**
- * Fetch a single raw plan from Firebase RTDB by ID.
- * Returns null if RTDB is unavailable, the plan doesn't exist, or it is inactive.
- * Returns the normalised plan object on success.
+ * Fetch a single plan by ID from Supabase.
+ * Name kept for backward-compatibility with membership.controller.js and payment.route.js.
  */
 export async function getFirebaseRtdbPlan(planId) {
   try {
-    const ref = plansRef();
-    if (!ref) return null;
-    const snap = await ref.child(planId).once('value');
-    return normalizePlan(planId, snap.val());
+    if (!supabase || !planId) return null;
+    const { data } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .eq('id', planId)
+      .maybeSingle();
+    return data ? normalizePlan(data) : null;
   } catch {
     return null;
   }
@@ -289,19 +260,17 @@ export async function getFirebaseRtdbPlan(planId) {
 
 /**
  * POST /api/admin/memberships/upload-image
- * Upload plan image to Supabase Storage. Returns { success, url }.
  */
 export async function uploadPlanImage(req, res) {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ success: false, error: 'Image file required' });
-
     if (!isSupabaseConfigured() || !supabase) {
       return res.status(503).json({ success: false, error: 'Storage not configured on this server' });
     }
 
-    const extMatch = (file.originalname || '').match(/\.(jpe?g|png|gif|webp|svg)$/i);
-    const ext = extMatch ? extMatch[0].toLowerCase() : '.jpg';
+    const extMatch   = (file.originalname || '').match(/\.(jpe?g|png|gif|webp|svg)$/i);
+    const ext        = extMatch ? extMatch[0].toLowerCase() : '.jpg';
     const storagePath = `membership-plans/${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
 
     const uploaded = await uploadFileToBucket(IMAGE_BUCKET, storagePath, file, file.mimetype || 'image/jpeg');
