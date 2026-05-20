@@ -33,6 +33,19 @@ function isPaidMembership(membership) {
 export async function getRandomChatAccess(userId) {
   if (!userId) return { allowed: false, reason: 'AUTH_REQUIRED', balance: 0, membershipActive: false };
   if (!isConfigured() || !supabase) {
+    if (process.env.NODE_ENV !== 'production') {
+      return {
+        allowed: true,
+        reason: 'DEV_BILLING_BYPASS',
+        balance: 999999,
+        membershipActive: true,
+        plan: 'dev',
+        planStatus: 'active',
+        cost: RANDOM_CHAT_BILLING_COST,
+        intervalMs: RANDOM_CHAT_BILLING_INTERVAL_MS,
+        lowBalanceThreshold: RANDOM_CHAT_LOW_BALANCE,
+      };
+    }
     return { allowed: false, reason: 'BILLING_UNAVAILABLE', balance: 0, membershipActive: false };
   }
 

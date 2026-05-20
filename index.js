@@ -147,7 +147,7 @@ const VALID_CHAT_GENDERS = new Set(['male', 'female', 'any']);
 const chatQueueEntries = new Map(); // userId -> { userId, socketId, gender, preference, joinedAt }
 const chatRooms = new Map(); // roomId -> { roomId, a, b, createdAt }
 const userActiveChatRooms = new Map(); // userId -> roomId
-const CHAT_READY_TIMEOUT_MS = 25_000;
+const CHAT_READY_TIMEOUT_MS = 45_000;
 
 function normalizeChatGender(value) {
   const v = String(value || '').trim().toLowerCase();
@@ -155,7 +155,7 @@ function normalizeChatGender(value) {
 }
 
 function preferenceAllows(preference, peerGender) {
-  return preference === 'any' || peerGender === 'any' || preference === peerGender;
+  return preference === 'any' || preference === peerGender;
 }
 
 function usersAreCompatible(a, b) {
@@ -198,6 +198,61 @@ function emitChatPaywall(socket, access = {}, message = 'You have run out of coi
   });
 }
 
+async function getSocketChatAccess(socket) {
+  const access = await randomChatBilling.getRandomChatAccess(socket.uid);
+  emitChatBalance(socket, access);
+  if (!access.allowed) {
+    emitChatPaywall(socket, access);
+    return null;
+  }
+  return access;
+}
+
+function chatPeerUserId(room, userId) {
+  if (!room) return null;
+  if (room.a.userId === userId) return room.b.userId;
+  if (room.b.userId === userId) return room.a.userId;
+  return null;
+}
+
+function chatRoomSocket(entry) {
+  return entry?.socketId ? io.sockets.sockets.get(entry.socketId) : null;
+}
+
+function clearChatRoomTimers(room) {
+  if (!room) return;
+  clearTimeout(room.readyTimeout);
+  clearTimeout(room.billingTimer);
+  room.readyTimeout = null;
+  room.billingTimer = null;
+}
+
+async function finalizeChatUsage(room, userEntry, reason = 'ended', status = 'ended') {
+  const billing = room?.billingByUser?.get(userEntry.userId);
+  if (!billing) return;
+  await randomChatBilling.finalizeUsageRecord({
+    id: billing.usageId,
+    roomId: room.roomId,
+    userId: userEntry.userId,
+    startedAt: room.createdAt,
+    connectedAt: room.connectedAt,
+    endedAt: Date.now(),
+    coinsSpent: billing.coinsSpent || 0,
+    billingEvents: billing.events || [],
+    endReason: reason,
+    status,
+  }).catch(() => {});
+}
+
+function emitLowBalance(socket, access = {}) {
+  const balance = Number(access.balance || 0);
+  if (access.membershipActive || balance > randomChatBilling.RANDOM_CHAT_LOW_BALANCE) return;
+  socket.emit('chat:low-balance', {
+    ...chatBillingPayload(access),
+    message: `You are running low on coins (${balance.toLocaleString()} left).`,
+  });
+}
+
 function parseCsvEnv(name) {
   return String(process.env[name] || '')
     .split(',')
@@ -219,6 +274,24 @@ function getRtcIceServers() {
     });
   }
   return iceServers;
+}
+
+function isValidSessionDescription(desc, expectedType) {
+  return (
+    desc &&
+    desc.type === expectedType &&
+    typeof desc.sdp === 'string' &&
+    desc.sdp.length > 0 &&
+    desc.sdp.length < 200_000
+  );
+}
+
+function isValidIceCandidate(candidate) {
+  return (
+    candidate &&
+    typeof candidate.candidate === 'string' &&
+    candidate.candidate.length < 5000
+  );
 }
 
 function checkSocketRate(socket, key, limit, windowMs) {
@@ -250,24 +323,41 @@ function leaveSocketRooms(socket) {
   socket.data.chatRoomIds = new Set();
 }
 
-function findCompatiblePeer(requester) {
-  let best = null;
-  for (const candidate of chatQueueEntries.values()) {
-    if (!usersAreCompatible(requester, candidate)) continue;
+async function findCompatiblePeer(requester) {
+  const candidates = Array.from(chatQueueEntries.values())
+    .filter((candidate) => usersAreCompatible(requester, candidate))
+    .sort((a, b) => a.joinedAt - b.joinedAt);
+
+  for (const candidate of candidates) {
     const peerSocket = io.sockets.sockets.get(candidate.socketId);
     if (!peerSocket || !peerSocket.connected) {
       chatQueueEntries.delete(candidate.userId);
       continue;
     }
-    if (!best || candidate.joinedAt < best.joinedAt) best = candidate;
+
+    const peerAccess = await getSocketChatAccess(peerSocket).catch(() => null);
+    if (!peerAccess) {
+      chatQueueEntries.delete(candidate.userId);
+      chatQueue.dequeueUser(candidate.userId).catch(() => {});
+      continue;
+    }
+
+    return { peer: candidate, peerAccess };
   }
-  return best;
+  return null;
 }
 
-function createChatRoom(requester, peer) {
+async function createChatRoom(requester, peer, requesterAccess, peerAccess) {
   const requesterSocket = io.sockets.sockets.get(requester.socketId);
   const peerSocket = io.sockets.sockets.get(peer.socketId);
   if (!requesterSocket || !peerSocket) return null;
+
+  if (userActiveChatRooms.has(requester.userId)) {
+    endChatRoom(userActiveChatRooms.get(requester.userId), requester.userId, { notifySelf: true, reason: 'new-session' });
+  }
+  if (userActiveChatRooms.has(peer.userId)) {
+    endChatRoom(userActiveChatRooms.get(peer.userId), peer.userId, { notifySelf: true, reason: 'new-session' });
+  }
 
   const roomId = randomUUID();
   const room = {
@@ -275,8 +365,20 @@ function createChatRoom(requester, peer) {
     a: requester,
     b: peer,
     createdAt: Date.now(),
+    connectedAt: null,
+    ready: new Set(),
+    billingByUser: new Map([
+      [requester.userId, { access: requesterAccess, intervalIndex: 0, coinsSpent: 0, events: [], usageId: null }],
+      [peer.userId, { access: peerAccess, intervalIndex: 0, coinsSpent: 0, events: [], usageId: null }],
+    ]),
+    billingInFlight: false,
+    billingClosed: false,
+    readyTimeout: null,
+    billingTimer: null,
   };
   chatRooms.set(roomId, room);
+  userActiveChatRooms.set(requester.userId, roomId);
+  userActiveChatRooms.set(peer.userId, roomId);
   chatQueueEntries.delete(requester.userId);
   chatQueueEntries.delete(peer.userId);
 
@@ -286,6 +388,10 @@ function createChatRoom(requester, peer) {
   peerSocket.data.chatRoomIds = peerSocket.data.chatRoomIds || new Set();
   requesterSocket.data.chatRoomIds.add(roomId);
   peerSocket.data.chatRoomIds.add(roomId);
+  emitChatBalance(requesterSocket, requesterAccess);
+  emitChatBalance(peerSocket, peerAccess);
+  emitLowBalance(requesterSocket, requesterAccess);
+  emitLowBalance(peerSocket, peerAccess);
 
   const iceServers = getRtcIceServers();
   requesterSocket.emit('chat:matched', {
@@ -293,13 +399,36 @@ function createChatRoom(requester, peer) {
     initiator: true,
     peer: publicChatUser(peer),
     iceServers,
+    billing: chatBillingPayload(requesterAccess),
   });
   peerSocket.emit('chat:matched', {
     roomId,
     initiator: false,
     peer: publicChatUser(requester),
     iceServers,
+    billing: chatBillingPayload(peerAccess),
   });
+
+  for (const [userId, billing] of room.billingByUser.entries()) {
+    const peerUserId = chatPeerUserId(room, userId);
+    randomChatBilling.createUsageRecord({
+      roomId,
+      userId,
+      peerUserId,
+      startedAt: room.createdAt,
+      membershipBypass: billing.access?.membershipActive === true,
+      startingBalance: billing.access?.balance || 0,
+    }).then((usageId) => {
+      const activeRoom = chatRooms.get(roomId);
+      activeRoom?.billingByUser?.get(userId) && (activeRoom.billingByUser.get(userId).usageId = usageId);
+    }).catch(() => {});
+  }
+
+  room.readyTimeout = setTimeout(() => {
+    endChatRoom(roomId, null, { notifySelf: true, reason: 'setup-timeout', status: 'failed' });
+  }, CHAT_READY_TIMEOUT_MS);
+  room.readyTimeout.unref?.();
+
   return room;
 }
 
@@ -323,21 +452,116 @@ function emitToRoomPeer(socket, roomId, event, payload = {}) {
   return true;
 }
 
-function endChatRoom(roomId, endedBy, { notifySelf = true } = {}) {
+function scheduleChatBilling(room) {
+  if (!room || room.billingClosed || !chatRooms.has(room.roomId)) return;
+  clearTimeout(room.billingTimer);
+  room.billingTimer = setTimeout(() => {
+    chargeChatRoom(room.roomId).catch((err) => {
+      console.error('[chat] billing cycle failed:', err?.message || err);
+      const activeRoom = chatRooms.get(room.roomId);
+      if (activeRoom) scheduleChatBilling(activeRoom);
+    });
+  }, randomChatBilling.RANDOM_CHAT_BILLING_INTERVAL_MS);
+  room.billingTimer.unref?.();
+}
+
+async function chargeChatRoom(roomId) {
+  const room = chatRooms.get(String(roomId || ''));
+  if (!room || room.billingClosed || !room.connectedAt || room.billingInFlight) return;
+  room.billingInFlight = true;
+
+  try {
+    for (const user of [room.a, room.b]) {
+      const userSocket = chatRoomSocket(user);
+      if (!userSocket?.connected) {
+        endChatRoom(room.roomId, user.userId, { notifySelf: true, reason: 'socket-disconnected' });
+        return;
+      }
+
+      const billing = room.billingByUser.get(user.userId);
+      billing.intervalIndex += 1;
+      let result;
+      try {
+        result = await randomChatBilling.chargeRandomChatInterval({
+          userId: user.userId,
+          roomId: room.roomId,
+          peerUserId: chatPeerUserId(room, user.userId),
+          intervalIndex: billing.intervalIndex,
+        });
+      } catch (err) {
+        err.userId = user.userId;
+        throw err;
+      }
+      const event = {
+        ts: new Date().toISOString(),
+        intervalIndex: billing.intervalIndex,
+        charged: result.charged === true,
+        amount: Number(result.amount || 0),
+        balance: Number(result.balance || 0),
+        membershipActive: result.membershipActive === true,
+      };
+      billing.events.push(event);
+      billing.coinsSpent += event.amount;
+      billing.access = { ...billing.access, ...result, balance: event.balance };
+      emitChatBalance(userSocket, billing.access);
+      emitLowBalance(userSocket, billing.access);
+    }
+  } catch (err) {
+    const exhausted = err?.code === 'INSUFFICIENT_COINS';
+    const user = [room.a, room.b].find((entry) => entry.userId === err?.userId) || room.a;
+    const userSocket = chatRoomSocket(user);
+    if (userSocket) emitChatPaywall(userSocket, { balance: err?.balance || 0, reason: err?.code || 'BILLING_FAILED' });
+    endChatRoom(room.roomId, user.userId, {
+      notifySelf: true,
+      reason: exhausted ? 'coins-exhausted' : 'billing-failed',
+      status: exhausted ? 'exhausted' : 'failed',
+    });
+    return;
+  } finally {
+    const activeRoom = chatRooms.get(String(roomId || ''));
+    if (activeRoom) activeRoom.billingInFlight = false;
+  }
+
+  const activeRoom = chatRooms.get(String(roomId || ''));
+  if (activeRoom) scheduleChatBilling(activeRoom);
+}
+
+function maybeStartChatBilling(room) {
+  if (!room || room.connectedAt) return;
+  if (!room.ready.has(room.a.userId) || !room.ready.has(room.b.userId)) return;
+  room.connectedAt = Date.now();
+  clearTimeout(room.readyTimeout);
+  room.readyTimeout = null;
+  io.to(room.roomId).emit('chat:connected', {
+    roomId: room.roomId,
+    connectedAt: room.connectedAt,
+    billing: chatBillingPayload(room.billingByUser.get(room.a.userId)?.access || {}),
+  });
+  scheduleChatBilling(room);
+}
+
+function endChatRoom(roomId, endedBy, { notifySelf = true, reason = 'ended', status = 'ended' } = {}) {
   const room = chatRooms.get(String(roomId || ''));
   if (!room) return;
+  room.billingClosed = true;
+  clearChatRoomTimers(room);
   chatRooms.delete(room.roomId);
   chatQueue.endChatRoom(room.roomId).catch(() => {});
 
   for (const user of [room.a, room.b]) {
     const peerSocket = io.sockets.sockets.get(user.socketId);
-    if (!peerSocket) continue;
-    peerSocket.leave(room.roomId);
-    if (peerSocket.data.chatRoomIds) peerSocket.data.chatRoomIds.delete(room.roomId);
-    if (notifySelf || user.userId !== endedBy) {
-      peerSocket.emit(user.userId === endedBy ? 'chat:ended' : 'chat:peer-left', {
-        roomId: room.roomId,
-      });
+    userActiveChatRooms.delete(user.userId);
+    finalizeChatUsage(room, user, reason, status).catch(() => {});
+    if (peerSocket) {
+      peerSocket.leave(room.roomId);
+      if (peerSocket.data.chatRoomIds) peerSocket.data.chatRoomIds.delete(room.roomId);
+      if (notifySelf || user.userId !== endedBy) {
+        const eventName = endedBy && user.userId !== endedBy ? 'chat:peer-left' : 'chat:ended';
+        peerSocket.emit(eventName, {
+          roomId: room.roomId,
+          reason,
+        });
+      }
     }
   }
 }
@@ -731,6 +955,9 @@ io.on('connection', (socket) => {
       leaveSocketRooms(socket);
       removeQueuedUser(socket.uid);
 
+      const requesterAccess = await getSocketChatAccess(socket);
+      if (!requesterAccess) return;
+
       const ownGender = normalizeChatGender(payload.ownGender || payload.selfGender || payload.myGender || payload.genderIdentity);
       const preferredGender = normalizeChatGender(payload.preferredGender || payload.preference || payload.gender);
       const requester = {
@@ -741,14 +968,14 @@ io.on('connection', (socket) => {
         joinedAt: Date.now(),
       };
 
-      const peer = findCompatiblePeer(requester);
-      if (peer) {
-        createChatRoom(requester, peer);
+      const match = await findCompatiblePeer(requester);
+      if (match?.peer) {
+        await createChatRoom(requester, match.peer, requesterAccess, match.peerAccess);
         return;
       }
 
       chatQueueEntries.set(requester.userId, requester);
-      chatQueue.enqueueUser(requester.userId, requester.preference, socket.id).catch(() => {});
+      chatQueue.enqueueUser(requester.userId, requester.gender, socket.id).catch(() => {});
       socket.emit('chat:waiting', {
         gender: requester.gender,
         preference: requester.preference,
@@ -761,20 +988,27 @@ io.on('connection', (socket) => {
 
   socket.on('chat:webrtc-offer', ({ roomId, offer } = {}) => {
     if (!checkSocketRate(socket, 'chat:signal', 300, 60_000)) return;
-    if (!offer || offer.type !== 'offer') return;
+    if (!isValidSessionDescription(offer, 'offer')) return;
     emitToRoomPeer(socket, roomId, 'chat:webrtc-offer', { offer });
   });
 
   socket.on('chat:webrtc-answer', ({ roomId, answer } = {}) => {
     if (!checkSocketRate(socket, 'chat:signal', 300, 60_000)) return;
-    if (!answer || answer.type !== 'answer') return;
+    if (!isValidSessionDescription(answer, 'answer')) return;
     emitToRoomPeer(socket, roomId, 'chat:webrtc-answer', { answer });
   });
 
   socket.on('chat:ice-candidate', ({ roomId, candidate } = {}) => {
     if (!checkSocketRate(socket, 'chat:signal', 500, 60_000)) return;
-    if (!candidate) return;
+    if (!isValidIceCandidate(candidate)) return;
     emitToRoomPeer(socket, roomId, 'chat:ice-candidate', { candidate });
+  });
+
+  socket.on('chat:ready', ({ roomId } = {}) => {
+    const room = getRoomForSocket(socket, roomId);
+    if (!room) return;
+    room.ready.add(socket.uid);
+    maybeStartChatBilling(room);
   });
 
   socket.on('chat:media-state', ({ roomId, muted, cameraOff } = {}) => {
@@ -808,12 +1042,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('chat:next', ({ roomId } = {}) => {
-    if (roomId) endChatRoom(roomId, socket.uid, { notifySelf: false });
+    if (roomId) endChatRoom(roomId, socket.uid, { notifySelf: false, reason: 'next' });
     removeQueuedUser(socket.uid);
   });
 
   socket.on('chat:leave', ({ roomId } = {}) => {
-    if (roomId) endChatRoom(roomId, socket.uid, { notifySelf: false });
+    if (roomId) endChatRoom(roomId, socket.uid, { notifySelf: false, reason: 'left' });
     removeQueuedUser(socket.uid);
   });
 
@@ -828,6 +1062,19 @@ setInterval(() => {
   cleanupInMemoryChatQueue();
   chatQueue.cleanupStaleQueue(45).catch(() => {});
 }, 30_000).unref?.();
+
+server.on('error', (err) => {
+  if (err?.code === 'EADDRINUSE') {
+    console.error(`[server] Port ${PORT} is already in use.`);
+    console.error('[server] Stop the existing backend process or start this server with a different PORT value.');
+    console.error(`[server] Windows check: netstat -ano | findstr :${PORT}`);
+    console.error('[server] Windows stop: taskkill /PID <PID> /F');
+    process.exit(1);
+  }
+
+  console.error('[server] Failed to start:', err);
+  process.exit(1);
+});
 
 server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
