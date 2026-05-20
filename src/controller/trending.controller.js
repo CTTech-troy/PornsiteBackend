@@ -4,6 +4,7 @@
  */
 import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 import { isXnxxApiConfigured, fetchXnxxBestPage } from '../utils/xnxxRapidApi.js';
+import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
 
 const PER_PAGE_HINT = 18;
 
@@ -38,12 +39,13 @@ export async function getTrending(req, res) {
       });
     }
 
-    ingestHomeFeedVideos(items);
-    const hasMore = items.length >= PER_PAGE_HINT;
+    const listableItems = filterHomeFeedVideos(items);
+    ingestHomeFeedVideos(listableItems);
+    const hasMore = listableItems.length >= PER_PAGE_HINT;
     if (!cached && !stale) {
-      console.log('Video API Response: trending (xn/best)', { page, count: items.length, hasMore });
+      console.log('Video API Response: trending (xn/best)', { page, count: listableItems.length, hasMore });
     }
-    return res.json({ success: true, data: items, hasMore, page, stale: stale || undefined });
+    return res.json({ success: true, data: listableItems, hasMore, page, stale: stale || undefined });
   } catch (err) {
     console.warn('trending.controller getTrending:', err?.message || err);
     return res.json({

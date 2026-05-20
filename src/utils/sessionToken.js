@@ -26,7 +26,7 @@ export async function resolveUidFromBearerToken(token) {
   const authSvc = getFirebaseAuth();
   if (authSvc) {
     try {
-      const decoded = await authSvc.verifyIdToken(token);
+      const decoded = await authSvc.verifyIdToken(token, true);
       return decoded.uid;
     } catch {
       /* fall through to session JWT */
@@ -38,7 +38,17 @@ export async function resolveUidFromBearerToken(token) {
   if (!secret) return null;
   try {
     const payload = jwt.verify(token, secret);
-    return typeof payload?.uid === 'string' ? payload.uid : null;
+    const uid = typeof payload?.uid === 'string' ? payload.uid : null;
+    if (!uid) return null;
+    if (authSvc) {
+      try {
+        const user = await authSvc.getUser(uid);
+        if (user.disabled) return null;
+      } catch {
+        return null;
+      }
+    }
+    return uid;
   } catch {
     return null;
   }

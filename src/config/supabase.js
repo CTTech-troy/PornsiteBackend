@@ -99,10 +99,17 @@ async function ensureBuckets() {
   for (const bucket of [VIDEO_BUCKET, IMAGE_BUCKET]) {
     try {
       const { error } = await supabase.storage.createBucket(bucket, { public: true });
-      if (error && error.message !== 'The resource already exists') {
+      const alreadyExists = error && /resource already exists/i.test(error.message || '');
+      if (error && !alreadyExists) {
         const msg = error.message || '';
         if (!/row-level security|RLS|policy|fetch failed/i.test(msg)) {
           console.warn(`Supabase bucket "${bucket}" create:`, msg);
+        }
+      }
+      if (!error || alreadyExists) {
+        const { error: updateError } = await supabase.storage.updateBucket(bucket, { public: true });
+        if (updateError && !/row-level security|RLS|policy|fetch failed/i.test(updateError.message || '')) {
+          console.warn(`Supabase bucket "${bucket}" public update:`, updateError.message || updateError);
         }
       }
     } catch (err) {

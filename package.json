@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node scripts/test-video-playback-validation.mjs",
+    "revalidate-videos": "node scripts/revalidate-videos.mjs",
     "start": "node index.js",
     "dev": "nodemon index.js",
     "exit-all-lives": "node scripts/exit-all-lives.js",

@@ -1,6 +1,6 @@
 /**
- * Paginated video feed via RapidAPI xnxx-api GET /xn/best?page=
- * GET /api/videos?page=1&limit=20 → { data: Video[], total, page, totalPages, hasMore }
+ * Public paginated video feed.
+ * GET /api/videos?page=1&limit=20 -> { data, total, page, totalPages, hasMore }
  */
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { lookupHomeFeedRow, ingestHomeFeedVideos } from '../config/homeFeedCache.js';
@@ -10,6 +10,7 @@ import {
   homeCardToFeedVideoItem,
 } from '../utils/xnxxRapidApi.js';
 import { fetchPublishedHomeCards, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
+import { annotatePlayableVideo, isListableInHomeFeed, isPlayableVideo } from '../utils/videoPlaybackValidation.js';
 
 const CACHE_MAX_ITEMS = 500;
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -20,13 +21,7 @@ let cache = { items: [], ts: 0 };
 function mergeCache(items) {
   const seen = new Set();
   const merged = [];
-  for (const it of cache.items) {
-    if (!it?.id) continue;
-    const k = String(it.id);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    merged.push(it);
-  }
+
   for (const it of items) {
     if (!it?.id) continue;
     const k = String(it.id);
@@ -34,122 +29,116 @@ function mergeCache(items) {
     seen.add(k);
     merged.push(it);
   }
+
+  for (const it of cache.items) {
+    if (!it?.id) continue;
+    const k = String(it.id);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    merged.push(it);
+  }
+
   cache = { items: merged.slice(0, CACHE_MAX_ITEMS), ts: Date.now() };
 }
 
 function feedItemHasRenderableMedia(item) {
   if (!item) return false;
+  const title = item.title && String(item.title).trim() !== '';
   const thumb = item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '';
-  const url = item.videoUrl && String(item.videoUrl).trim().startsWith('http');
-  return thumb || url;
+  const url = (item.playbackUrl || item.streamUrl || item.videoUrl) && String(item.playbackUrl || item.streamUrl || item.videoUrl).trim() !== '';
+  if (!item.id || !(thumb || url || title)) return false;
+  if (isPlayableVideo(item)) return true;
+  return isListableInHomeFeed({
+    ...item,
+    thumbnail: item.thumbnailUrl,
+    videoUrl: item.videoUrl || item.streamUrl,
+    source: item.source || 'external',
+  });
+}
+
+function mapCachedHomeFeedRow(hf) {
+  if (!hf) return null;
+  const page = String(hf.playbackUrl || hf.streamUrl || hf.videoUrl || hf.videoSrc || hf.url || '');
+  return {
+    id: String(hf.id),
+    videoUrl: page,
+    streamUrl: page,
+    playbackUrl: page,
+    thumbnailUrl: String(hf.thumbnail || ''),
+    duration: Number(hf.durationSeconds) || 0,
+    createdAt: new Date().toISOString(),
+    title: hf.title || '',
+    channel: hf.channel || '',
+    creatorDisplayName: hf.creatorDisplayName || hf.channel || '',
+    creatorAvatarUrl: hf.creatorAvatarUrl || hf.avatar || '',
+    avatar: hf.avatar || hf.creatorAvatarUrl || '',
+    views: hf.views ?? 0,
+    totalViews: hf.totalViews ?? hf.views ?? 0,
+    source: hf.source || 'external',
+    userId: hf.userId || null,
+    allowPeopleToComment: hf.allowPeopleToComment !== false,
+    isPremiumContent: hf.isPremiumContent === true || hf.is_premium_content === true || Number(hf.tokenPrice || hf.token_price || 0) > 0,
+    tokenPrice: Number(hf.tokenPrice || hf.token_price || hf.coinPrice || hf.coin_price || 0) || 0,
+    category: hf.category || hf.mainOrientationCategory || '',
+    mainOrientationCategory: hf.mainOrientationCategory || hf.category || '',
+    tags: Array.isArray(hf.tags) ? hf.tags : [],
+    playable: hf.playable === true,
+    sourceType: hf.sourceType || hf.source_type || '',
+    embedAllowed: hf.embedAllowed === true || hf.embed_allowed === true,
+    validationStatus: hf.validationStatus || hf.validation_status || (hf.playable ? 'playable' : 'unsupported'),
+  };
 }
 
 export async function getVideosPaginated(page = 1, limit = 20, options = {}) {
   const { viewerUid = null } = options;
   const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
-
-  let platformVideos = [];
-  // Only inject platform videos on the first page
-  if (pageNum === 1) {
-    try {
-      // 1. Fetch from Firebase RTDB
-      let rtdbList = [];
-      const rtdb = getFirebaseRtdb();
-      if (rtdb) {
-        const snap = await rtdb.ref('videos').once('value');
-        const val = snap.val();
-        rtdbList = !val ? [] : Object.entries(val)
-          .map(([id, v]) => ({ ...v, id, videoId: id, source: 'rtdb' }))
-          .filter((v) => v.isLive === true);
-      }
-
-      // 2. Fetch from Supabase tiktok_videos
-      let supabaseList = [];
-      if (isSupabaseConfigured() && supabase) {
-        const { data, error } = await supabase
-          .from('tiktok_videos')
-          .select('*')
-          .eq('status', 'published')
-          .order('created_at', { ascending: false })
-          .limit(10);
-
-        if (!error && data) {
-          supabaseList = data.map(v => ({
-            id: v.video_id,
-            videoId: v.video_id,
-            userId: v.user_id,
-            title: v.title,
-            description: v.description,
-            videoUrl: v.storage_url,
-            thumbnailUrl: v.thumbnail_url,
-            totalLikes: v.likes_count,
-            totalComments: v.comments_count,
-            createdAt: new Date(v.created_at).getTime(),
-            isLive: true,
-            source: 'supabase'
-          }));
-        }
-      }
-      platformVideos = [...rtdbList, ...supabaseList].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    } catch (err) {
-      console.warn('Failed to fetch platform videos for feed:', err.message);
-    }
-  }
-
-  if (!isXnxxApiConfigured()) {
-    return { data: platformVideos, total: platformVideos.length, page: pageNum, totalPages: 1, hasMore: false };
-  }
-
-  const { ok, items: cards } = await fetchXnxxBestPage(pageNum);
-  if (!ok || !cards?.length) {
-    return { data: platformVideos, total: platformVideos.length, page: pageNum, totalPages: 1, hasMore: false };
-  }
-
-  ingestHomeFeedVideos(cards);
-  const mapped = cards.map((c, i) => homeCardToFeedVideoItem(c, i)).filter(Boolean);
-  const withThumb = mapped.filter((item) => item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '');
-  mergeCache(withThumb);
-
-  // Combine platform videos with external videos
-  const combinedData = pageNum === 1 ? [...platformVideos, ...withThumb] : withThumb;
-  const data = combinedData.slice(0, limitNum);
-  const hasMore = withThumb.length >= PER_PAGE_HINT;
-
   const pagesForDb = Math.min(5, Math.max(1, Math.ceil(limitNum / 20)));
-  const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid });
-  if (cards.length) ingestHomeFeedVideos(cards);
-  let data = cards
-    .map((c, i) => homeCardToFeedVideoItem(c, i))
-    .filter(Boolean)
-    .filter(feedItemHasRenderableMedia);
+  const data = [];
+  const seen = new Set();
+
+  const addItem = (item) => {
+    const playable = annotatePlayableVideo(item);
+    if (!feedItemHasRenderableMedia(playable)) return;
+    const key = String(playable.id);
+    if (seen.has(key)) return;
+    seen.add(key);
+    data.push(playable);
+  };
+
+  try {
+    const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid });
+    if (cards.length) ingestHomeFeedVideos(cards);
+    cards.forEach((card, index) => addItem(homeCardToFeedVideoItem(card, index)));
+  } catch (err) {
+    console.warn('videoFeed platform feed:', err?.message || err);
+  }
 
   if (data.length < limitNum && isXnxxApiConfigured()) {
-    const { ok, items: xcards } = await fetchXnxxBestPage(pageNum);
-    if (ok && xcards?.length) {
-      ingestHomeFeedVideos(xcards);
-      const seen = new Set(data.map((d) => String(d.id)));
-      for (let i = 0; i < xcards.length && data.length < limitNum; i++) {
-        const mapped = homeCardToFeedVideoItem(xcards[i], i);
-        if (!mapped || !feedItemHasRenderableMedia(mapped)) continue;
-        const k = String(mapped.id);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        data.push(mapped);
+    try {
+      const { ok, items: cards } = await fetchXnxxBestPage(pageNum);
+      if (ok && cards?.length) {
+        ingestHomeFeedVideos(cards);
+        cards.forEach((card, index) => {
+          if (data.length < limitNum) addItem(homeCardToFeedVideoItem(card, index));
+        });
       }
+    } catch (err) {
+      console.warn('videoFeed external feed:', err?.message || err);
     }
   }
 
-  data = data.slice(0, limitNum);
-  mergeCache(data);
-  if (data.length === 0) {
+  const sliced = data.slice(0, limitNum);
+  mergeCache(sliced);
+
+  if (sliced.length === 0) {
     return { data: [], total: 0, page: pageNum, totalPages: 0, hasMore: false };
   }
 
-  const hasMore = data.length >= limitNum || data.length >= PER_PAGE_HINT;
+  const hasMore = sliced.length >= limitNum || sliced.length >= PER_PAGE_HINT;
   return await withRtdbMerge({
-    data,
-    total: combinedData.length,
+    data: sliced,
+    total: sliced.length,
     page: pageNum,
     totalPages: hasMore ? pageNum + 1 : pageNum,
     hasMore,
@@ -166,6 +155,7 @@ async function withRtdbMerge(result) {
     });
     return result;
   }
+
   try {
     const rtdbRef = rtdb.ref('videos');
     await Promise.all(
@@ -197,101 +187,45 @@ export async function getVideoById(id, options = {}) {
   const videoId = String(id || '').trim();
   if (!videoId) return null;
 
-  const hf = lookupHomeFeedRow(videoId);
-  if (hf) {
-    const video = {
-      id: String(hf.id),
-      videoUrl: String(hf.videoSrc || hf.url || ''),
-      thumbnailUrl: String(hf.thumbnail || ''),
-      duration: Number(hf.durationSeconds) || 0,
-      createdAt: new Date().toISOString(),
-      title: hf.title || '',
-      channel: hf.channel || '',
-      views: hf.views ?? 0,
-    };
-    const rtdb = getFirebaseRtdb();
-    if (rtdb) {
-      try {
-        const ref = rtdb.ref('videos').child(videoId);
-        const snap = await ref.once('value');
-        const val = snap.val();
-        if (!val) {
-          await ref.set({ externalId: videoId, totalLikes: 0, totalComments: 0 });
-          video.totalLikes = 0;
-          video.totalComments = 0;
-        } else {
-          video.totalLikes = val.totalLikes ?? 0;
-          video.totalComments = val.totalComments ?? 0;
-        }
-      } catch (err) {
-        video.totalLikes = video.totalLikes ?? 0;
-        video.totalComments = video.totalComments ?? 0;
-      }
-    } else {
-      video.totalLikes = video.totalLikes ?? 0;
-      video.totalComments = video.totalComments ?? 0;
-    }
-    return video;
+  const cachedHomeFeedRow = lookupHomeFeedRow(videoId);
+  if (cachedHomeFeedRow) {
+    const video = annotatePlayableVideo(mapCachedHomeFeedRow(cachedHomeFeedRow));
+    if (!feedItemHasRenderableMedia(video)) return null;
+    return await withRtdbMerge({ data: [video] }).then((result) => result.data[0]);
   }
 
   let items = cache.items;
   const now = Date.now();
   if (isXnxxApiConfigured() && (items.length === 0 || now - cache.ts >= CACHE_TTL_MS)) {
-    const { ok, items: cards } = await fetchXnxxBestPage(1);
-    if (ok && cards?.length) {
-      ingestHomeFeedVideos(cards);
-      const mapped = cards.map((c, i) => homeCardToFeedVideoItem(c, i)).filter(Boolean);
-      items = mapped.filter(feedItemHasRenderableMedia);
-      mergeCache(items);
+    try {
+      const { ok, items: cards } = await fetchXnxxBestPage(1);
+      if (ok && cards?.length) {
+        ingestHomeFeedVideos(cards);
+        const mapped = cards.map((card, index) => homeCardToFeedVideoItem(card, index)).filter(feedItemHasRenderableMedia);
+        mergeCache(mapped);
+        items = mapped;
+      }
+    } catch (err) {
+      console.warn('videoFeed refresh cache:', err?.message || err);
     }
   }
 
-  items = cache.items.filter(feedItemHasRenderableMedia);
+  items = cache.items.map(annotatePlayableVideo).filter(feedItemHasRenderableMedia);
   let video = items.find((item) => String(item.id) === videoId);
 
   if (!video) {
-    const hf2 = lookupHomeFeedRow(videoId);
-    if (hf2) {
-      video = {
-        id: String(hf2.id),
-        videoUrl: String(hf2.videoSrc || hf2.url || ''),
-        thumbnailUrl: String(hf2.thumbnail || ''),
-        duration: Number(hf2.durationSeconds) || 0,
-        createdAt: new Date().toISOString(),
-        title: hf2.title || '',
-        channel: hf2.channel || '',
-        views: hf2.views ?? 0,
-      };
-    }
+    video = annotatePlayableVideo(mapCachedHomeFeedRow(lookupHomeFeedRow(videoId)));
+    if (!feedItemHasRenderableMedia(video)) video = null;
   }
 
   if (!video) {
-    video = await fetchPublishedVideoById(videoId, viewerUid);
+    const published = await fetchPublishedVideoById(videoId, viewerUid);
+    video = published ? annotatePlayableVideo(published) : null;
+    if (!feedItemHasRenderableMedia(video)) video = null;
   }
 
   if (!video) return null;
 
-  const rtdbLate = getFirebaseRtdb();
-  if (rtdbLate) {
-    try {
-      const ref = rtdbLate.ref('videos').child(videoId);
-      const snap = await ref.once('value');
-      const val = snap.val();
-      if (!val) {
-        await ref.set({ externalId: videoId, totalLikes: 0, totalComments: 0 });
-        video.totalLikes = 0;
-        video.totalComments = 0;
-      } else {
-        video.totalLikes = val.totalLikes ?? 0;
-        video.totalComments = val.totalComments ?? 0;
-      }
-    } catch (err) {
-      video.totalLikes = video.totalLikes ?? 0;
-      video.totalComments = video.totalComments ?? 0;
-    }
-  } else {
-    video.totalLikes = video.totalLikes ?? 0;
-    video.totalComments = video.totalComments ?? 0;
-  }
-  return video;
+  const result = await withRtdbMerge({ data: [video] });
+  return result.data[0];
 }

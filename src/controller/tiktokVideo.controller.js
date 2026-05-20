@@ -6,6 +6,8 @@ import crypto from 'crypto';
 import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 import { creditViewMilestone } from './earnings.controller.js';
+import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoIdValidation.js';
+import { annotatePlayableVideo, filterPlayableVideos, validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
 
 const VIDEOS_TABLE = 'tiktok_videos';
 const LIKES_TABLE = 'tiktok_video_likes';
@@ -50,10 +52,25 @@ export async function uploadVideo(req, res) {
         ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${data.path.split('/').map(encodeURIComponent).join('/')}`
         : '');
 
+    const playbackValidation = validateVideoPlaybackSource({
+      source: 'community',
+      streamUrl: storageUrl,
+      storage_url: storageUrl,
+      videoUrl: storageUrl,
+    });
+    if (playbackValidation.playable !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Video source cannot be played inside the platform.',
+        reason: playbackValidation.reason,
+      });
+    }
+
     const { error } = await supabase.from(VIDEOS_TABLE).insert({
       video_id: videoId,
       user_id: uid,
       storage_url: storageUrl,
+      stream_url: storageUrl,
       title,
       description,
       status: 'published',
@@ -61,6 +78,11 @@ export async function uploadVideo(req, res) {
       likes_count: 0,
       views_count: 0,
       comments_count: 0,
+      playable: playbackValidation.playable,
+      source_type: playbackValidation.sourceType,
+      embed_allowed: playbackValidation.embedAllowed,
+      validation_status: playbackValidation.validationStatus,
+      playback_url: playbackValidation.playbackUrl,
     });
 
     if (error) throw error;
@@ -104,7 +126,17 @@ export async function getFeed(req, res) {
       const { data: users } = await supabase.from('users').select('id, username').in('id', userIds);
       if (users) users.forEach(u => { usernameMap[u.id] = u.username; });
     }
-    const enriched = videos.map(v => ({ ...v, creator_username: usernameMap[v.user_id] || null }));
+    const enriched = filterPlayableVideos(
+      videos.map((v) =>
+        annotatePlayableVideo({
+          ...v,
+          id: v.video_id,
+          streamUrl: v.stream_url || v.storage_url,
+          source: 'community',
+          creator_username: usernameMap[v.user_id] || null,
+        }),
+      ),
+    );
 
     return res.json({ success: true, data: enriched, page, limit });
   } catch (err) {
@@ -157,7 +189,7 @@ export async function getVideosByUser(req, res) {
 export async function getVideo(req, res) {
   try {
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: [] });
 
     ensureSupabase();
 
@@ -169,7 +201,20 @@ export async function getVideo(req, res) {
 
     if (error || !data) return res.status(404).json({ success: false, message: 'Video not found' });
 
-    return res.json({ success: true, data });
+    const mapped = annotatePlayableVideo({
+      ...data,
+      id: data.video_id,
+      streamUrl: data.stream_url || data.storage_url,
+      source: 'community',
+    });
+    if (mapped.playable !== true) {
+      return res.status(404).json({
+        success: false,
+        message: 'This video is unavailable for in-platform playback.',
+      });
+    }
+
+    return res.json({ success: true, data: mapped });
   } catch (err) {
     console.error('tiktokVideo.getVideo error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });
@@ -184,7 +229,7 @@ export async function likeVideo(req, res) {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     ensureSupabase();
 
@@ -219,7 +264,7 @@ export async function unlikeVideo(req, res) {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     ensureSupabase();
 
@@ -253,7 +298,7 @@ export async function getLikeStatus(req, res) {
   try {
     const uid = req.uid;
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { liked: false, likesCount: 0, commentsCount: 0 });
 
     ensureSupabase();
 
@@ -284,7 +329,7 @@ export async function recordView(req, res) {
     const uid = req.uid || null;
     const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     ensureSupabase();
 
@@ -347,7 +392,7 @@ export async function recordView(req, res) {
 export async function getComments(req, res) {
   try {
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: [] });
 
     ensureSupabase();
 
@@ -389,7 +434,7 @@ export async function addComment(req, res) {
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
     const text = (req.body?.comment || req.body?.text || '').trim();
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!text) return res.status(400).json({ success: false, message: 'Comment text is required' });
 
     ensureSupabase();
@@ -440,7 +485,9 @@ export async function deleteComment(req, res) {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { commentId } = req.params;
-    if (!commentId) return res.status(400).json({ success: false, message: 'commentId required' });
+    if (!isValidPlatformVideoId(commentId)) {
+      return res.status(400).json({ success: false, message: 'Invalid comment ID' });
+    }
 
     ensureSupabase();
 
@@ -483,7 +530,7 @@ export async function getPlaybackState(req, res) {
     const uid = req.uid || null;
     const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     ensureSupabase();
 
@@ -575,7 +622,7 @@ export async function markAdCompleted(req, res) {
     const uid = req.uid || null;
     const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!uid && !sessionId) {
       return res.json({ success: true, message: 'ok' });
     }
@@ -636,7 +683,8 @@ export async function recordAdImpression(req, res) {
     const { videoId } = req.params;
     const adId = req.body?.ad_id;
     const skipped = req.body?.skipped === true;
-    if (!videoId || !adId) return res.status(400).json({ success: false, message: 'videoId and ad_id required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
+    if (!adId) return res.status(400).json({ success: false, message: 'ad_id required' });
 
     ensureSupabase();
 

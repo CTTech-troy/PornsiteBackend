@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { buildAdminUserFacetsByIds } from '../services/userDirectoryService.js';
+import { validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
 
 function paginate(page, limit) {
   const p = Math.max(1, parseInt(page, 10) || 1);
@@ -62,6 +63,11 @@ function mapSupabaseVideo(v, userMap) {
     description: v.description || '',
     tags: v.tags || [],
     source: 'supabase',
+    playable: v.playable === true,
+    sourceType: v.source_type || null,
+    validationStatus: v.validation_status || null,
+    playbackUrl: v.playback_url || null,
+    embedAllowed: v.embed_allowed === true,
   };
 }
 
@@ -89,6 +95,20 @@ function mapRtdbVideo(videoId, v) {
     description: v.description || '',
     tags: Array.isArray(v.tags) ? v.tags : [],
     source: 'rtdb',
+    ...(() => {
+      const validation = validateVideoPlaybackSource({
+        streamUrl: v.videoUrl || v.streamUrl,
+        videoUrl: v.videoUrl || v.streamUrl,
+        source: 'rtdb',
+      });
+      return {
+        playable: validation.playable,
+        sourceType: validation.sourceType,
+        validationStatus: validation.validationStatus,
+        playbackUrl: validation.playbackUrl,
+        embedAllowed: validation.embedAllowed,
+      };
+    })(),
   };
 }
 
@@ -133,10 +153,11 @@ async function fetchRtdbVideos({ search, statusFilter, isPremium }) {
 }
 
 // Fetch all matching videos from Supabase tiktok_videos (no pagination — we merge in memory).
-async function fetchSupabaseVideos({ search, statusFilter, isPremium }) {
+async function fetchSupabaseVideos({ search, statusFilter, isPremium, validationStatus }) {
   try {
     let q = supabase.from('tiktok_videos').select('*').order('created_at', { ascending: false });
     if (statusFilter) q = q.eq('status', statusFilter);
+    if (validationStatus) q = q.eq('validation_status', validationStatus);
     if (search) q = q.ilike('title', `%${search}%`);
 
     let { data, error } = await q;
@@ -173,18 +194,19 @@ async function fetchSupabaseVideos({ search, statusFilter, isPremium }) {
 
 export async function getVideos(req, res) {
   try {
-    const { search = '', statusFilter = '', isPremium = '', page: rawPage, limit: rawLimit } = req.query;
+    const { search = '', statusFilter = '', isPremium = '', validationStatus = '', page: rawPage, limit: rawLimit } = req.query;
     const { page, limit, offset } = paginate(rawPage, rawLimit);
 
     const [rtdbVideos, supabaseVideos] = await Promise.all([
       fetchRtdbVideos({ search, statusFilter, isPremium }),
-      fetchSupabaseVideos({ search, statusFilter, isPremium }),
+      fetchSupabaseVideos({ search, statusFilter, isPremium, validationStatus }),
     ]);
 
-    // Merge and sort newest first
-    const all = [...rtdbVideos, ...supabaseVideos].sort((a, b) => {
-      return new Date(b.uploadDate || 0).getTime() - new Date(a.uploadDate || 0).getTime();
-    });
+    let all = [...rtdbVideos, ...supabaseVideos];
+    if (validationStatus) {
+      all = all.filter((v) => v.validationStatus === validationStatus);
+    }
+    all.sort((a, b) => new Date(b.uploadDate || 0).getTime() - new Date(a.uploadDate || 0).getTime());
 
     const total = all.length;
     const videos = all.slice(offset, offset + limit);
@@ -237,10 +259,70 @@ export async function updateVideoStatus(req, res) {
       return res.json({ message: `Video ${status} successfully.` });
     }
 
-    const { error } = await supabase.from('tiktok_videos').update({ status }).eq('video_id', id);
+    const updates = { status };
+    if (status === 'blocked' || status === 'removed') {
+      updates.playable = false;
+      updates.validation_status = 'unsupported';
+    }
+    const { error } = await supabase.from('tiktok_videos').update(updates).eq('video_id', id);
     if (error) return res.status(500).json({ message: error.message });
     await logAction(req.admin?.id, req.admin?.name, `Video ${status}`, 'video', id, { reason, status });
     return res.json({ message: `Video ${status} successfully.` });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function revalidateVideos(req, res) {
+  try {
+    const dryRun = String(req.query.dryRun || '0') === '1';
+    const { data: rows, error } = await supabase.from('tiktok_videos').select('video_id, storage_url, stream_url, embed_url, source');
+    if (error) return res.status(500).json({ message: error.message });
+
+    let updated = 0;
+    let unsupported = 0;
+    const results = [];
+
+    for (const row of rows || []) {
+      const validation = validateVideoPlaybackSource({
+        source: 'community',
+        streamUrl: row.stream_url || row.storage_url,
+        storage_url: row.storage_url,
+        videoUrl: row.storage_url,
+        embedUrl: row.embed_url,
+      });
+      if (!validation.playable) unsupported += 1;
+      results.push({ videoId: row.video_id, ...validation });
+      if (!dryRun) {
+        const { error: upErr } = await supabase
+          .from('tiktok_videos')
+          .update({
+            playable: validation.playable,
+            source_type: validation.sourceType,
+            embed_allowed: validation.embedAllowed,
+            validation_status: validation.validationStatus,
+            playback_url: validation.playbackUrl || null,
+            ...(validation.playable ? {} : { status: 'removed' }),
+          })
+          .eq('video_id', row.video_id);
+        if (!upErr) updated += 1;
+      }
+    }
+
+    await logAction(req.admin?.id, req.admin?.name, 'Bulk revalidate videos', 'video', 'bulk', {
+      dryRun,
+      total: (rows || []).length,
+      updated,
+      unsupported,
+    });
+
+    return res.json({
+      dryRun,
+      total: (rows || []).length,
+      updated: dryRun ? 0 : updated,
+      unsupported,
+      sample: results.slice(0, 20),
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

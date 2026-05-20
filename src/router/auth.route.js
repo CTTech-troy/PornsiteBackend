@@ -46,12 +46,6 @@ const ageConsentVal = [
   validateRequest
 ];
 
-const approveCreatorVal = [
-  body('user_id').notEmpty().withMessage('user_id is required'),
-  body('approve').isBoolean().withMessage('approve must be a boolean'),
-  validateRequest
-];
-
 const verifyEmailVal = [
   body('token').notEmpty().withMessage('token is required'),
   validateRequest
@@ -104,7 +98,6 @@ router.post('/verify-otp', ...limitAuth, verifyOTPVal, otpController.verifyOTPHa
 // Accept multipart/form-data for creator applications (forms + optional files).
 // Use the same `upload` instance (memory storage) so files are available as `req.files`.
 router.post('/apply-creator', ...limitAuth, requireAuth, requireVerifiedEmail, upload.any(), authController.applyCreator);
-router.post('/approve-creator', ...limitAuth, approveCreatorVal, authController.approveCreator);
 
 // Media upload (multipart/form-data with field `file`)
 router.post('/media/upload', requireAuth, requireVerifiedEmail, upload.single('file'), authController.uploadMedia);

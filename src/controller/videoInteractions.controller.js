@@ -4,17 +4,13 @@
  * tiktok_video_views via atomic RPCs.
  */
 import { supabase } from '../config/supabase.js';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function isValidUuid(s) {
-  return typeof s === 'string' && UUID_RE.test(s);
-}
+import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoIdValidation.js';
 
 export async function getLikeStatus(req, res) {
   try {
     const uid = req.uid;
     const { videoId } = req.params;
-    if (!isValidUuid(videoId)) return res.json({ liked: false, totalLikes: 0, totalComments: 0 });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { liked: false, totalLikes: 0, totalComments: 0 });
     if (!supabase)              return res.json({ liked: false, totalLikes: 0, totalComments: 0 });
 
     const { data: video } = await supabase
@@ -47,7 +43,7 @@ export async function likeVideo(req, res) {
     const uid = req.uid;
     if (!uid)                   return res.status(401).json({ error: 'Authentication required' });
     const { videoId } = req.params;
-    if (!isValidUuid(videoId))  return res.status(400).json({ error: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!supabase)              return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
 
     const { data: result, error } = await supabase.rpc('like_video', {
@@ -67,7 +63,7 @@ export async function unlikeVideo(req, res) {
     const uid = req.uid;
     if (!uid)                   return res.status(401).json({ error: 'Authentication required' });
     const { videoId } = req.params;
-    if (!isValidUuid(videoId))  return res.status(400).json({ error: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!supabase)              return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
 
     const { data: result, error } = await supabase.rpc('unlike_video', {
@@ -85,7 +81,7 @@ export async function unlikeVideo(req, res) {
 export async function getComments(req, res) {
   try {
     const { videoId } = req.params;
-    if (!isValidUuid(videoId)) return res.status(400).json({ error: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: [] });
     if (!supabase)             return res.json({ data: [] });
 
     const { data, error } = await supabase
@@ -115,7 +111,7 @@ export async function addComment(req, res) {
     if (!uid)                   return res.status(401).json({ error: 'Authentication required' });
     const { videoId } = req.params;
     const text = (req.body?.text || '').trim();
-    if (!isValidUuid(videoId))  return res.status(400).json({ error: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!text)                  return res.status(400).json({ error: 'Comment text is required' });
     if (!supabase)              return res.status(503).json({ error: 'Video interactions temporarily unavailable.' });
 
@@ -162,7 +158,7 @@ export async function addComment(req, res) {
 export async function recordPublicVideoView(req, res) {
   try {
     const { videoId } = req.params;
-    if (!isValidUuid(videoId)) return res.status(400).json({ error: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!supabase)             return res.json({ success: true, views: 0 });
 
     const sessionId = String(req.body?.sessionId || '').trim();

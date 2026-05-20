@@ -107,9 +107,11 @@ export async function getSystemHealth(req, res) {
     } catch (_) {}
 
     let totalUsers = 0;
+    let userSourceCounts = null;
     try {
       const u = await getUserDirectoryAggregateStats();
-      totalUsers = u.totalUsers;
+      totalUsers = u.mergedTotal || u.totalUsers;
+      userSourceCounts = u.sourceCounts || null;
     } catch (_) {}
 
     // Count active subscriptions
@@ -141,6 +143,7 @@ export async function getSystemHealth(req, res) {
       },
       stats: {
         totalUsers,
+        userSourceCounts,
         activeLives,
         activeSubscriptions,
         pendingPayouts,
@@ -232,13 +235,14 @@ export async function getStats(req, res) {
     return res.json({
       users: {
         total: userDir.totalUsers,
-        totalIncludingFirebase: userDir.totalUsers + (userDir.firebaseOnlyUsers || 0),
+        totalIncludingFirebase: userDir.totalUsers,
         firebaseOnly: userDir.firebaseOnlyUsers || 0,
         verified: userDir.emailVerifiedUsers,
         active: activeUsers,
         newToday: userDir.newToday,
         suspended: userDir.suspendedUsers,
         banned: userDir.bannedUsers,
+        sourceCounts: userDir.sourceCounts || null,
       },
       creators: {
         total: userDir.creatorsTotal,
