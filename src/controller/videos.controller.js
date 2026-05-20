@@ -1,6 +1,7 @@
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 import { supabase, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { filterPlayableVideos } from '../utils/videoPlaybackValidation.js';
 
 function videosRef() {
   const rtdb = getFirebaseRtdb();
@@ -74,7 +75,10 @@ export async function listPosts(req, res) {
     // Merge and sort
     let list = [...rtdbList, ...supabaseList].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-    const enriched = await Promise.all(list.map((row) => mergeCreatorIntoPublicVideo(row)));
+    let enriched = await Promise.all(list.map((row) => mergeCreatorIntoPublicVideo(row)));
+    if (!isOwner) {
+      enriched = filterPlayableVideos(enriched);
+    }
     return res.json({ success: true, data: enriched });
   } catch (err) {
     console.error('posts.listPosts error', err?.message || err);

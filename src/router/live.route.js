@@ -1,7 +1,9 @@
 import express from 'express';
 import crypto from 'crypto';
+import { AccessToken } from 'livekit-server-sdk';
 import * as liveCtrl from '../controller/live.controller.js';
 import { requireAuth } from '../middleware/authFirebase.js';
+import { resolveUidFromBearerToken } from '../utils/sessionToken.js';
 
 const router = express.Router();
 
@@ -61,6 +63,54 @@ router.post('/start', async (req, res) => {
       return res.status(409).json({ ok: false, error: msg });
     }
     res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+router.post('/livekit-token', async (req, res) => {
+  const { liveId, userId, isHost = false } = req.body || {};
+  const roomName = String(liveId || '').trim();
+  const identity = String(userId || '').trim();
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+
+  if (!roomName || !identity) {
+    return res.status(400).json({ ok: false, error: 'liveId and userId are required' });
+  }
+  if (!apiKey || !apiSecret) {
+    return res.status(503).json({ ok: false, error: 'LiveKit is not configured' });
+  }
+
+  try {
+    const live = await liveCtrl.getLive(roomName);
+    if (!live) return res.status(404).json({ ok: false, error: 'Live stream not found' });
+
+    if (isHost) {
+      const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+      const uid = bearer ? await resolveUidFromBearerToken(bearer) : null;
+      if (!uid) return res.status(401).json({ ok: false, error: 'Authentication required' });
+      if (String(uid) !== String(live.host_id) || String(identity) !== String(uid)) {
+        return res.status(403).json({ ok: false, error: 'Only the host can publish this live stream' });
+      }
+    }
+
+    const token = new AccessToken(apiKey, apiSecret, {
+      identity: identity.slice(0, 120),
+      name: identity.slice(0, 120),
+      ttl: '2h',
+    });
+    token.addGrant({
+      roomJoin: true,
+      room: roomName,
+      canPublish: Boolean(isHost),
+      canSubscribe: true,
+      canPublishData: true,
+      roomAdmin: Boolean(isHost),
+    });
+
+    return res.json({ ok: true, token: await token.toJwt() });
+  } catch (err) {
+    console.error('live.livekit-token error', err?.message || err);
+    return res.status(500).json({ ok: false, error: 'Could not create live stream token' });
   }
 });
 

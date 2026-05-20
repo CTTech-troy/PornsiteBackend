@@ -1,7 +1,7 @@
 import { getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { supabase, isConfigured } from '../config/supabase.js';
-import { sendVerificationEmail, sendApplicationDecisionEmail, sendPasswordResetEmail } from '../services/emailService.js';
-import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../services/emailService.js';
+import { insertUser, insertCreatorApplication, getUserCreatorStatus, updateUserWithCreatorApplication, insertMedia } from '../config/dbFallback.js';
 import { encryptApplicationData } from '../config/encrypt.js';
 import { v4 as uuidv4 } from 'uuid';
 import { upsertCreator } from './creators.controller.js';
@@ -29,13 +29,81 @@ import {
   isLocalDevUrlsConfigured,
 } from '../utils/authPublicUrls.js';
 
+const MIN_CREATOR_AGE = 18;
+
+function parseDateOfBirth(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const [, year, month, day] = match;
+    const dob = new Date(Number(year), Number(month) - 1, Number(day));
+    if (
+      dob.getFullYear() !== Number(year) ||
+      dob.getMonth() !== Number(month) - 1 ||
+      dob.getDate() !== Number(day)
+    ) {
+      return null;
+    }
+    return dob;
+  }
+  const dob = new Date(raw);
+  return Number.isNaN(dob.getTime()) ? null : dob;
+}
+
+function calculateAge(value) {
+  const dob = parseDateOfBirth(value);
+  if (!dob) return null;
+  const today = new Date();
+  if (dob > today) return null;
+  let age = today.getFullYear() - dob.getFullYear();
+  const monthDiff = today.getMonth() - dob.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) age -= 1;
+  return age;
+}
+
+function normalizeDateOnly(value) {
+  const dob = parseDateOfBirth(value);
+  if (!dob) return '';
+  const year = dob.getFullYear();
+  const month = String(dob.getMonth() + 1).padStart(2, '0');
+  const day = String(dob.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getApplicationDob(applicationData = {}) {
+  return (
+    applicationData.dateOfBirth ||
+    applicationData.dob ||
+    applicationData.date_of_birth ||
+    applicationData.birthDate ||
+    applicationData.birth_date ||
+    ''
+  );
+}
+
+function validateCreatorMinimumAge(applicationData = {}) {
+  const dobValue = getApplicationDob(applicationData);
+  if (!dobValue) {
+    return { ok: false, status: 400, message: 'Date of birth is required to apply as a creator.' };
+  }
+  const age = calculateAge(dobValue);
+  if (age == null) {
+    return { ok: false, status: 400, message: 'Enter a valid date of birth.' };
+  }
+  if (age < MIN_CREATOR_AGE) {
+    return { ok: false, status: 403, message: `You must be at least ${MIN_CREATOR_AGE} years old to apply as a creator.` };
+  }
+  return { ok: true, age, dateOfBirth: normalizeDateOnly(dobValue) };
+}
+
 /** Fetch balance + social counts + email_verified from Supabase for a given uid. Never throws. */
 async function _getSupabaseProfile(uid) {
   if (!uid || !isConfigured() || !supabase) return {};
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('avatar, followers, following, coin_balance, email_verified, email, username, role')
+      .select('avatar, followers, following, coin_balance, email_verified, email, username, role, creator_application_ban')
       .eq('id', uid)
       .maybeSingle();
     if (error || !data) return {};
@@ -47,10 +115,47 @@ async function _getSupabaseProfile(uid) {
       tokenBalance:  Number(data.coin_balance ?? 0),
       coinBalance:   Number(data.coin_balance ?? 0),
       emailVerified: evParsed === true ? true : evParsed === false ? false : null,
+      creatorApplicationBan: data.creator_application_ban || null,
     };
   } catch {
     return {};
   }
+}
+
+function isCreatorApplicationBanActive(ban) {
+  if (!ban || typeof ban !== 'object' || ban.banned !== true) return false;
+  if (!ban.expiresAt) return true;
+  const expires = new Date(String(ban.expiresAt));
+  return Number.isNaN(expires.getTime()) || expires > new Date();
+}
+
+async function getCreatorApplicationBan(uid) {
+  let ban = null;
+  if (isConfigured() && supabase) {
+    try {
+      const { data } = await supabase
+        .from('users')
+        .select('creator_application_ban')
+        .eq('id', uid)
+        .maybeSingle();
+      ban = data?.creator_application_ban || null;
+    } catch (_) {}
+  }
+  if (!isCreatorApplicationBanActive(ban)) {
+    try {
+      const db = getFirebaseDb();
+      const snap = db ? await db.collection('users').doc(uid).get() : null;
+      if (snap?.exists) ban = snap.data()?.creatorApplicationBan || ban;
+    } catch (_) {}
+  }
+  if (!isCreatorApplicationBanActive(ban)) {
+    try {
+      const rtdb = getFirebaseRtdb();
+      const snap = rtdb ? await rtdb.ref(`users/${uid}/creatorApplicationBan`).once('value') : null;
+      ban = snap?.val() || ban;
+    } catch (_) {}
+  }
+  return isCreatorApplicationBanActive(ban) ? ban : null;
 }
 
 export async function signup(req, res) {
@@ -131,8 +236,28 @@ export async function signup(req, res) {
       console.error('Firestore user stub on signup:', dbErr?.message || dbErr);
     }
 
+    try {
+      await insertUser(userPayload);
+    } catch (insErr) {
+      console.error('insertUser on signup:', insErr?.message || insErr);
+      try {
+        await auth.deleteUser(uid);
+      } catch (_) {}
+      recordAuth('signupFail');
+      return res.status(503).json({
+        success: false,
+        message: 'Could not finish registration. Please try again or contact support.',
+      });
+    }
+
     const tokenResult = await createVerificationToken(uid, emailNorm);
     if (!tokenResult.ok) {
+      try {
+        await invalidateUnusedTokensForUser(uid);
+      } catch (_) {}
+      try {
+        if (isConfigured() && supabase) await supabase.from('users').delete().eq('id', uid);
+      } catch (_) {}
       try {
         await auth.deleteUser(uid);
       } catch (_) {}
@@ -144,23 +269,6 @@ export async function signup(req, res) {
       });
     }
     const rawToken = tokenResult.rawToken;
-
-    try {
-      await insertUser(userPayload);
-    } catch (insErr) {
-      console.error('insertUser on signup:', insErr?.message || insErr);
-      try {
-        await invalidateUnusedTokensForUser(uid);
-      } catch (_) {}
-      try {
-        await auth.deleteUser(uid);
-      } catch (_) {}
-      recordAuth('signupFail');
-      return res.status(503).json({
-        success: false,
-        message: 'Could not finish registration. Please try again or contact support.',
-      });
-    }
 
     const verificationUrl = buildAppVerificationUrl(rawToken);
     let verificationEmailSent = false;
@@ -234,16 +342,11 @@ export async function submitAgeConsent(req, res) {
     if (!consent) return res.status(400).json({ success: false, message: 'Consent required' });
     if (!dob) return res.status(400).json({ success: false, message: 'Date of birth required' });
 
-    const birth = new Date(dob);
-    if (isNaN(birth.getTime())) return res.status(400).json({ success: false, message: 'Invalid dob' });
+    const birth = parseDateOfBirth(dob);
+    const age = calculateAge(dob);
+    if (!birth || age == null) return res.status(400).json({ success: false, message: 'Invalid dob' });
 
-    // Calculate age
-    const now = new Date();
-    let age = now.getFullYear() - birth.getFullYear();
-    const m = now.getMonth() - birth.getMonth();
-    if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) age--;
-
-    if (age < 18) return res.status(403).json({ success: false, message: 'Must be 18 or older' });
+    if (age < MIN_CREATOR_AGE) return res.status(403).json({ success: false, message: `Must be ${MIN_CREATOR_AGE} or older` });
 
     // Fetch user record from Firebase to get email/displayName
     const userRecord = await auth.getUser(uid);
@@ -323,6 +426,18 @@ export async function applyCreator(req, res) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
 
+    const creatorBan = await getCreatorApplicationBan(uid);
+    if (creatorBan) {
+      return res.status(403).json({
+        success: false,
+        code: 'CREATOR_APPLICATION_BANNED',
+        message: creatorBan.expiresAt
+          ? `You cannot submit a creator application until ${new Date(creatorBan.expiresAt).toLocaleDateString()}.`
+          : 'You are currently not allowed to submit a creator application.',
+        creatorApplicationBan: creatorBan,
+      });
+    }
+
     // Support both JSON body and multipart/form-data (fields + files).
     // If client uses multipart, form fields will be strings; `applicationData` may be JSON string.
     let applicationData = req.body && req.body.applicationData ? req.body.applicationData : req.body || {};
@@ -334,6 +449,19 @@ export async function applyCreator(req, res) {
         applicationData = { raw: applicationData };
       }
     }
+
+    const ageGate = validateCreatorMinimumAge(applicationData);
+    if (!ageGate.ok) {
+      return res.status(ageGate.status).json({ success: false, message: ageGate.message });
+    }
+    applicationData = {
+      ...applicationData,
+      dateOfBirth: ageGate.dateOfBirth,
+      dob: ageGate.dateOfBirth,
+      ageAtSubmission: ageGate.age,
+      ageConfirmed: true,
+      minimumCreatorAge: MIN_CREATOR_AGE,
+    };
 
     // If there are uploaded files (req.files), upload them to Supabase and attach URLs
     const attachments = [];
@@ -505,117 +633,6 @@ export async function applyCreator(req, res) {
 }
 
 // Admin approves creator (legacy endpoint — kept for direct API use)
-export async function approveCreator(req, res) {
-  try {
-    const { user_id, approve, reason = '' } = req.body;
-
-    // SEC-06: Timing-safe admin secret comparison (header only, no query string)
-    const adminSecret = req.headers['x-admin-secret'];
-    const expectedSecret = process.env.ADMIN_SECRET;
-    if (!expectedSecret || !adminSecret) {
-      return res.status(401).json({ success: false, message: 'Not authorized' });
-    }
-    const a = Buffer.from(String(adminSecret));
-    const b = Buffer.from(String(expectedSecret));
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return res.status(401).json({ success: false, message: 'Not authorized' });
-    }
-
-    if (!user_id) return res.status(400).json({ success: false, message: 'user_id required' });
-
-    const newStatus = approve ? 'approved' : 'rejected';
-
-    // 1. Update user creator flag in Supabase + RTDB (always syncs both now)
-    try {
-      await updateUserCreatorStatus(user_id, approve);
-    } catch (err) {
-      console.warn('updateUserCreatorStatus failed:', err?.message || err);
-    }
-
-    // 2. Sync Firestore so /me returns updated creatorStatus immediately
-    const db = getFirebaseDb();
-    if (db) {
-      await db.collection('users').doc(user_id).set({
-        creatorStatus: newStatus,
-        creator: !!approve,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
-    }
-
-    // 3. Update creator_applications table status + upsert creators table on approval
-    let emailAddress = '';
-    let displayName = 'Creator';
-    try {
-      if (isConfigured() && supabase) {
-        const { data: app } = await supabase
-          .from('creator_applications')
-          .select('id, data, user_id')
-          .eq('user_id', user_id)
-          .in('status', ['pending', 'info_requested'])
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (app) {
-          await supabase
-            .from('creator_applications')
-            .update({ status: newStatus, reviewed_at: new Date().toISOString() })
-            .eq('id', app.id);
-
-          try {
-            const { decryptApplicationData } = await import('../config/encrypt.js');
-            const appData = decryptApplicationData(app.data || {});
-            emailAddress = appData.email || '';
-            displayName = [appData.firstName, appData.lastName].filter(Boolean).join(' ') || '';
-            if (approve) {
-              const creatorType = appData.creator_type === 'channel' ? 'channel' : 'pstar';
-              await upsertCreator(user_id, { verified: true, creator_type: creatorType });
-            }
-          } catch (_) {}
-        }
-
-        if (!emailAddress) {
-          const { data: userRow } = await supabase.from('users').select('email, username').eq('id', user_id).maybeSingle();
-          emailAddress = userRow?.email || '';
-          displayName = displayName || userRow?.username || 'Creator';
-        }
-      }
-    } catch (dbErr) {
-      console.warn('approveCreator: DB application update failed:', dbErr?.message || dbErr);
-    }
-
-    // Fallback: resolve email from Firebase Auth
-    if (!emailAddress) {
-      try {
-        const auth = getFirebaseAuth();
-        if (auth) {
-          const userRecord = await auth.getUser(user_id);
-          emailAddress = userRecord.email || '';
-          displayName = displayName || userRecord.displayName || 'Creator';
-        }
-      } catch (_) {}
-    }
-
-    // 4. Send decision email
-    if (emailAddress) {
-      try {
-        await sendApplicationDecisionEmail({
-          to: emailAddress,
-          name: displayName || 'Creator',
-          status: newStatus,
-          reason: reason || '',
-        });
-      } catch (emailErr) {
-        console.warn('approveCreator: decision email failed:', emailErr?.message || emailErr);
-      }
-    }
-
-    return res.status(200).json({ success: true, message: 'Creator status updated', emailSent: !!emailAddress });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-}
-
 // Media upload: accepts file via multer and uploads to Supabase Storage
 export async function uploadMedia(req, res) {
   try {
@@ -765,6 +782,10 @@ export async function me(req, res) {
         coinBalance:   supaProfile.coinBalance  ?? 0,
         emailVerified: !!(userRecord.emailVerified || supaProfile.emailVerified === true),
         createdAt:     (userDoc?.exists ? userDoc.data()?.createdAt : null) ?? null,
+        creatorApplicationBan:
+          supaProfile.creatorApplicationBan ||
+          (userDoc?.exists ? userDoc.data()?.creatorApplicationBan : null) ||
+          null,
       },
     });
   } catch (error) {

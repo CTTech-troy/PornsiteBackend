@@ -1,9 +1,9 @@
 import { supabase, isConfigured } from '../config/supabase.js';
-import { getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
+import { admin, getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 
 export function paginateAdmin(page, limit) {
   const p = Math.max(1, parseInt(page, 10) || 1);
-  const l = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const l = Math.min(500, Math.max(1, parseInt(limit, 10) || 50));
   return { page: p, limit: l, offset: (p - 1) * l };
 }
 
@@ -28,23 +28,65 @@ export function rowToAdminUserDto(u) {
   const fullName = String(u.full_name || u.display_name || u.displayName || u.name || username || '').trim() || username;
   const rawA = u.avatar_url || u.avatar || u.photoURL || null;
   const avatar = rawA && String(rawA).trim() ? String(rawA).trim() : defaultAvatarUrl(email || u.id);
+  const createdAt = u.created_at || u.createdAt || null;
+  const updatedAt = u.updated_at || u.updatedAt || createdAt || null;
+  const isCreator = !!(u.creator === true || u.is_creator === true);
+  const rawCreatorStatus = String(
+    u.creator_status || u.creatorStatus || (typeof u.verified === 'string' ? u.verified : '') || ''
+  ).trim();
+  const creatorStatus = isCreator
+    ? 'approved'
+    : (['pending', 'rejected', 'info_requested'].includes(rawCreatorStatus) ? rawCreatorStatus : 'none');
+  const accountStatus = u.banned ? 'banned' : u.suspended ? 'suspended' : 'active';
+  const coinBalance = Number(u.coin_balance ?? u.coinBalance ?? u.balance) || 0;
+  const isVerified = !!(u.email_verified === true || u.emailVerified === true || u.is_verified === true);
   return {
     id: u.id,
     username,
+    display_name: fullName,
     fullName,
+    full_name: fullName,
     email,
+    avatar_url: avatar,
     avatar,
-    verified: !!(u.email_verified === true || u.emailVerified === true),
+    verified: isVerified,
+    is_verified: isVerified,
     role: u.role || 'user',
-    createdAt: u.created_at || u.createdAt || null,
-    updatedAt: u.updated_at || u.updatedAt || u.created_at || u.createdAt || null,
-    isCreator: !!(u.creator || u.is_creator),
-    creatorStatus: typeof u.verified === 'string' ? u.verified : (u.creator_status || 'none'),
-    accountStatus: u.banned ? 'banned' : u.suspended ? 'suspended' : 'active',
+    createdAt,
+    created_at: createdAt,
+    updatedAt,
+    updated_at: updatedAt,
+    isCreator,
+    is_creator: isCreator,
+    creatorStatus,
+    creator_status: creatorStatus,
+    accountStatus,
+    status: accountStatus,
     followers: Number(u.followers) || 0,
     following: Number(u.following) || 0,
-    coinBalance: Number(u.coin_balance ?? u.coinBalance ?? u.balance) || 0,
+    coinBalance,
+    coin_balance: coinBalance,
+    active_plan: u.active_plan || u.activePlan || null,
+    plan_expires_at: u.plan_expires_at || u.planExpiresAt || null,
+    auth_provider: u.auth_provider || (Array.isArray(u.source_tags) && u.source_tags.some((s) => String(s).startsWith('firebase')) ? 'firebase' : null),
+    source: u.source || (Array.isArray(u.source_tags) ? u.source_tags.join('+') : null),
+    source_tags: Array.isArray(u.source_tags) ? u.source_tags : [],
+    firebase_uid: u.firebase_uid || u.firestore_uid || u.rtdb_uid || null,
+    firestore_uid: u.firestore_uid || null,
+    rtdb_uid: u.rtdb_uid || null,
+    supabase_user_id: u.supabase_user_id || null,
   };
+}
+
+function dateLikeToIso(value) {
+  if (!value) return null;
+  if (typeof value?.toDate === 'function') {
+    return firebaseTimeToIso(value.toDate());
+  }
+  if (typeof value === 'object' && Number.isFinite(value._seconds)) {
+    return new Date(value._seconds * 1000).toISOString();
+  }
+  return firebaseTimeToIso(value);
 }
 
 export function rtdbUserToRow(id, u) {
@@ -65,14 +107,397 @@ export function rtdbUserToRow(id, u) {
     verified: o.creatorStatus ?? o.verified,
     followers: o.followers,
     following: o.following,
-    created_at: o.created_at || o.createdAt,
-    updated_at: o.updated_at || o.updatedAt,
+    created_at: dateLikeToIso(o.created_at || o.createdAt),
+    updated_at: dateLikeToIso(o.updated_at || o.updatedAt),
     banned: o.banned,
     suspended: o.suspended,
+    rtdb_uid: id,
+    auth_provider: 'firebase',
+    source: 'firebase_rtdb',
+  };
+}
+
+export function firestoreUserDocToRow(id, u) {
+  const o = typeof u === 'object' && u !== null ? u : {};
+  const email = String(o.email || '').trim().toLowerCase();
+  const displayName = String(o.display_name || o.displayName || o.full_name || o.name || '').trim();
+  const username = String(o.username || displayName || (email ? email.split('@')[0] : '') || id).trim();
+  return {
+    ...o,
+    id,
+    username,
+    email,
+    full_name: o.full_name || o.fullName || displayName || username,
+    display_name: o.display_name || o.displayName || displayName || username,
+    avatar_url: o.avatar_url || o.avatar || o.photoURL || null,
+    avatar: o.avatar || o.avatar_url || o.photoURL || null,
+    email_verified: !!(o.email_verified || o.emailVerified),
+    emailVerified: !!(o.emailVerified || o.email_verified),
+    role: o.role || 'user',
+    creator: !!o.creator,
+    creator_status: o.creatorStatus || o.creator_status || o.verified || 'none',
+    verified: o.verified || o.creatorStatus || 'none',
+    followers: o.followers,
+    following: o.following,
+    coin_balance: o.coin_balance ?? o.coinBalance ?? o.tokenBalance,
+    created_at: dateLikeToIso(o.created_at || o.createdAt),
+    updated_at: dateLikeToIso(o.updated_at || o.updatedAt),
+    banned: o.banned,
+    suspended: o.suspended,
+    firestore_uid: id,
+    firebase_uid: id,
+    auth_provider: 'firebase',
+    source: 'firebase_firestore',
   };
 }
 
 const MAX_RTDB_USER_SCAN = 8000;
+const MAX_AUTH_USER_SCAN = 10000;
+const MAX_FIRESTORE_USER_SCAN = 10000;
+const DIRECTORY_PROVIDER_TIMEOUT_MS = Math.max(3000, Number(process.env.ADMIN_DIRECTORY_PROVIDER_TIMEOUT_MS) || 12000);
+
+function hasValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function withTimeout(promise, label, timeoutMs = DIRECTORY_PROVIDER_TIMEOUT_MS) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function firebaseTimeToIso(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+export function firebaseAuthUserToRow(userRecord) {
+  const u = userRecord || {};
+  const email = String(u.email || '').trim().toLowerCase();
+  const displayName = String(u.displayName || '').trim();
+  const username = displayName || (email ? email.split('@')[0] : '') || u.uid;
+  return {
+    id: u.uid,
+    username,
+    email,
+    full_name: displayName || username,
+    display_name: displayName || username,
+    avatar_url: u.photoURL || null,
+    avatar: u.photoURL || null,
+    email_verified: u.emailVerified === true,
+    emailVerified: u.emailVerified === true,
+    role: 'user',
+    creator: false,
+    creator_status: 'none',
+    verified: 'none',
+    created_at: firebaseTimeToIso(u.metadata?.creationTime),
+    updated_at: firebaseTimeToIso(u.metadata?.lastSignInTime) || firebaseTimeToIso(u.metadata?.lastRefreshTime),
+    banned: false,
+    suspended: u.disabled === true,
+    firebase_uid: u.uid,
+    auth_provider: 'firebase',
+    source: 'firebase_auth',
+  };
+}
+
+async function listFirebaseAuthRows() {
+  const auth = getFirebaseAuth();
+  if (!auth) return [];
+  const rows = [];
+  let pageToken;
+  try {
+    do {
+      const result = await withTimeout(auth.listUsers(1000, pageToken), 'Firebase Auth listUsers');
+      for (const userRecord of result.users || []) {
+        if (rows.length >= MAX_AUTH_USER_SCAN) break;
+        rows.push(firebaseAuthUserToRow(userRecord));
+      }
+      pageToken = result.pageToken;
+    } while (pageToken && rows.length < MAX_AUTH_USER_SCAN);
+    if (pageToken) {
+      console.warn('[userDirectory] Firebase Auth user scan capped');
+    }
+  } catch (err) {
+    console.warn('[userDirectory] listFirebaseAuthRows', err?.message || err);
+  }
+  return rows;
+}
+
+async function listSupabaseUserRows() {
+  if (!isConfigured() || !supabase) return [];
+  const rows = [];
+  const CHUNK = 1000;
+  for (let from = 0; from < MAX_AUTH_USER_SCAN; from += CHUNK) {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .range(from, from + CHUNK - 1);
+    if (error) throw error;
+    const batch = (data || []).map((row) => ({
+      ...row,
+      supabase_user_id: row.id,
+      source: 'supabase',
+    }));
+    rows.push(...batch);
+    if (batch.length < CHUNK) break;
+  }
+  return rows;
+}
+
+async function listFirestoreUserRows() {
+  const db = getFirebaseDb();
+  if (!db) return [];
+  const rows = [];
+  const CHUNK = 500;
+  let lastDoc = null;
+  try {
+    do {
+      let query = db
+        .collection('users')
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .limit(CHUNK);
+      if (lastDoc) query = query.startAfter(lastDoc);
+      const snap = await withTimeout(query.get(), 'Firestore users scan');
+      if (snap.empty) break;
+      for (const doc of snap.docs) {
+        if (rows.length >= MAX_FIRESTORE_USER_SCAN) break;
+        rows.push(firestoreUserDocToRow(doc.id, doc.data() || {}));
+      }
+      lastDoc = snap.docs[snap.docs.length - 1] || null;
+      if (snap.size < CHUNK) break;
+    } while (lastDoc && rows.length < MAX_FIRESTORE_USER_SCAN);
+    if (rows.length >= MAX_FIRESTORE_USER_SCAN) {
+      console.warn('[userDirectory] Firestore user scan capped');
+    }
+  } catch (err) {
+    console.warn('[userDirectory] listFirestoreUserRows', err?.message || err);
+  }
+  return rows;
+}
+
+async function listRtdbUserRows() {
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return [];
+  try {
+    const snap = await withTimeout(rtdb.ref('users').once('value'), 'Firebase RTDB users scan');
+    const val = snap.val();
+    if (!val || typeof val !== 'object') return [];
+    const ids = Object.keys(val).filter(Boolean);
+    if (ids.length > MAX_RTDB_USER_SCAN) {
+      console.warn('[userDirectory] RTDB user scan capped for admin list');
+    }
+    return ids
+      .slice(0, MAX_RTDB_USER_SCAN)
+      .map((id) => rtdbUserToRow(id, typeof val[id] === 'object' && val[id] !== null ? val[id] : {}));
+  } catch (err) {
+    console.warn('[userDirectory] listRtdbUserRows', err?.message || err);
+    return [];
+  }
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function sourceTagForRow(row) {
+  const source = String(row?.source || '').trim();
+  if (source) return source;
+  if (row?.supabase_user_id) return 'supabase';
+  if (row?.firestore_uid) return 'firebase_firestore';
+  if (row?.rtdb_uid) return 'firebase_rtdb';
+  if (row?.firebase_uid) return 'firebase_auth';
+  return '';
+}
+
+function mergeUserRowsById(...sources) {
+  const map = new Map();
+  const idIndex = new Map();
+  const emailIndex = new Map();
+  for (const rows of sources) {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row?.id && !row?.email) continue;
+      const id = String(row.id || '').trim();
+      const email = normalizeEmail(row.email);
+      const existingKey = (id && idIndex.get(id)) || (email && emailIndex.get(email));
+      const key = existingKey || id || `email:${email}`;
+      const current = map.get(key) || { id };
+      const sourceTag = sourceTagForRow(row);
+      const sourceTags = new Set(Array.isArray(current.source_tags) ? current.source_tags : []);
+      if (sourceTag) sourceTags.add(sourceTag);
+
+      if (id) {
+        if (sourceTag === 'supabase' && !current.supabase_user_id) current.supabase_user_id = id;
+        if (sourceTag === 'firebase_auth' && !current.firebase_uid) current.firebase_uid = id;
+        if (sourceTag === 'firebase_firestore' && !current.firestore_uid) current.firestore_uid = id;
+        if (sourceTag === 'firebase_rtdb' && !current.rtdb_uid) current.rtdb_uid = id;
+      }
+
+      for (const [key, value] of Object.entries(row)) {
+        if (key === 'id' || key === 'source' || key === 'source_tags') continue;
+        if (hasValue(value) || typeof value === 'boolean' || value === 0) {
+          current[key] = value;
+        }
+      }
+      if (!current.id && id) current.id = id;
+      current.source_tags = [...sourceTags];
+      current.source = current.source_tags.join('+');
+      map.set(key, current);
+      if (id) idIndex.set(id, key);
+      if (email) emailIndex.set(email, key);
+    }
+  }
+  return [...map.values()];
+}
+
+function rowHasSource(row, source) {
+  return Array.isArray(row?.source_tags) && row.source_tags.includes(source);
+}
+
+function rowHasFirebaseSource(row) {
+  return Array.isArray(row?.source_tags) && row.source_tags.some((source) => String(source).startsWith('firebase'));
+}
+
+function buildDirectorySourceCounts(rows, sourceRows) {
+  const mergedRows = Array.isArray(rows) ? rows : [];
+  const supabaseRows = sourceRows?.supabaseRows || [];
+  const authRows = sourceRows?.authRows || [];
+  const firestoreRows = sourceRows?.firestoreRows || [];
+  const rtdbRows = sourceRows?.rtdbRows || [];
+  const rawSourceTotal = supabaseRows.length + authRows.length + firestoreRows.length + rtdbRows.length;
+
+  return {
+    mergedTotal: mergedRows.length,
+    rawSourceTotal,
+    supabaseTotal: supabaseRows.length,
+    firebaseAuthTotal: authRows.length,
+    firestoreTotal: firestoreRows.length,
+    rtdbTotal: rtdbRows.length,
+    firebaseSourceTotal: authRows.length + firestoreRows.length + rtdbRows.length,
+    firebaseOnlyTotal: mergedRows.filter((row) => rowHasFirebaseSource(row) && !rowHasSource(row, 'supabase')).length,
+    supabaseOnlyTotal: mergedRows.filter((row) => rowHasSource(row, 'supabase') && !rowHasFirebaseSource(row)).length,
+    sharedProviderTotal: mergedRows.filter((row) => rowHasSource(row, 'supabase') && rowHasFirebaseSource(row)).length,
+    deduplicatedTotal: Math.max(0, rawSourceTotal - mergedRows.length),
+  };
+}
+
+async function collectMergedUserDirectoryRows({ includeCreatorState = true } = {}) {
+  const supabaseRowsPromise = (async () => {
+    try {
+      return await listSupabaseUserRows();
+    } catch (err) {
+      console.warn('[userDirectory] listSupabaseUserRows', err?.message || err);
+      return [];
+    }
+  })();
+
+  const [supabaseRows, authRows, firestoreRows, rtdbRows] = await Promise.all([
+    supabaseRowsPromise,
+    listFirebaseAuthRows(),
+    listFirestoreUserRows(),
+    listRtdbUserRows(),
+  ]);
+
+  let rows = mergeUserRowsById(authRows, firestoreRows, rtdbRows, supabaseRows);
+  if (includeCreatorState) rows = await applyCreatorState(rows);
+  const sourceRows = { supabaseRows, authRows, firestoreRows, rtdbRows };
+  return {
+    rows,
+    sourceRows,
+    counts: buildDirectorySourceCounts(rows, sourceRows),
+  };
+}
+
+async function getCreatorStateByUserId(userIds) {
+  const ids = [...new Set((userIds || []).filter(Boolean))];
+  const state = new Map();
+  if (!ids.length || !isConfigured() || !supabase) return state;
+
+  const CHUNK = 400;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    try {
+      const { data: creatorRows } = await supabase
+        .from('creators')
+        .select('user_id, creator_type')
+        .in('user_id', slice);
+      for (const row of creatorRows || []) {
+        if (!row?.user_id) continue;
+        state.set(row.user_id, {
+          ...(state.get(row.user_id) || {}),
+          isCreator: true,
+          creatorStatus: 'approved',
+          creatorType: row.creator_type || '',
+        });
+      }
+    } catch {
+      /* creator table may not exist yet */
+    }
+
+    try {
+      const { data: appRows } = await supabase
+        .from('creator_applications')
+        .select('user_id, status, created_at')
+        .in('user_id', slice)
+        .order('created_at', { ascending: false });
+      for (const app of appRows || []) {
+        if (!app?.user_id) continue;
+        const existing = state.get(app.user_id) || {};
+        if (!existing.applicationStatus) {
+          state.set(app.user_id, {
+            ...existing,
+            applicationStatus: app.status || 'pending',
+          });
+        }
+      }
+    } catch {
+      /* application table may not exist yet */
+    }
+  }
+  return state;
+}
+
+function candidateUserIdsForRow(row) {
+  return [
+    row?.id,
+    row?.supabase_user_id,
+    row?.firebase_uid,
+    row?.firestore_uid,
+    row?.rtdb_uid,
+  ].filter(Boolean);
+}
+
+async function applyCreatorState(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const state = await getCreatorStateByUserId(list.flatMap(candidateUserIdsForRow));
+  return list.map((row) => {
+    const creator = candidateUserIdsForRow(row).map((id) => state.get(id)).find(Boolean) || {};
+    const existingStatus = String(row.creator_status || row.creatorStatus || row.verified || '').trim();
+    const applicationStatus = creator.applicationStatus || null;
+    const isApproved =
+      creator.isCreator === true ||
+      row.creator === true ||
+      row.is_creator === true ||
+      existingStatus === 'approved';
+    const creatorStatus = isApproved
+      ? 'approved'
+      : applicationStatus || (['pending', 'rejected', 'info_requested'].includes(existingStatus) ? existingStatus : 'none');
+    return {
+      ...row,
+      creator: isApproved,
+      is_creator: isApproved,
+      creator_status: creatorStatus,
+      creatorStatus,
+      creator_type: creator.creatorType || row.creator_type || '',
+      verified: creatorStatus,
+    };
+  });
+}
 
 export function applyAdminDirectoryFilters(rows, { searchTrim, statusFilter, verifiedFilter }) {
   let out = Array.isArray(rows) ? [...rows] : [];
@@ -94,28 +519,9 @@ export function applyAdminDirectoryFilters(rows, { searchTrim, statusFilter, ver
 }
 
 export async function countFirebaseOnlyUsers() {
-  const rtdb = getFirebaseRtdb();
-  if (!rtdb || !isConfigured() || !supabase) return 0;
   try {
-    const snap = await rtdb.ref('users').once('value');
-    const val = snap.val();
-    if (!val || typeof val !== 'object') return 0;
-    const ids = Object.keys(val).filter(Boolean);
-    if (ids.length > MAX_RTDB_USER_SCAN) {
-      console.warn('[userDirectory] RTDB user scan capped for firebase-only count');
-    }
-    const capped = ids.slice(0, MAX_RTDB_USER_SCAN);
-    let missing = 0;
-    const CHUNK = 300;
-    for (let i = 0; i < capped.length; i += CHUNK) {
-      const slice = capped.slice(i, i + CHUNK);
-      const { data } = await supabase.from('users').select('id').in('id', slice);
-      const have = new Set((data || []).map((r) => r.id));
-      for (const id of slice) {
-        if (!have.has(id)) missing += 1;
-      }
-    }
-    return missing + Math.max(0, ids.length - capped.length);
+    const { counts } = await collectMergedUserDirectoryRows({ includeCreatorState: false });
+    return counts.firebaseOnlyTotal;
   } catch (e) {
     console.warn('[userDirectory] countFirebaseOnlyUsers', e?.message || e);
     return 0;
@@ -123,43 +529,21 @@ export async function countFirebaseOnlyUsers() {
 }
 
 export async function listFirebaseOnlyUsersForAdmin(query) {
-  const { search = '', statusFilter = '', verifiedFilter = '' } = query;
-  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 50));
+  const { search = '', verifiedFilter = '' } = query;
+  const statusFilter = query.statusFilter || query.status || '';
+  const { page, limit, offset } = paginateAdmin(query.page, query.limit || query.pageSize);
   const searchTrim = String(search || '').trim().replace(/,/g, ' ').slice(0, 120);
-  const rtdb = getFirebaseRtdb();
-  if (!rtdb || !isConfigured() || !supabase) {
-    return { users: [], total: 0 };
-  }
   try {
-    const snap = await rtdb.ref('users').once('value');
-    const val = snap.val();
-    if (!val || typeof val !== 'object') return { users: [], total: 0 };
-    const ids = Object.keys(val).filter(Boolean);
-    if (ids.length > MAX_RTDB_USER_SCAN) {
-      console.warn('[userDirectory] RTDB user scan capped for firebase-only list');
-    }
-    const capped = ids.slice(0, MAX_RTDB_USER_SCAN);
-    const missingIds = [];
-    const CHUNK = 300;
-    for (let i = 0; i < capped.length; i += CHUNK) {
-      const slice = capped.slice(i, i + CHUNK);
-      const { data } = await supabase.from('users').select('id').in('id', slice);
-      const have = new Set((data || []).map((r) => r.id));
-      for (const id of slice) {
-        if (!have.has(id)) missingIds.push(id);
-      }
-    }
-    let rows = missingIds.map((id) => rtdbUserToRow(id, typeof val[id] === 'object' && val[id] !== null ? val[id] : {}));
-    rows = applyAdminDirectoryFilters(rows, { searchTrim, statusFilter, verifiedFilter });
-    rows.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
-    const total = rows.length;
-    const sliced = rows.slice(0, limit);
-    const merged = await enrichUsersFromFirebase(sliced);
-    const users = merged.map(rowToAdminUserDto);
-    return { users, total };
+    const { rows } = await collectMergedUserDirectoryRows({ includeCreatorState: true });
+    let rowsOnly = rows.filter((row) => rowHasFirebaseSource(row) && !rowHasSource(row, 'supabase'));
+    rowsOnly = applyAdminDirectoryFilters(rowsOnly, { searchTrim, statusFilter, verifiedFilter });
+    rowsOnly.sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime());
+    const total = rowsOnly.length;
+    const users = rowsOnly.slice(offset, offset + limit).map(rowToAdminUserDto);
+    return { users, total, page, limit };
   } catch (e) {
     console.warn('[userDirectory] listFirebaseOnlyUsersForAdmin', e?.message || e);
-    return { users: [], total: 0 };
+    return { users: [], total: 0, page, limit };
   }
 }
 
@@ -223,7 +607,10 @@ export async function enrichUsersFromFirebase(users) {
   const authMap = new Map();
   for (const batch of chunks) {
     try {
-      const resp = await auth.getUsers(batch.map((uid) => ({ uid })));
+      const resp = await withTimeout(
+        auth.getUsers(batch.map((uid) => ({ uid }))),
+        'Firebase Auth getUsers'
+      );
       for (const r of resp.users || []) {
         authMap.set(r.uid, {
           email: (r.email || '').trim().toLowerCase(),
@@ -295,55 +682,26 @@ export async function enrichUsersFromFirebase(users) {
 export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
   const d = new Date(todayStart);
   d.setHours(0, 0, 0, 0);
-  const todayIso = d.toISOString();
+  const startMs = d.getTime();
+  const { rows, counts } = await collectMergedUserDirectoryRows({ includeCreatorState: true });
 
-  if (!isConfigured() || !supabase) {
-    return {
-      totalUsers: 0,
-      emailVerifiedUsers: 0,
-      suspendedUsers: 0,
-      bannedUsers: 0,
-      newToday: 0,
-      creatorsTotal: 0,
-      creatorsPstar: 0,
-      creatorsChannel: 0,
-      firebaseOnlyUsers: 0,
-    };
-  }
-
-  const [
-    totalUsers,
-    emailVerifiedUsers,
-    suspendedUsers,
-    bannedUsers,
-    newToday,
-    creatorsTotal,
-  ] = await Promise.all([
-    safeCount(supabase.from('users').select('*', { count: 'exact', head: true })),
-    safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).eq('email_verified', true)),
-    safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).eq('suspended', true)),
-    safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).eq('banned', true)),
-    safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).gte('created_at', todayIso)),
-    safeCount(supabase.from('users').select('*', { count: 'exact', head: true }).eq('creator', true)),
-  ]);
-
+  const totalUsers = rows.length;
+  const emailVerifiedUsers = rows.filter((row) => row.email_verified === true || row.emailVerified === true || row.is_verified === true).length;
+  const suspendedUsers = rows.filter((row) => row.suspended === true).length;
+  const bannedUsers = rows.filter((row) => row.banned === true).length;
+  const newToday = rows.filter((row) => {
+    const t = new Date(row.created_at || row.createdAt || 0).getTime();
+    return Number.isFinite(t) && t >= startMs;
+  }).length;
+  const creatorRows = rows.filter((row) => row.creator === true || row.is_creator === true || row.creator_status === 'approved' || row.creatorStatus === 'approved');
+  const creatorsTotal = creatorRows.length;
   let creatorsPstar = 0;
   let creatorsChannel = 0;
-  const { data: creatorUserRows } = await supabase.from('users').select('id').eq('creator', true);
-  const creatorUserIds = (creatorUserRows || []).map((r) => r.id).filter(Boolean);
-  const CHUNK = 400;
-  for (let i = 0; i < creatorUserIds.length; i += CHUNK) {
-    const slice = creatorUserIds.slice(i, i + CHUNK);
-    const { data: typeRows } = await supabase.from('creators').select('creator_type').in('user_id', slice);
-    for (const row of typeRows || []) {
-      if (row.creator_type === 'channel') creatorsChannel += 1;
-      else creatorsPstar += 1;
-    }
+  for (const row of creatorRows) {
+    const type = String(row.creator_type || row.creatorType || '').trim().toLowerCase();
+    if (type === 'channel') creatorsChannel += 1;
+    else creatorsPstar += 1;
   }
-  const typedTotal = creatorsPstar + creatorsChannel;
-  creatorsPstar += Math.max(0, creatorsTotal - typedTotal);
-
-  const firebaseOnlyUsers = await countFirebaseOnlyUsers();
 
   return {
     totalUsers,
@@ -354,113 +712,61 @@ export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
     creatorsTotal,
     creatorsPstar,
     creatorsChannel,
-    firebaseOnlyUsers,
+    firebaseOnlyUsers: counts.firebaseOnlyTotal,
+    supabaseTotal: counts.supabaseTotal,
+    firebaseAuthTotal: counts.firebaseAuthTotal,
+    firestoreTotal: counts.firestoreTotal,
+    rtdbTotal: counts.rtdbTotal,
+    firebaseSourceTotal: counts.firebaseSourceTotal,
+    mergedTotal: counts.mergedTotal,
+    rawSourceTotal: counts.rawSourceTotal,
+    deduplicatedTotal: counts.deduplicatedTotal,
+    sourceCounts: counts,
   };
 }
 
 export async function listUsersForAdminFromDirectory(query) {
-  const { search = '', statusFilter = '', verifiedFilter = '' } = query;
-  const { page, limit, offset } = paginateAdmin(query.page, query.limit);
+  const { search = '', verifiedFilter = '' } = query;
+  const statusFilter = query.statusFilter || query.status || '';
+  const { page, limit, offset } = paginateAdmin(query.page, query.limit || query.pageSize || query.perPage);
   const searchTrim = String(search || '').trim().replace(/,/g, ' ').slice(0, 120);
-  const orFilter = searchTrim
-    ? `username.ilike.%${searchTrim}%,email.ilike.%${searchTrim}%,display_name.ilike.%${searchTrim}%,full_name.ilike.%${searchTrim}%`
-    : null;
 
-  if (!isConfigured() || !supabase) {
-    return { source: 'none', users: [], total: 0, page, limit };
-  }
+  const { rows: mergedUsers, counts } = await collectMergedUserDirectoryRows({ includeCreatorState: true });
+  let allUsers = applyAdminDirectoryFilters(mergedUsers, { searchTrim, statusFilter, verifiedFilter });
 
-  let countQ = supabase.from('users').select('*', { count: 'exact', head: true });
-  if (statusFilter === 'creator') countQ = countQ.eq('creator', true);
-  if (verifiedFilter === 'true') countQ = countQ.eq('email_verified', true);
-  if (orFilter) countQ = countQ.or(orFilter);
-
-  const { count, error: countErr } = await countQ;
-
-  if (!countErr) {
-    const supabaseTotal = count || 0;
-    let firebaseOnlyUsers = [];
-    let firebaseOnlyTotal = 0;
-    if (page === 1) {
-      const fb = await listFirebaseOnlyUsersForAdmin({
-        ...query,
-        limit: Math.min(50, limit),
-      });
-      firebaseOnlyUsers = fb.users;
-      firebaseOnlyTotal = fb.total;
-    }
-
-    if (supabaseTotal === 0 || offset >= supabaseTotal) {
-      if (firebaseOnlyUsers.length) {
-        return {
-          source: 'supabase+firebase',
-          users: firebaseOnlyUsers,
-          total: firebaseOnlyTotal,
-          supabaseTotal: 0,
-          firebaseOnlyTotal,
-          firebaseOnlyUsers,
-          page,
-          limit,
-        };
-      }
-      return { source: 'supabase', users: [], total: 0, supabaseTotal: 0, firebaseOnlyTotal: 0, firebaseOnlyUsers: [], page, limit };
-    }
-
-    let q = supabase.from('users').select('*');
-    if (statusFilter === 'creator') q = q.eq('creator', true);
-    if (verifiedFilter === 'true') q = q.eq('email_verified', true);
-    if (orFilter) q = q.or(orFilter);
-    q = q.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
-
-    const { data, error } = await q;
-    if (error) {
-      return { source: 'supabase_error', users: [], total: 0, page, limit, error };
-    }
-
-    const merged = await enrichUsersFromFirebase(data || []);
-    const users = merged.map(rowToAdminUserDto);
-    return {
-      source: 'supabase+firebase',
-      users,
-      total: supabaseTotal,
-      supabaseTotal,
-      firebaseOnlyTotal,
-      firebaseOnlyUsers,
-      page,
-      limit,
-    };
-  }
-
-  const rtdb = getFirebaseRtdb();
-  if (!rtdb) {
-    return { source: 'rtdb_missing', users: [], total: 0, page, limit };
-  }
-
-  const snap = await rtdb.ref('users').once('value');
-  const val = snap.val();
-  if (!val || typeof val !== 'object') {
-    return { source: 'rtdb', users: [], total: 0, page, limit };
-  }
-
-  let allUsers = Object.entries(val).map(([id, u]) =>
-    rtdbUserToRow(id, typeof u === 'object' && u !== null ? u : {})
-  );
-
-  allUsers = applyAdminDirectoryFilters(allUsers, { searchTrim, statusFilter, verifiedFilter });
-
-  allUsers.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  allUsers.sort((a, b) => {
+    const ad = new Date(a.created_at || a.createdAt || 0).getTime() || 0;
+    const bd = new Date(b.created_at || b.createdAt || 0).getTime() || 0;
+    if (bd !== ad) return bd - ad;
+    return String(a.email || a.username || a.id).localeCompare(String(b.email || b.username || b.id));
+  });
 
   const total = allUsers.length;
   const paginated = allUsers.slice(offset, offset + limit);
-  const merged = await enrichUsersFromFirebase(paginated);
-  const users = merged.map(rowToAdminUserDto);
+  const users = paginated.map(rowToAdminUserDto);
+  const firebaseOnlyUsers = page === 1
+    ? paginated
+        .filter((row) => rowHasFirebaseSource(row) && !rowHasSource(row, 'supabase'))
+        .map(rowToAdminUserDto)
+    : [];
+  const sourceCounts = {
+    ...counts,
+    filteredTotal: total,
+  };
   return {
-    source: 'rtdb',
+    source: 'supabase+firebase_auth+firebase_firestore+firebase_rtdb',
     users,
     total,
-    supabaseTotal: 0,
-    firebaseOnlyTotal: total,
-    firebaseOnlyUsers: page === 1 ? users : [],
+    mergedTotal: counts.mergedTotal,
+    rawSourceTotal: counts.rawSourceTotal,
+    supabaseTotal: counts.supabaseTotal,
+    firebaseAuthTotal: counts.firebaseAuthTotal,
+    firestoreTotal: counts.firestoreTotal,
+    rtdbTotal: counts.rtdbTotal,
+    firebaseOnlyTotal: counts.firebaseOnlyTotal,
+    firebaseOnlyUsers,
+    sourceCounts,
+    counts: sourceCounts,
     page,
     limit,
   };
@@ -563,23 +869,49 @@ export async function listPlatformCreatorsFromDirectory(query) {
 }
 
 export async function fetchUserRowForAdminById(id) {
-  if (!isConfigured() || !supabase) {
-    return { row: null, source: 'none' };
-  }
-  const { data: raw, error } = await supabase.from('users').select('*').eq('id', id).maybeSingle();
-  if (!error && raw) {
-    const mergedRow = (await enrichUsersFromFirebase([raw]))[0];
-    return { row: mergedRow, source: 'supabase' };
+  const rows = [];
+  if (isConfigured() && supabase) {
+    const { data: raw, error } = await supabase.from('users').select('*').eq('id', id).maybeSingle();
+    if (!error && raw) rows.push({ ...raw, source: 'supabase', supabase_user_id: raw.id });
   }
 
   const rtdb = getFirebaseRtdb();
   if (rtdb) {
-    const snap = await rtdb.ref(`users/${id}`).once('value');
-    const val = snap.val();
-    if (val) {
-      const mergedRow = (await enrichUsersFromFirebase([rtdbUserToRow(id, val)]))[0];
-      return { row: mergedRow, source: 'rtdb' };
+    try {
+      const snap = await withTimeout(rtdb.ref(`users/${id}`).once('value'), 'Firebase RTDB user lookup');
+      const val = snap.val();
+      if (val) rows.push(rtdbUserToRow(id, val));
+    } catch {
+      /* ignore */
     }
+  }
+
+  const db = getFirebaseDb();
+  if (db) {
+    try {
+      const snap = await withTimeout(db.collection('users').doc(id).get(), 'Firestore user lookup');
+      if (snap.exists) rows.push(firestoreUserDocToRow(id, snap.data() || {}));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const auth = getFirebaseAuth();
+  if (auth) {
+    try {
+      const record = await withTimeout(auth.getUser(id), 'Firebase Auth getUser');
+      if (record) rows.push(firebaseAuthUserToRow(record));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const merged = mergeUserRowsById(rows);
+  const withCreatorState = await applyCreatorState(merged);
+  const row = withCreatorState[0] || null;
+  if (row) {
+    const enriched = (await enrichUsersFromFirebase([row]))[0];
+    return { row: enriched, source: 'merged' };
   }
   return { row: null, source: 'missing' };
 }

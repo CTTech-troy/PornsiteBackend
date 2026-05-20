@@ -10,12 +10,14 @@ import {
   updateLiveStatus,
   getRandomSessions,
   getPremiumVideos,
+  revalidateVideos,
 } from '../controller/adminContent.controller.js';
 
 const router = Router();
 router.use(requireAdminAuth);
 
 router.get('/videos', getVideos);
+router.post('/videos/revalidate', revalidateVideos);
 router.get('/videos/:id', getVideoById);
 router.put('/videos/:id/status', updateVideoStatus);
 router.delete('/videos/:id', deleteVideo);

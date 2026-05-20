@@ -4,16 +4,19 @@
 import dotenv from 'dotenv';
 import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 import { isXnxxApiConfigured, fetchXnxxSearch } from '../utils/xnxxRapidApi.js';
+import { filterPlayableVideos } from '../utils/videoPlaybackValidation.js';
 
 dotenv.config();
 
 function homeCardToSearchItem(card) {
   if (!card) return null;
   const preview = String(card.previewVideo || '').trim();
-  const page = String(card.videoSrc || '').trim();
+  const page = String(card.playbackUrl || card.streamUrl || card.videoUrl || card.videoSrc || '').trim();
   return {
     id: String(card.id),
-    videoUrl: preview || page,
+    videoUrl: page,
+    streamUrl: page,
+    playbackUrl: page,
     previewVideo: preview,
     thumbnailUrl: String(card.thumbnail || ''),
     thumbnail: String(card.thumbnail || ''),
@@ -21,6 +24,10 @@ function homeCardToSearchItem(card) {
     title: card.title || '',
     channel: card.channel || '',
     views: card.views ?? 0,
+    playable: card.playable === true,
+    sourceType: card.sourceType || card.source_type || '',
+    embedAllowed: card.embedAllowed === true || card.embed_allowed === true,
+    validationStatus: card.validationStatus || card.validation_status || (card.playable ? 'playable' : 'unsupported'),
   };
 }
 
@@ -56,8 +63,11 @@ export async function searchVideos(req, res) {
       error: typeof raw === 'string' ? raw.slice(0, 200) : 'Search upstream error',
     });
   }
-  ingestHomeFeedVideos(cards);
-  const list = cards.map(homeCardToSearchItem).filter((item) => item && item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '');
+  const playableCards = filterPlayableVideos(cards);
+  ingestHomeFeedVideos(playableCards);
+  const list = playableCards
+    .map(homeCardToSearchItem)
+    .filter((item) => item && item.playable === true && item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '');
   const total = list.length;
   const totalPages = Math.max(1, Math.ceil(total / 20));
   return res.json({ data: list, total, page, totalPages });

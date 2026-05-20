@@ -4,7 +4,9 @@
  * Firebase RTDB dependency removed.
  */
 import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
+import { fetchPublishedPublicVideos, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
@@ -24,6 +26,18 @@ import {
   getCurrentMonth,
   LEVEL_CONFIG,
 } from '../utils/creatorLevel.js';
+import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoIdValidation.js';
+import { getPathSafeVideoId } from '../utils/videoPathId.js';
+import { annotatePlayableVideo, validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
+import { validateEmbedWithProbe } from '../services/videoSourceProbe.service.js';
+
+async function resolvePlaybackValidation(videoInput) {
+  const base = validateVideoPlaybackSource(videoInput);
+  if (base.embedAllowed === true && base.playbackUrl) {
+    return validateEmbedWithProbe(base.playbackUrl);
+  }
+  return base;
+}
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 
@@ -33,10 +47,15 @@ function isPubliclyListedRow(row) {
   return !!(row && (row.is_live === true || row.status === 'published'));
 }
 
+function applyPublicListingFilter(query) {
+  return query.or('is_live.eq.true,status.eq.published');
+}
+
 function mapVideo(row) {
   const resolvedDuration =
     Number(row.duration_seconds ?? row.duration ?? row.duration_sec ?? 0) || 0;
-  return {
+  return annotatePlayableVideo({
+    id:                     row.video_id,
     videoId:                row.video_id,
     userId:                 row.user_id,
     title:                  row.title                  || '',
@@ -60,7 +79,13 @@ function mapVideo(row) {
     totalComments:          Number(row.comments_count  || 0),
     totalViews:             Number(row.views_count     || 0),
     createdAt:              row.created_at ? new Date(row.created_at).getTime() : Date.now(),
-  };
+    source:                 'community',
+    playable:               row.playable,
+    sourceType:             row.source_type,
+    embedAllowed:           row.embed_allowed,
+    validationStatus:       row.validation_status,
+    playbackUrl:            row.playback_url,
+  });
 }
 
 function isMissingColumnError(err, columnName) {
@@ -305,6 +330,20 @@ export async function publishFromStoragePath(req, res) {
       : null;
 
     if (!videoUrl) return res.status(500).json({ success: false, message: 'Could not resolve video URL' });
+    const embedUrl = String(req.body?.embedUrl || req.body?.embed_url || '').trim();
+    const playbackValidation = await resolvePlaybackValidation({
+      source: 'community',
+      streamUrl: videoUrl,
+      videoUrl,
+      embedUrl: embedUrl || undefined,
+    });
+    if (playbackValidation.playable !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Video source cannot be played inside the platform.',
+        reason: playbackValidation.reason,
+      });
+    }
 
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
     const videoId = crypto.randomUUID();
@@ -328,6 +367,11 @@ export async function publishFromStoragePath(req, res) {
       creator_display_name:     creatorDisplayName || null,
       creator_avatar_url:       creatorAvatarUrl   || null,
       status:                   isLive ? 'published' : 'draft',
+      playable:                 playbackValidation.playable,
+      source_type:              playbackValidation.sourceType,
+      embed_allowed:            playbackValidation.embedAllowed,
+      validation_status:        playbackValidation.validationStatus,
+      playback_url:             playbackValidation.playbackUrl,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
 
@@ -415,6 +459,20 @@ export async function uploadAndPublish(req, res) {
 
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
     const isLive = consentGiven === true;
+    const embedUrl = String(req.body?.embedUrl || req.body?.embed_url || '').trim();
+    const playbackValidation = await resolvePlaybackValidation({
+      source: 'community',
+      streamUrl: videoUrl,
+      videoUrl,
+      embedUrl: embedUrl || undefined,
+    });
+    if (playbackValidation.playable !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Video source cannot be played inside the platform.',
+        reason: playbackValidation.reason,
+      });
+    }
 
     const insertRow = {
       video_id:                 videoId,
@@ -434,6 +492,11 @@ export async function uploadAndPublish(req, res) {
       creator_display_name:     creatorDisplayName || null,
       creator_avatar_url:       creatorAvatarUrl   || null,
       status:                   isLive ? 'published' : 'draft',
+      playable:                 playbackValidation.playable,
+      source_type:              playbackValidation.sourceType,
+      embed_allowed:            playbackValidation.embedAllowed,
+      validation_status:        playbackValidation.validationStatus,
+      playback_url:             playbackValidation.playbackUrl,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
 
@@ -456,19 +519,11 @@ export async function uploadAndPublish(req, res) {
 
 export async function getPublicVideos(req, res) {
   try {
-    if (!videosRef()) {
-      return res.json({ success: true, data: [] });
-    }
     const premiumOnly = req.query?.premium === 'true';
-    const snap = await videosRef().once('value');
-    const val = snap.val();
-    let list = !val ? [] : Object.entries(val).map(([id, v]) => ({ ...v, videoId: id })).filter((v) => v.isLive === true);
-    if (premiumOnly) {
-      list = list.filter((v) => v.isPremiumContent === true);
-    }
-    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    const enriched = await Promise.all(list.map((v) => mergeCreatorIntoPublicVideo(v)));
-    return res.json({ success: true, data: enriched });
+    const limit = Math.min(Math.max(parseInt(req.query?.limit || '100', 10) || 100, 1), 200);
+    const page = Math.max(1, parseInt(req.query?.page || '1', 10) || 1);
+    const data = await fetchPublishedPublicVideos({ page, limit, premiumOnly });
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('videoPublish.getPublicVideos error', err?.message || err);
     return res.status(500).json({ success: false, data: [], message: err?.message || 'Failed' });
@@ -479,10 +534,14 @@ export async function getPublicVideos(req, res) {
 
 export async function getVideoById(req, res) {
   try {
-    if (!supabase) return res.status(503).json({ success: false, message: 'Video feed is temporarily unavailable.' });
     const { videoId }     = req.params;
     const requesterUid    = req.uid;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: null });
+    if (!supabase) {
+      const fallback = await fetchPublishedVideoById(videoId, requesterUid || null);
+      if (fallback) return res.json({ success: true, data: fallback });
+      return res.status(503).json({ success: false, message: 'Video feed is temporarily unavailable.' });
+    }
 
     const { data, error } = await supabase
       .from('tiktok_videos')
@@ -490,13 +549,24 @@ export async function getVideoById(req, res) {
       .eq('video_id', videoId)
       .maybeSingle();
     if (error) throw error;
-    if (!data) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (!data) {
+      const fallback = await fetchPublishedVideoById(videoId, requesterUid || null);
+      if (fallback) return res.json({ success: true, data: fallback });
+      return res.status(404).json({ success: false, message: 'Video not found' });
+    }
 
     if (!isPubliclyListedRow(data)) {
       const isOwner = requesterUid && data.user_id === requesterUid;
       if (!isOwner) return res.status(404).json({ success: false, message: 'Video not available' });
     }
-    const merged = await mergeCreatorIntoPublicVideo(mapVideo(data));
+    const mapped = mapVideo(data);
+    if (mapped.playable !== true) {
+      return res.status(404).json({
+        success: false,
+        message: 'This video is unavailable for in-platform playback.',
+      });
+    }
+    const merged = await mergeCreatorIntoPublicVideo(mapped);
     return res.json({ success: true, data: merged });
   } catch (err) {
     console.error('videoPublish.getVideoById error', err?.message || err);
@@ -512,7 +582,7 @@ export async function deleteVideo(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     const { data: video } = await supabase.from('tiktok_videos').select('*').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -539,7 +609,7 @@ export async function updateVideo(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     const { data: video } = await supabase.from('tiktok_videos').select('*').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -582,6 +652,23 @@ export async function updateVideo(req, res) {
     }
     if (Object.keys(updates).length === 0) return res.status(400).json({ success: false, message: 'No updates provided' });
 
+    const urlFields = ['stream_url', 'storage_url', 'embed_url'];
+    const urlTouched = urlFields.some((f) => req.body?.[f] !== undefined);
+    if (urlTouched) {
+      const playbackValidation = await resolvePlaybackValidation({
+        source: 'community',
+        streamUrl: req.body?.stream_url ?? video.stream_url ?? video.storage_url,
+        storage_url: req.body?.storage_url ?? video.storage_url,
+        videoUrl: req.body?.storage_url ?? video.storage_url,
+        embedUrl: req.body?.embed_url ?? video.embed_url,
+      });
+      updates.playable = playbackValidation.playable;
+      updates.source_type = playbackValidation.sourceType;
+      updates.embed_allowed = playbackValidation.embedAllowed;
+      updates.validation_status = playbackValidation.validationStatus;
+      updates.playback_url = playbackValidation.playbackUrl || null;
+    }
+
     const { data: updated, error } = await supabase
       .from('tiktok_videos').update(updates).eq('video_id', videoId).select().single();
     if (error) throw error;
@@ -602,7 +689,7 @@ export async function setVideoDraft(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     const { data: video } = await supabase.from('tiktok_videos').select('user_id').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -628,7 +715,7 @@ export async function likeVideo(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     const { data: video } = await supabase.from('tiktok_videos').select('is_live, status, likes_count').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -649,7 +736,7 @@ export async function unlikeVideo(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
     const { data: video } = await supabase.from('tiktok_videos').select('video_id').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -672,7 +759,7 @@ export async function addComment(req, res) {
     const { videoId } = req.params;
     const text     = (req.body?.text || '').trim();
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!text)     return res.status(400).json({ success: false, message: 'Comment text is required' });
 
     const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
@@ -714,7 +801,7 @@ export async function getComments(req, res) {
   try {
     if (!supabase) return res.json({ success: true, data: [] });
     const { videoId } = req.params;
-    if (!videoId) return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: [] });
 
     const { data: video } = await supabase.from('tiktok_videos').select('is_live, status').eq('video_id', videoId).maybeSingle();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
@@ -741,6 +828,349 @@ export async function getComments(req, res) {
   }
 }
 
+const PUBLIC_VIDEO_PURCHASES_TABLE = 'public_video_purchases';
+
+function isMissingRelationError(err) {
+  const msg = String(err?.message || '');
+  return (
+    err?.code === '42P01' ||
+    err?.code === 'PGRST200' ||
+    /schema cache|Could not find the table|does not exist/i.test(msg)
+  );
+}
+
+function isDuplicatePurchaseError(err) {
+  return err?.code === '23505' || /duplicate key|already exists/i.test(String(err?.message || ''));
+}
+
+function getPurchaseVideoId(row = {}) {
+  return String(row.video_id || row.videoId || row.id || '').trim();
+}
+
+function normalizePurchasablePublicVideo(row = {}, fallbackId = '') {
+  const publicVideoId = getPurchaseVideoId(row) || String(fallbackId || '').trim();
+  const tokenPrice = Number(
+    row.token_price ??
+    row.tokenPrice ??
+    row.coin_price ??
+    row.coinPrice ??
+    0
+  ) || 0;
+  const isPremiumContent =
+    row.is_premium_content === true ||
+    row.isPremiumContent === true ||
+    row.isPremium === true ||
+    row.premium === true ||
+    tokenPrice > 0;
+
+  return {
+    publicVideoId,
+    tiktokVideoId: row.video_id && isValidPlatformVideoId(String(row.video_id)) ? String(row.video_id) : null,
+    source: String(row.source || (row.video_id ? 'community' : 'public')).toLowerCase(),
+    userId: row.user_id || row.userId || null,
+    title: row.title || '',
+    isPremiumContent,
+    tokenPrice,
+    publiclyListed: row.video_id ? isPubliclyListedRow(row) : row.isLive !== false,
+  };
+}
+
+async function resolvePurchasablePublicVideo(videoId) {
+  const lookup = String(videoId || '').trim();
+  if (!lookup || !isValidPlatformVideoId(lookup)) return null;
+
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('tiktok_videos')
+      .select('video_id, user_id, title, is_live, status, is_premium_content, token_price')
+      .eq('video_id', lookup)
+      .maybeSingle();
+    if (error && !isMissingRelationError(error)) throw error;
+    if (data) return normalizePurchasablePublicVideo(data, lookup);
+
+    const media = await supabase
+      .from('media')
+      .select('*')
+      .eq('id', lookup)
+      .maybeSingle();
+    if (media.error && !isMissingRelationError(media.error)) throw media.error;
+    if (media.data) return normalizePurchasablePublicVideo({ ...media.data, source: 'media' }, lookup);
+  }
+
+  const rtdb = getFirebaseRtdb();
+  if (rtdb) {
+    const [videoSnap, mediaSnap] = await Promise.all([
+      rtdb.ref(`videos/${lookup}`).once('value'),
+      rtdb.ref(`media/${lookup}`).once('value'),
+    ]);
+    if (videoSnap.exists()) {
+      return normalizePurchasablePublicVideo({ ...(videoSnap.val() || {}), id: lookup, source: 'rtdb' }, lookup);
+    }
+    if (mediaSnap.exists()) {
+      return normalizePurchasablePublicVideo({ ...(mediaSnap.val() || {}), id: lookup, source: 'media' }, lookup);
+    }
+  }
+
+  const rows = await fetchPublishedPublicVideos({ page: 1, limit: 500, premiumOnly: false });
+  const match = rows.find((row) => {
+    const id = getPurchaseVideoId(row);
+    return id === lookup || getPathSafeVideoId(id) === lookup;
+  });
+  return match ? normalizePurchasablePublicVideo(match, lookup) : null;
+}
+
+async function hasSupabaseTiktokPurchase(uid, videoId) {
+  if (!supabase || !uid || !videoId) return null;
+  const { data, error } = await supabase
+    .from('video_purchases')
+    .select('id, purchased_at')
+    .eq('user_id', uid)
+    .eq('video_id', videoId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingRelationError(error)) return null;
+    throw error;
+  }
+  return data || null;
+}
+
+async function hasGenericPublicPurchase(uid, publicVideoId) {
+  if (!uid || !publicVideoId) return null;
+  if (supabase) {
+    const { data, error } = await supabase
+      .from(PUBLIC_VIDEO_PURCHASES_TABLE)
+      .select('id, purchased_at')
+      .eq('user_id', uid)
+      .eq('public_video_id', publicVideoId)
+      .maybeSingle();
+    if (error) {
+      if (!isMissingRelationError(error)) throw error;
+    } else if (data) {
+      return data;
+    }
+  }
+
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return null;
+  const snap = await rtdb.ref(`videoPurchases/${uid}/${publicVideoId}`).once('value');
+  return snap.exists() ? { id: publicVideoId, ...(snap.val() || {}) } : null;
+}
+
+async function findExistingPurchase(uid, video) {
+  if (!uid || !video) return null;
+  if (video.tiktokVideoId) {
+    const tiktokPurchase = await hasSupabaseTiktokPurchase(uid, video.tiktokVideoId);
+    if (tiktokPurchase) return tiktokPurchase;
+  }
+  return hasGenericPublicPurchase(uid, video.publicVideoId);
+}
+
+async function spendSupabaseCoins(uid, amount) {
+  const price = Number(amount) || 0;
+  if (!price) return { newBalance: undefined, source: 'none' };
+  if (!supabase) throw new Error('Token wallet is temporarily unavailable.');
+
+  const rpc = await supabase.rpc('spend_coins', {
+    p_user_id: uid,
+    p_amount:  price,
+  });
+  if (!rpc.error) return { newBalance: Number(rpc.data), source: 'supabase' };
+  if (!/function .*spend_coins|could not find|schema cache/i.test(String(rpc.error?.message || ''))) {
+    if (/insufficient coins/i.test(rpc.error.message)) {
+      const err = new Error('Insufficient tokens. Please purchase more tokens.');
+      err.statusCode = 402;
+      throw err;
+    }
+  }
+
+  const { data: userRow, error: readErr } = await supabase
+    .from('users')
+    .select('coin_balance')
+    .eq('id', uid)
+    .maybeSingle();
+  if (readErr) throw readErr;
+  const current = Number(userRow?.coin_balance ?? 0);
+  if (current < price) {
+    const err = new Error('Insufficient tokens. Please purchase more tokens.');
+    err.statusCode = 402;
+    throw err;
+  }
+
+  const { data: updated, error: updateErr } = await supabase
+    .from('users')
+    .update({ coin_balance: current - price })
+    .eq('id', uid)
+    .gte('coin_balance', price)
+    .select('coin_balance')
+    .maybeSingle();
+  if (updateErr) throw updateErr;
+  if (!updated) {
+    const err = new Error('Insufficient tokens. Please try again.');
+    err.statusCode = 402;
+    throw err;
+  }
+  return { newBalance: Number(updated.coin_balance), source: 'supabase' };
+}
+
+async function spendFirebaseCoins(uid, amount) {
+  const price = Number(amount) || 0;
+  if (!price) return { newBalance: undefined, source: 'none' };
+
+  const firestore = getFirebaseDb();
+  if (firestore) {
+    const ref = firestore.collection('users').doc(uid);
+    let nextBalance = null;
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? snap.data() || {} : {};
+      const current = Number(data.coinBalance ?? data.tokenBalance ?? data.coin_balance ?? 0);
+      if (current < price) {
+        const err = new Error('Insufficient tokens. Please purchase more tokens.');
+        err.statusCode = 402;
+        throw err;
+      }
+      nextBalance = current - price;
+      tx.set(ref, { coinBalance: nextBalance, tokenBalance: nextBalance }, { merge: true });
+    });
+    const rtdb = getFirebaseRtdb();
+    if (rtdb) {
+      rtdb.ref(`users/${uid}`).update({ coinBalance: nextBalance, tokenBalance: nextBalance }).catch(() => {});
+    }
+    if (supabase) {
+      supabase.from('users').upsert({ id: uid, coin_balance: nextBalance }, { onConflict: 'id' }).then(() => {}, () => {});
+    }
+    return { newBalance: Number(nextBalance), source: 'firebase' };
+  }
+
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) throw new Error('Token wallet is temporarily unavailable.');
+  const ref = rtdb.ref(`users/${uid}`);
+  let nextBalance = null;
+  const result = await ref.transaction((current) => {
+    const data = current && typeof current === 'object' ? current : {};
+    const currentBalance = Number(data.coinBalance ?? data.tokenBalance ?? data.coin_balance ?? 0);
+    if (currentBalance < price) return;
+    nextBalance = currentBalance - price;
+    return { ...data, coinBalance: nextBalance, tokenBalance: nextBalance };
+  });
+  if (!result.committed) {
+    const err = new Error('Insufficient tokens. Please purchase more tokens.');
+    err.statusCode = 402;
+    throw err;
+  }
+  if (supabase) {
+    supabase.from('users').upsert({ id: uid, coin_balance: nextBalance }, { onConflict: 'id' }).then(() => {}, () => {});
+  }
+  return { newBalance: Number(nextBalance), source: 'firebase' };
+}
+
+async function spendCoinsForVideoPurchase(uid, amount) {
+  try {
+    return await spendSupabaseCoins(uid, amount);
+  } catch (err) {
+    const status = Number(err?.statusCode || 0);
+    const canTryFirebase = Boolean(getFirebaseRtdb() || getFirebaseDb());
+    if ((status === 402 || /insufficient tokens|insufficient coins/i.test(String(err?.message || ''))) && canTryFirebase) {
+      return spendFirebaseCoins(uid, amount);
+    }
+    throw err;
+  }
+}
+
+async function refundCoins(uid, amount, source) {
+  const price = Number(amount) || 0;
+  if (!uid || !price) return;
+  if (source === 'firebase') {
+    const firestore = getFirebaseDb();
+    if (firestore) {
+      const ref = firestore.collection('users').doc(uid);
+      await firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const data = snap.exists ? snap.data() || {} : {};
+        const current = Number(data.coinBalance ?? data.tokenBalance ?? data.coin_balance ?? 0);
+        const next = current + price;
+        tx.set(ref, { coinBalance: next, tokenBalance: next }, { merge: true });
+      }).catch(() => {});
+    }
+    const rtdb = getFirebaseRtdb();
+    if (rtdb) {
+      const ref = rtdb.ref(`users/${uid}`);
+      await ref.transaction((current) => {
+        const data = current && typeof current === 'object' ? current : {};
+        const currentBalance = Number(data.coinBalance ?? data.tokenBalance ?? data.coin_balance ?? 0);
+        return { ...data, coinBalance: currentBalance + price, tokenBalance: currentBalance + price };
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  if (!supabase) return;
+  const rpc = await supabase.rpc('add_coins', { p_user_id: uid, p_amount: price });
+  if (!rpc.error) return;
+  const { data } = await supabase.from('users').select('coin_balance').eq('id', uid).maybeSingle();
+  const next = (Number(data?.coin_balance) || 0) + price;
+  await supabase.from('users').upsert({ id: uid, coin_balance: next }, { onConflict: 'id' }).catch(() => {});
+}
+
+async function recordGenericPurchase(uid, video, tokenPrice) {
+  if (supabase) {
+    const { error } = await supabase.from(PUBLIC_VIDEO_PURCHASES_TABLE).insert({
+      user_id: uid,
+      public_video_id: video.publicVideoId,
+      video_source: video.source || 'public',
+      creator_id: video.userId || null,
+      token_price: tokenPrice,
+      metadata: {
+        title: video.title || '',
+        tiktokVideoId: video.tiktokVideoId || null,
+      },
+    });
+    if (!error) return;
+    if (isDuplicatePurchaseError(error)) {
+      const err = new Error('Already purchased');
+      err.code = 'ALREADY_PURCHASED';
+      throw err;
+    }
+    if (!isMissingRelationError(error)) throw error;
+  }
+
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) throw new Error('Purchase storage is not configured.');
+  const ref = rtdb.ref(`videoPurchases/${uid}/${video.publicVideoId}`);
+  const snap = await ref.once('value');
+  if (snap.exists()) {
+    const err = new Error('Already purchased');
+    err.code = 'ALREADY_PURCHASED';
+    throw err;
+  }
+  await ref.set({
+    publicVideoId: video.publicVideoId,
+    videoSource: video.source || 'public',
+    creatorId: video.userId || null,
+    tokenPrice,
+    purchasedAt: new Date().toISOString(),
+    title: video.title || '',
+  });
+}
+
+async function recordVideoPurchase(uid, video, tokenPrice) {
+  if (video.tiktokVideoId && supabase) {
+    const { error } = await supabase.from('video_purchases').insert([{
+      user_id:     uid,
+      video_id:    video.tiktokVideoId,
+      token_price: tokenPrice,
+    }]);
+    if (!error) return;
+    if (isDuplicatePurchaseError(error)) {
+      const err = new Error('Already purchased');
+      err.code = 'ALREADY_PURCHASED';
+      throw err;
+    }
+    if (!isMissingRelationError(error)) throw error;
+  }
+  await recordGenericPurchase(uid, video, tokenPrice);
+}
+
 // ── Purchase premium video ────────────────────────────────────────────────────
 
 export async function purchaseVideo(req, res) {
@@ -748,58 +1178,37 @@ export async function purchaseVideo(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
-    if (!supabase) return res.status(503).json({ success: false, message: 'Storage unavailable' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
-    const { data: video } = await supabase
-      .from('tiktok_videos')
-      .select('video_id, is_live, status, is_premium_content, token_price')
-      .eq('video_id', videoId)
-      .maybeSingle();
+    const video = await resolvePurchasablePublicVideo(videoId);
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
-    if (!isPubliclyListedRow(video)) return res.status(400).json({ success: false, message: 'Video not available' });
-    if (!video.is_premium_content) return res.status(400).json({ success: false, message: 'Video is not premium content' });
+    if (!video.publiclyListed) return res.status(400).json({ success: false, message: 'Video not available' });
+    if (!video.isPremiumContent) return res.status(400).json({ success: false, message: 'Video is not premium content' });
 
-    const tokenPrice = Number(video.token_price) || 0;
+    const tokenPrice = Number(video.tokenPrice) || 0;
 
-    const { data: existing } = await supabase
-      .from('video_purchases')
-      .select('id')
-      .eq('user_id', uid)
-      .eq('video_id', videoId)
-      .maybeSingle();
+    const existing = await findExistingPurchase(uid, video);
     if (existing) return res.json({ success: true, alreadyPurchased: true, message: 'Already purchased' });
 
-    let newTokenBalance;
-    if (tokenPrice > 0) {
-      const { data: newBalance, error: spendErr } = await supabase.rpc('spend_coins', {
-        p_user_id: uid,
-        p_amount:  tokenPrice,
-      });
-      if (spendErr) {
-        if (/insufficient coins/i.test(spendErr.message)) {
-          return res.status(402).json({ success: false, message: 'Insufficient tokens. Please purchase more tokens.' });
-        }
-        throw spendErr;
+    const spend = await spendCoinsForVideoPurchase(uid, tokenPrice);
+    try {
+      await recordVideoPurchase(uid, video, tokenPrice);
+    } catch (err) {
+      await refundCoins(uid, tokenPrice, spend.source);
+      if (err?.code === 'ALREADY_PURCHASED') {
+        return res.json({ success: true, alreadyPurchased: true, message: 'Already purchased' });
       }
-      newTokenBalance = newBalance;
+      throw err;
     }
-
-    const { error: purchaseErr } = await supabase.from('video_purchases').insert([{
-      user_id:     uid,
-      video_id:    videoId,
-      token_price: tokenPrice,
-    }]);
-    if (purchaseErr) throw purchaseErr;
 
     return res.json({
       success: true,
       message: 'Purchase successful',
-      ...(newTokenBalance !== undefined ? { newTokenBalance } : {}),
+      ...(spend.newBalance !== undefined ? { newTokenBalance: spend.newBalance } : {}),
     });
   } catch (err) {
     console.error('videoPublish.purchaseVideo error:', err?.message || err);
-    return res.status(500).json({ success: false, message: err?.message || 'Purchase failed' });
+    return res.status(err?.statusCode || 500).json({ success: false, message: err?.message || 'Purchase failed' });
   }
 }
 
@@ -808,20 +1217,20 @@ export async function getVideoPurchaseStatus(req, res) {
     const uid      = req.uid;
     const { videoId } = req.params;
     if (!uid)      return res.json({ success: true, purchased: false });
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
-    if (!supabase) return res.json({ success: true, purchased: false });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
-    const { data } = await supabase
-      .from('video_purchases')
-      .select('id, purchased_at')
-      .eq('user_id', uid)
-      .eq('video_id', videoId)
-      .maybeSingle();
+    const video = await resolvePurchasablePublicVideo(videoId);
+    if (!video) return res.json({ success: true, purchased: false });
+    const data = await findExistingPurchase(uid, video);
 
     return res.json({
       success:     true,
       purchased:   !!data,
-      purchasedAt: data?.purchased_at ? new Date(data.purchased_at).getTime() : null,
+      purchasedAt: data?.purchased_at
+        ? new Date(data.purchased_at).getTime()
+        : data?.purchasedAt
+          ? new Date(data.purchasedAt).getTime()
+          : null,
     });
   } catch (err) {
     console.error('videoPublish.getVideoPurchaseStatus error:', err?.message || err);
@@ -836,7 +1245,7 @@ export async function getLikeStatus(req, res) {
     if (!supabase) return res.json({ success: true, liked: false, totalLikes: 0, totalComments: 0 });
     const uid      = req.uid;
     const { videoId } = req.params;
-    if (!videoId)  return res.status(400).json({ success: false, message: 'videoId required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { liked: false });
 
     const { data: vrow } = await supabase
       .from('tiktok_videos')

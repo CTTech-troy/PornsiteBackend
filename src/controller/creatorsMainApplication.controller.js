@@ -2,6 +2,95 @@ import { supabase } from '../config/supabase.js';
 import { sendApplicationDecisionEmail } from '../services/emailService.js';
 import { v4 as uuidv4 } from 'uuid';
 
+const MIN_CREATOR_AGE = 18;
+
+function parseDateOfBirth(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const [, year, month, day] = match;
+    const dob = new Date(Number(year), Number(month) - 1, Number(day));
+    if (
+      dob.getFullYear() !== Number(year) ||
+      dob.getMonth() !== Number(month) - 1 ||
+      dob.getDate() !== Number(day)
+    ) {
+      return null;
+    }
+    return dob;
+  }
+  const dob = new Date(raw);
+  return Number.isNaN(dob.getTime()) ? null : dob;
+}
+
+function calculateAge(value) {
+  const dob = parseDateOfBirth(value);
+  if (!dob) return null;
+  const today = new Date();
+  if (dob > today) return null;
+  let age = today.getFullYear() - dob.getFullYear();
+  const monthDiff = today.getMonth() - dob.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) age -= 1;
+  return age;
+}
+
+function normalizeDateOnly(value) {
+  const dob = parseDateOfBirth(value);
+  if (!dob) return '';
+  const year = dob.getFullYear();
+  const month = String(dob.getMonth() + 1).padStart(2, '0');
+  const day = String(dob.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getRequestDob(body = {}) {
+  return body.dateOfBirth || body.date_of_birth || body.dob || body.birthDate || body.birth_date || '';
+}
+
+function validateCreatorMinimumAge(body = {}) {
+  const dobValue = getRequestDob(body);
+  if (!dobValue) {
+    return { ok: false, status: 400, message: 'Date of birth is required to apply as a creator.' };
+  }
+  const age = calculateAge(dobValue);
+  if (age == null) {
+    return { ok: false, status: 400, message: 'Enter a valid date of birth.' };
+  }
+  if (age < MIN_CREATOR_AGE) {
+    return { ok: false, status: 403, message: `You must be at least ${MIN_CREATOR_AGE} years old to apply as a creator.` };
+  }
+  return { ok: true, age, dateOfBirth: normalizeDateOnly(dobValue) };
+}
+
+function isCreatorApplicationBanActive(ban) {
+  if (!ban || typeof ban !== 'object' || ban.banned !== true) return false;
+  if (!ban.expiresAt) return true;
+  const expires = new Date(String(ban.expiresAt));
+  return Number.isNaN(expires.getTime()) || expires > new Date();
+}
+
+async function ensureCanSubmitCreatorApplication(uid) {
+  try {
+    const { data } = await supabase
+      .from('users')
+      .select('creator_application_ban')
+      .eq('id', uid)
+      .maybeSingle();
+    const ban = data?.creator_application_ban;
+    if (isCreatorApplicationBanActive(ban)) {
+      return {
+        ok: false,
+        status: 403,
+        message: ban.expiresAt
+          ? `You cannot submit a creator application until ${new Date(ban.expiresAt).toLocaleDateString()}.`
+          : 'You are currently not allowed to submit a creator application.',
+      };
+    }
+  } catch (_) {}
+  return { ok: true };
+}
+
 const parseSocialLinks = (links) => {
   if (!links) return {};
   if (typeof links === 'string') {
@@ -40,6 +129,9 @@ export async function submitApplication(req, res) {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
 
+    const banGate = await ensureCanSubmitCreatorApplication(uid);
+    if (!banGate.ok) return res.status(banGate.status).json({ success: false, message: banGate.message });
+
     // Check if user has a pending application
     const { data: existing } = await supabase
       .from('creators_main_application')
@@ -59,9 +151,13 @@ export async function submitApplication(req, res) {
     const category = req.body.category;
     const experience = req.body.experience;
     const socialLinks = parseSocialLinks(req.body.socialLinks || req.body.social_links);
+    const ageGate = validateCreatorMinimumAge(req.body);
+    if (!ageGate.ok) {
+      return res.status(ageGate.status).json({ success: false, message: ageGate.message });
+    }
 
     // Validate required fields
-    if (!fullName || !email || !bio) {
+    if (!fullName || !email) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
@@ -96,7 +192,9 @@ export async function submitApplication(req, res) {
         country,
         state,
         city,
-        bio,
+        date_of_birth: ageGate.dateOfBirth,
+        age_verified: true,
+        bio: bio || '',
         social_links: socialLinks || {},
         category,
         experience,
@@ -154,6 +252,9 @@ export async function reapplyApplication(req, res) {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
 
+    const banGate = await ensureCanSubmitCreatorApplication(uid);
+    if (!banGate.ok) return res.status(banGate.status).json({ success: false, message: banGate.message });
+
     // Check if user has a pending application
     const { data: existing } = await supabase
       .from('creators_main_application')
@@ -174,8 +275,12 @@ export async function reapplyApplication(req, res) {
     const category = req.body.category;
     const experience = req.body.experience;
     const socialLinks = parseSocialLinks(req.body.socialLinks || req.body.social_links);
+    const ageGate = validateCreatorMinimumAge(req.body);
+    if (!ageGate.ok) {
+      return res.status(ageGate.status).json({ success: false, message: ageGate.message });
+    }
 
-    if (!fullName || !email || !bio) {
+    if (!fullName || !email) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
@@ -210,7 +315,9 @@ export async function reapplyApplication(req, res) {
         country,
         state,
         city,
-        bio,
+        date_of_birth: ageGate.dateOfBirth,
+        age_verified: true,
+        bio: bio || '',
         social_links: socialLinks || {},
         category,
         experience,
@@ -245,16 +352,18 @@ export async function reapplyApplication(req, res) {
 export async function getApplications(req, res) {
   try {
     const { search = '', status = '', page = 1, limit = 10 } = req.query;
-    const offset = (page - 1) * limit;
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 10));
+    const offset = (pageNum - 1) * limitNum;
 
     let query = supabase
       .from('creators_main_application')
       .select(`
         *,
-        users!inner(username, email, avatar_url)
-      `)
+        users(username, email, avatar_url)
+      `, { count: 'exact' })
       .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .range(offset, offset + limitNum - 1);
 
     if (status) query = query.eq('status', status);
     if (search) query = query.ilike('full_name', `%${search}%`);
@@ -262,7 +371,7 @@ export async function getApplications(req, res) {
     const { data, error, count } = await query;
     if (error) throw error;
 
-    return res.json({ success: true, applications: data, total: count, page: parseInt(page), limit: parseInt(limit) });
+    return res.json({ success: true, applications: data || [], total: count || 0, page: pageNum, limit: limitNum });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -322,8 +431,21 @@ export async function approveApplication(req, res) {
     // Update user as creator
     await supabase
       .from('users')
-      .update({ creator: true, creator_status: 'approved' })
+      .update({ creator: true, verified: 'approved', role: 'creator' })
       .eq('id', app.user_id);
+
+    await supabase
+      .from('creators')
+      .upsert({
+        user_id: app.user_id,
+        display_name: app.full_name,
+        bio: app.bio || '',
+        creator_type: app.creator_type === 'channel' ? 'channel' : 'pstar',
+        active: true,
+        status: 'active',
+        application_id: app.id,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id' });
 
     // Send email
     await sendApplicationDecisionEmail({
@@ -369,6 +491,11 @@ export async function rejectApplication(req, res) {
       .eq('id', id);
 
     if (updateError) throw updateError;
+
+    await supabase
+      .from('users')
+      .update({ creator: false, verified: 'rejected', role: 'user' })
+      .eq('id', app.user_id);
 
     // Send email
     await sendApplicationDecisionEmail({

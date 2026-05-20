@@ -320,6 +320,84 @@ export async function sendApplicationDecisionEmail({ to, name, status, reason, m
   else console.log(`[email] ✓ Decision email sent to ${to} (${status})`);
 }
 
+export async function sendAccountDeletionEmail({ to, name, reason, platformUrl = 'https://xstreamvideos.site' }) {
+  const resend = getResend();
+  if (!resend) {
+    throw new Error('Email service not configured - set RESEND_API_KEY in environment.');
+  }
+
+  const esc = (s) => String(s || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  const safeName = esc(name || 'there');
+  const safeReason = esc(reason || 'No reason was provided.');
+  let publicUrl = 'https://xstreamvideos.site';
+  try {
+    const parsedUrl = new URL(platformUrl || publicUrl);
+    if (parsedUrl.protocol === 'https:' || parsedUrl.protocol === 'http:') {
+      publicUrl = parsedUrl.toString();
+    }
+  } catch (_) {}
+  const safePlatformUrl = esc(publicUrl);
+  const supportEmail = process.env.SUPPORT_EMAIL || 'support@xstreamvideos.site';
+  const safeSupportEmail = esc(supportEmail);
+  const from = getFrom();
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Your XStreamVideos Account Has Been Deleted</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#f3f4f6;padding:36px 14px;">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:560px;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 18px 45px rgba(17,24,39,0.10);">
+        <tr><td style="background:#111827;padding:30px 36px;text-align:center;">
+          <div style="font-size:26px;line-height:1;font-weight:900;letter-spacing:-0.4px;color:#ffffff;">XStream<span style="color:#ff4654;">Videos</span></div>
+          <div style="margin-top:8px;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#d1d5db;">Account notice</div>
+        </td></tr>
+        <tr><td style="padding:34px 36px 10px;">
+          <h1 style="margin:0 0 12px;font-size:23px;line-height:1.25;font-weight:800;color:#111827;">Your account has been deleted</h1>
+          <p style="margin:0 0 20px;font-size:15px;line-height:1.7;color:#4b5563;">Hi ${safeName},</p>
+          <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:#4b5563;">Your account has been removed from XStreamVideos by an administrator.</p>
+          <div style="margin:0 0 24px;border:1px solid #fee2e2;border-left:4px solid #ff4654;background:#fff7f7;border-radius:12px;padding:16px 18px;">
+            <div style="font-size:12px;line-height:1.4;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#991b1b;">Reason provided</div>
+            <p style="margin:8px 0 0;font-size:14px;line-height:1.65;color:#374151;">${safeReason}</p>
+          </div>
+          <p style="margin:0 0 24px;font-size:15px;line-height:1.7;color:#4b5563;">You are welcome to create a new account at XStreamVideos.</p>
+          <table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr><td align="center" style="padding:0 0 24px;">
+            <a href="${safePlatformUrl}" style="display:inline-block;background:#ff4654;color:#ffffff;text-decoration:none;font-size:15px;font-weight:800;padding:14px 28px;border-radius:10px;box-shadow:0 10px 24px rgba(255,70,84,0.28);">Create a new account</a>
+          </td></tr></table>
+          <p style="margin:0 0 4px;font-size:13px;line-height:1.7;color:#6b7280;text-align:center;">Button not working? Open this link:</p>
+          <p style="margin:0 0 24px;font-size:13px;line-height:1.7;text-align:center;word-break:break-all;"><a href="${safePlatformUrl}" style="color:#ff4654;text-decoration:none;">${safePlatformUrl}</a></p>
+        </td></tr>
+        <tr><td style="padding:0 36px 32px;">
+          <div style="border-top:1px solid #e5e7eb;padding-top:20px;">
+            <p style="margin:0 0 8px;font-size:13px;line-height:1.6;color:#4b5563;font-weight:700;">Need help?</p>
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">Contact support at <a href="mailto:${safeSupportEmail}" style="color:#ff4654;text-decoration:none;">${safeSupportEmail}</a>.</p>
+          </div>
+        </td></tr>
+        <tr><td style="background:#f9fafb;padding:20px 36px;text-align:center;border-top:1px solid #e5e7eb;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#9ca3af;">&copy; ${new Date().getFullYear()} XStreamVideos. Thank you.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  const { data, error } = await resend.emails.send({
+    from,
+    to,
+    subject: 'Your XStreamVideos Account Has Been Deleted',
+    html,
+  });
+
+  if (error) throw new Error(`Resend error: ${error.message}`);
+  console.log(`[email] Account deletion email sent to ${to} (id: ${data?.id ?? 'n/a'})`);
+  return { id: data?.id || null };
+}
+
 function getFrom() {
   return process.env.RESEND_FROM_EMAIL || 'XstreamVideos <support@xstreamvideos.site>';
 }

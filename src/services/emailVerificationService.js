@@ -43,6 +43,8 @@ export async function issueFreshVerificationEmail(uid, emailNorm, displayName) {
     return { ok: false, code: 'INVALID', message: 'Invalid verification request.' };
   }
 
+  await ensureVerificationUserRow(uid, email, name);
+
   const { data: userData } = await supabase
     .from('users')
     .select('email_verified')
@@ -145,6 +147,93 @@ function normalizeRawToken(raw) {
   return t.trim();
 }
 
+function isMissingVerificationUserError(error) {
+  const msg = String(error?.message || '');
+  return (
+    error?.code === '23503' ||
+    msg.includes('email_verification_tokens_user_id_fkey') ||
+    /violates foreign key constraint/i.test(msg)
+  );
+}
+
+async function ensureVerificationUserRow(uid, email, displayName = '') {
+  if (!isConfigured() || !supabase || !uid) return { ok: false };
+
+  try {
+    const { data: existing, error: lookupError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', uid)
+      .maybeSingle();
+    if (!lookupError && existing?.id) return { ok: true, existing: true };
+  } catch {
+    /* continue and try to upsert below */
+  }
+
+  const emailNorm = String(email || '').trim().toLowerCase();
+  const name =
+    String(displayName || '').trim() ||
+    (emailNorm.includes('@') ? emailNorm.split('@')[0] : '') ||
+    'User';
+  const nowIso = new Date().toISOString();
+  const username = name.replace(/\s+/g, '_').toLowerCase().slice(0, 80) || String(uid).slice(0, 80);
+  const avatar = emailNorm
+    ? `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(emailNorm)}`
+    : null;
+
+  const attempts = [
+    {
+      id: uid,
+      username,
+      display_name: name,
+      full_name: name,
+      email: emailNorm,
+      email_verified: false,
+      creator: false,
+      role: 'user',
+      created_at: nowIso,
+      updated_at: nowIso,
+      ...(avatar ? { avatar, avatar_url: avatar } : {}),
+    },
+    {
+      id: uid,
+      username,
+      email: emailNorm,
+      email_verified: false,
+      creator: false,
+      created_at: nowIso,
+      updated_at: nowIso,
+    },
+    { id: uid },
+  ];
+
+  for (const row of attempts) {
+    const { error } = await supabase.from('users').upsert(row, { onConflict: 'id' });
+    if (!error) {
+      if (!Object.prototype.hasOwnProperty.call(row, 'email_verified')) {
+        try {
+          await supabase.from('users').update({ email_verified: false }).eq('id', uid);
+        } catch {
+          /* best effort for legacy schemas */
+        }
+      }
+      return { ok: true };
+    }
+
+    const message = String(error.message || '');
+    const canRetryWithFewerColumns =
+      error.code === 'PGRST204' ||
+      error.code === '42703' ||
+      /column|schema cache|Could not find/i.test(message);
+    if (!canRetryWithFewerColumns) {
+      console.warn(`${LOG} ensure user row failed`, uid, error.message);
+      return { ok: false, error };
+    }
+  }
+
+  return { ok: false };
+}
+
 export async function applyEmailVerificationForUid(uid) {
   if (!isConfigured() || !supabase) {
     return { ok: false, message: 'Service temporarily unavailable.', code: 'SERVICE' };
@@ -195,16 +284,32 @@ export async function createVerificationToken(uid, email) {
     return { ok: false, code: 'NO_DB', message: 'Verification service unavailable.' };
   }
   const emailNorm = String(email || '').trim().toLowerCase();
+  if (!uid || !emailNorm.includes('@')) {
+    return { ok: false, code: 'INVALID', message: 'Invalid verification request.' };
+  }
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
   const expiresAt = new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS);
 
-  const { error } = await supabase.from('email_verification_tokens').insert({
+  let { error } = await supabase.from('email_verification_tokens').insert({
     user_id: uid,
     email: emailNorm,
     token_hash: tokenHash,
     expires_at: expiresAt.toISOString(),
   });
+
+  if (error && isMissingVerificationUserError(error)) {
+    console.warn(`${LOG} token parent user missing; repairing uid=${uid} domain=${emailDomainOnly(emailNorm)}`);
+    const ensured = await ensureVerificationUserRow(uid, emailNorm);
+    if (ensured.ok) {
+      ({ error } = await supabase.from('email_verification_tokens').insert({
+        user_id: uid,
+        email: emailNorm,
+        token_hash: tokenHash,
+        expires_at: expiresAt.toISOString(),
+      }));
+    }
+  }
 
   if (error) {
     console.error(`${LOG} token insert failed uid=${uid} domain=${emailDomainOnly(emailNorm)}`, error.message);

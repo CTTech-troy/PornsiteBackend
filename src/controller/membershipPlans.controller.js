@@ -43,6 +43,102 @@ function parseFeatures(raw) {
   return [];
 }
 
+function missingColumnName(error) {
+  const msg = String(error?.message || '');
+  if (!(error?.code === '42703' || /column .* does not exist|schema cache|Could not find .* column/i.test(msg))) {
+    return '';
+  }
+  return (
+    msg.match(/membership_plans\.([a-zA-Z0-9_]+)/)?.[1] ||
+    msg.match(/column ["']?([a-zA-Z0-9_]+)["']? does not exist/i)?.[1] ||
+    msg.match(/'([a-zA-Z0-9_]+)' column/i)?.[1] ||
+    ''
+  );
+}
+
+function sortPlans(rows = []) {
+  return [...rows].sort((a, b) => {
+    const ao = Number(a.sort_order ?? 0);
+    const bo = Number(b.sort_order ?? 0);
+    if (ao !== bo) return ao - bo;
+    const at = new Date(a.created_at || a.updated_at || 0).getTime() || 0;
+    const bt = new Date(b.created_at || b.updated_at || 0).getTime() || 0;
+    if (at !== bt) return at - bt;
+    return String(a.name || a.id || '').localeCompare(String(b.name || b.id || ''));
+  });
+}
+
+async function selectMembershipPlans({ activeOnly = false } = {}) {
+  const orderProfiles = [
+    ['sort_order', 'created_at'],
+    ['sort_order'],
+    ['created_at'],
+    [],
+  ];
+
+  let lastError = null;
+  for (const columns of orderProfiles) {
+    let query = supabase.from('membership_plans').select('*');
+    if (activeOnly) query = query.eq('is_active', true);
+    for (const column of columns) {
+      query = query.order(column, { ascending: true });
+    }
+    const { data, error } = await query;
+    if (!error) return sortPlans(data || []);
+    lastError = error;
+    if (!missingColumnName(error)) throw error;
+  }
+  throw lastError;
+}
+
+async function insertMembershipPlan(row) {
+  let payload = { ...row };
+  for (let i = 0; i < 12; i += 1) {
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .insert([payload])
+      .select()
+      .single();
+    if (!error) return data;
+    const missing = missingColumnName(error);
+    if (!missing || !(missing in payload)) throw error;
+    delete payload[missing];
+  }
+  throw new Error('Could not create membership plan with current database schema');
+}
+
+async function updateMembershipPlan(id, updates) {
+  let payload = { ...updates };
+  for (let i = 0; i < 12; i += 1) {
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
+    if (!error) return data;
+    const missing = missingColumnName(error);
+    if (!missing || !(missing in payload)) throw error;
+    delete payload[missing];
+  }
+  throw new Error('Could not update membership plan with current database schema');
+}
+
+async function patchMembershipPlan(id, updates) {
+  let payload = { ...updates };
+  for (let i = 0; i < 8; i += 1) {
+    const { error } = await supabase
+      .from('membership_plans')
+      .update(payload)
+      .eq('id', id);
+    if (!error) return;
+    const missing = missingColumnName(error);
+    if (!missing || !(missing in payload)) throw error;
+    delete payload[missing];
+  }
+  throw new Error('Could not update membership plan with current database schema');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public endpoints
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,15 +147,8 @@ export async function getPublicPlans(req, res) {
   try {
     if (!supabase) return res.json({ success: true, data: [] });
 
-    const { data, error } = await supabase
-      .from('membership_plans')
-      .select('*')
-      .eq('is_active', true)
-      .order('sort_order', { ascending: true })
-      .order('created_at', { ascending: true });
-    if (error) throw error;
-
-    const plans = (data || []).map(normalizePlan).filter(Boolean);
+    const data = await selectMembershipPlans({ activeOnly: true });
+    const plans = data.map(normalizePlan).filter(Boolean);
     return res.json({ success: true, data: plans });
   } catch (err) {
     console.error('membershipPlans.getPublicPlans', err?.message || err);
@@ -75,14 +164,8 @@ export async function getAdminPlans(req, res) {
   try {
     if (!supabase) return res.json({ success: true, data: [], stats: { total: 0, active: 0, disabled: 0 } });
 
-    const { data, error } = await supabase
-      .from('membership_plans')
-      .select('*')
-      .order('sort_order', { ascending: true })
-      .order('created_at', { ascending: true });
-    if (error) throw error;
-
-    const plans  = (data || []).map(normalizePlan).filter(Boolean);
+    const data = await selectMembershipPlans({ activeOnly: false });
+    const plans  = data.map(normalizePlan).filter(Boolean);
     const active = plans.filter((p) => p.isActive).length;
     return res.json({
       success: true,
@@ -113,9 +196,7 @@ export async function createPlan(req, res) {
     const priceNum    = Number(price);
     const now         = new Date().toISOString();
 
-    const { data, error } = await supabase
-      .from('membership_plans')
-      .insert([{
+    const data = await insertMembershipPlan({
         id,
         name:           String(title).trim(),
         description:    String(description || '').trim(),
@@ -131,10 +212,7 @@ export async function createPlan(req, res) {
         sort_order:     Number(sortOrder) || 0,
         created_at:     now,
         updated_at:     now,
-      }])
-      .select()
-      .single();
-    if (error) throw error;
+      });
 
     return res.status(201).json({ success: true, data: normalizePlan(data) });
   } catch (err) {
@@ -173,13 +251,7 @@ export async function updatePlan(req, res) {
       updates.price_ngn = cur === 'NGN' ? Number(body.price) : 0;
     }
 
-    const { data, error } = await supabase
-      .from('membership_plans')
-      .update(updates)
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
+    const data = await updateMembershipPlan(id, updates);
 
     return res.json({ success: true, data: normalizePlan(data) });
   } catch (err) {
@@ -227,11 +299,7 @@ export async function togglePlan(req, res) {
       ? (req.body.isActive !== false && req.body.isActive !== 'false' && req.body.isActive !== 0)
       : !current.is_active;
 
-    const { error } = await supabase
-      .from('membership_plans')
-      .update({ is_active: newActive, updated_at: new Date().toISOString() })
-      .eq('id', id);
-    if (error) throw error;
+    await patchMembershipPlan(id, { is_active: newActive, updated_at: new Date().toISOString() });
 
     return res.json({ success: true, id, isActive: newActive });
   } catch (err) {

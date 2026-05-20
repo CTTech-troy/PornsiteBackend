@@ -1,4 +1,5 @@
 import { supabase } from '../config/supabase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
 
 export function isPremiumVideoRow(row) {
   return !!(
@@ -29,15 +30,36 @@ export async function hasActivePremiumAccess(uid) {
 }
 
 export async function hasPurchasedVideo(uid, videoId) {
-  if (!uid || !videoId || !supabase) return false;
+  if (!uid || !videoId) return false;
+  if (supabase) {
+    try {
+      const { data } = await supabase
+        .from('video_purchases')
+        .select('id')
+        .eq('user_id', uid)
+        .eq('video_id', videoId)
+        .maybeSingle();
+      if (data) return true;
+    } catch {
+      /* fall through to generic purchase checks */
+    }
+    try {
+      const { data } = await supabase
+        .from('public_video_purchases')
+        .select('id')
+        .eq('user_id', uid)
+        .eq('public_video_id', videoId)
+        .maybeSingle();
+      if (data) return true;
+    } catch {
+      /* fall through to Firebase fallback */
+    }
+  }
   try {
-    const { data } = await supabase
-      .from('video_purchases')
-      .select('id')
-      .eq('user_id', uid)
-      .eq('video_id', videoId)
-      .maybeSingle();
-    return !!data;
+    const rtdb = getFirebaseRtdb();
+    if (!rtdb) return false;
+    const snap = await rtdb.ref(`videoPurchases/${uid}/${videoId}`).once('value');
+    return snap.exists();
   } catch {
     return false;
   }
