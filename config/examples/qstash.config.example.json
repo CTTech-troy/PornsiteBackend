@@ -1,0 +1,23 @@
+{
+  "provider": "upstash-qstash",
+  "requiredEnv": [
+    "QSTASH_TOKEN",
+    "QSTASH_CURRENT_SIGNING_KEY",
+    "QSTASH_NEXT_SIGNING_KEY"
+  ],
+  "signature": {
+    "clockToleranceSeconds": 60,
+    "rawBodyRequired": true
+  },
+  "retryPolicy": {
+    "retries": 3,
+    "retryDelay": "1000 * pow(2, retried)"
+  },
+  "workflowBasePaths": {
+    "monitoring": "/api/internal/qstash/monitoring",
+    "payouts": "/api/internal/qstash/payouts",
+    "aiModeration": "/api/internal/qstash/ai-moderation",
+    "monetization": "/api/internal/qstash/monetization"
+  }
+}
+

@@ -1,0 +1,143 @@
+name: xstream-platform
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 5043
+      PAYMENT_SERVICE_URL: http://payment-service:10000
+      PAYMENT_SERVICE_SHARED_SECRET: ${PAYMENT_SERVICE_SHARED_SECRET:-}
+      AI_MODERATION_SERVICE_URL: http://ai-gateway:8000
+    ports:
+      - "5043:5043"
+    depends_on:
+      payment-service:
+        condition: service_started
+      ai-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - xstream
+
+  payment-service:
+    build:
+      context: ..
+      dockerfile: payment-service/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:10000
+      PAYMENT_SERVICE_SHARED_SECRET: ${PAYMENT_SERVICE_SHARED_SECRET:-}
+      PAYMENT_DEFAULT_PROVIDER: ${PAYMENT_DEFAULT_PROVIDER:-paystack}
+      PAYMENT_NG_PROVIDER: ${PAYMENT_NG_PROVIDER:-monnify}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:-}
+      PAYSTACK_CALLBACK_URL: ${PAYSTACK_CALLBACK_URL:-http://localhost:5173/payment/success}
+      PAYSTACK_CANCEL_URL: ${PAYSTACK_CANCEL_URL:-http://localhost:5173/payment/cancel}
+      MONNIFY_API_KEY: ${MONNIFY_API_KEY:-}
+      MONNIFY_SECRET_KEY: ${MONNIFY_SECRET_KEY:-}
+      MONNIFY_CONTRACT_CODE: ${MONNIFY_CONTRACT_CODE:-}
+      MONNIFY_BASE_URL: ${MONNIFY_BASE_URL:-https://sandbox.monnify.com}
+      MONNIFY_REDIRECT_URL: ${MONNIFY_REDIRECT_URL:-http://localhost:5173/payment/return}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://localhost:5173/payment/success}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://localhost:5173/payment/cancel}
+      FLUTTERWAVE_SECRET_KEY: ${FLUTTERWAVE_SECRET_KEY:-}
+      FLUTTERWAVE_REDIRECT_URL: ${FLUTTERWAVE_REDIRECT_URL:-http://localhost:5173/payment/return}
+    ports:
+      - "10000:10000"
+    restart: unless-stopped
+    networks:
+      - xstream
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        APP_DIR: frontend
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-http://localhost:5043}
+        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-http://localhost:5043}
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    networks:
+      - xstream
+
+  admin:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        APP_DIR: admin
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-http://localhost:5043}
+        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-http://localhost:5043}
+    ports:
+      - "8081:80"
+    restart: unless-stopped
+    networks:
+      - xstream
+
+  ai-gateway:
+    build:
+      context: ..
+      dockerfile: ai/Dockerfile
+    env_file:
+      - ../ai/.env
+    environment:
+      PORT: 8000
+      BACKEND_URL: http://backend:5043
+      MODEL_CACHE_DIR: /models
+    ports:
+      - "8000:8000"
+    volumes:
+      - ai-model-cache:/models
+    restart: unless-stopped
+    networks:
+      - xstream
+
+  ai-worker:
+    build:
+      context: ..
+      dockerfile: ai/Dockerfile
+    env_file:
+      - ../ai/.env
+    environment:
+      BACKEND_URL: http://backend:5043
+      MODEL_CACHE_DIR: /models
+    command: ["python", "-m", "workers.worker"]
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - ai-model-cache:/models
+    restart: unless-stopped
+    networks:
+      - xstream
+
+  nginx:
+    build:
+      context: ..
+      dockerfile: frontend/nginx/Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+      admin:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - xstream
+
+volumes:
+  ai-model-cache:
+
+networks:
+  xstream:
+    driver: bridge

@@ -1,0 +1,16 @@
+{
+  "transport": "socket.io",
+  "redisAdapter": "upstash-or-managed-redis",
+  "corsEnv": "CORS_ORIGINS",
+  "events": {
+    "adminMonitoring": "admin:*",
+    "aiModeration": "ai:*",
+    "payments": "payments:*",
+    "payouts": "finance:*"
+  },
+  "security": {
+    "requireAuth": true,
+    "adminRoomsRequireAdminRole": true
+  }
+}
+
