@@ -27,7 +27,7 @@ The backend is a Node.js Express application using Supabase for PostgreSQL and F
 
 ### Premium Subscription Flow
 1. User selects a plan from `/api/payments/plans`.
-2. App calls `/api/payments/checkout` to get a checkout URL (Paystack or Monnify).
+2. App calls `/api/payments/checkout` to get a checkout session (Flutterwave for Africa, Paystack internationally).
 3. User completes payment on the provider's hosted page.
 4. Webhook confirms payment and calls `activatePlan` to update user status.
 
@@ -903,9 +903,14 @@ The backend is a Node.js Express application using Supabase for PostgreSQL and F
 - **Auth:** None
 - **Source File:** `src/router/payment.route.js`
 
-#### POST `/api/payments/webhooks/monnify`
-- **Auth:** None
+#### POST `/api/payments/webhooks/flutterwave`
+- **Auth:** None (signature via `verif-hash` header)
 - **Source File:** `src/router/payment.route.js`
+
+#### GET `/api/payments/region`
+- **Auth:** None
+- **Query:** `countryCode`, optional `billingCountry`
+- **Returns:** `{ provider, providerLabel, countryCode, isAfrica }`
 
 ### Pornhub API Section
 #### GET `/api/pornhub/video-info`

@@ -1,4 +1,5 @@
 import * as liveCtrl from './live.controller.js';
+import { getNumberSetting } from '../services/platformSettings.service.js';
 
 // Simple in-memory gift catalog. In production this would live in DB.
 const GIFT_CATALOG = [
@@ -36,9 +37,11 @@ async function processGift({ liveId, senderId, giftType, quantity = 1 }) {
   // persist gift record using live controller helper
   const record = await liveCtrl.sendGift(liveId, senderId, giftType, amount);
 
-  // compute payout split
-  const companyShare = +(amount * 0.30).toFixed(2);
-  const hostShare = +(amount * 0.70).toFixed(2);
+  // compute payout split from global platform settings
+  const creatorPercent = await getNumberSetting('live_gift_creator_percent', 70);
+  const safeCreatorPercent = Math.min(100, Math.max(0, creatorPercent));
+  const hostShare = +(amount * (safeCreatorPercent / 100)).toFixed(2);
+  const companyShare = +(amount - hostShare).toFixed(2);
 
   return {
     gift: {

@@ -1,4 +1,9 @@
-import { getFirebaseAuth, isFirebaseAdminReady } from '../config/firebase.js';
+import {
+  ensureFirebaseAdminUsable,
+  getFirebaseAuth,
+  isFirebaseAdminReady,
+  markFirebaseAdminUnavailable,
+} from '../config/firebase.js';
 import { supabase, isConfigured } from '../config/supabase.js';
 
 const STARTUP_CHECK_TIMEOUT_MS = 3500;
@@ -27,6 +32,9 @@ export async function pingFirebase() {
       detail: 'Admin SDK not initialized (credentials or FIREBASE_DATABASE_URL)'
     };
   }
+  if (!(await ensureFirebaseAdminUsable('Firebase health check'))) {
+    return { id: 'firebase', status: 'inactive', detail: 'Google OAuth host is temporarily unreachable' };
+  }
   const auth = getFirebaseAuth();
   if (!auth) {
     return { id: 'firebase', status: 'inactive', detail: 'Firebase Auth admin API unavailable' };
@@ -43,6 +51,7 @@ export async function pingFirebase() {
     }
     return { id: 'firebase', status: 'inactive', detail: 'unexpected response' };
   } catch (err) {
+    markFirebaseAdminUnavailable(err, 'Firebase health check');
     return { id: 'firebase', status: 'inactive', detail: err?.message || String(err) };
   }
 }

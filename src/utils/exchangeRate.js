@@ -1,4 +1,5 @@
 import { supabase, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import { getNumberSetting } from '../services/platformSettings.service.js';
 
 const ENV_RATE = parseFloat(process.env.NGN_TO_USD_RATE) || 1600;
 
@@ -8,6 +9,15 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function getNgnToUsdRate() {
   if (cachedRate && Date.now() < cacheExpiry) return cachedRate;
+
+  try {
+    const configuredRate = await getNumberSetting('ngn_to_usd_rate', ENV_RATE);
+    if (configuredRate > 0) {
+      cachedRate = configuredRate;
+      cacheExpiry = Date.now() + CACHE_TTL_MS;
+      return configuredRate;
+    }
+  } catch (_) {}
 
   if (isSupabaseConfigured() && supabase) {
     try {

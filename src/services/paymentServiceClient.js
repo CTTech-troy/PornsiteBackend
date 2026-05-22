@@ -1,8 +1,10 @@
+import crypto from 'crypto';
+
 /**
  * paymentServiceClient.js
  *
  * HTTP client for the C# payment service.
- * All payment checkout creation is delegated here — no Paystack/Monnify
+ * All payment checkout creation is delegated here — Paystack, Flutterwave, Stripe
  * credentials are needed in this module.
  *
  * Environment variable:
@@ -29,10 +31,43 @@ if (!_rawUrl && process.env.NODE_ENV === 'production') {
 }
 
 const PAYMENT_SERVICE_URL = (_rawUrl || 'http://localhost:5001').replace(/\/$/, '');
+const PAYMENT_SERVICE_SHARED_SECRET = (process.env.PAYMENT_SERVICE_SHARED_SECRET || '').trim();
 
 const CHECKOUT_TIMEOUT_MS       = 20_000;
 const HEALTH_TIMEOUT_MS         =  5_000;
 const STARTUP_HEALTH_TIMEOUT_MS = 60_000; // Render free-tier cold starts take up to 60s
+
+function canonicalCheckoutPayload(payload, timestamp) {
+  return [
+    String(timestamp || ''),
+    String(payload.orderId || ''),
+    String(payload.userId || ''),
+    String(payload.productType || 'membership'),
+    String(payload.productId || payload.planId || ''),
+    Number(payload.amount || 0).toFixed(2),
+    String(payload.currency || 'USD').toUpperCase(),
+  ].join('\n');
+}
+
+function signedCheckoutHeaders(payload) {
+  if (!PAYMENT_SERVICE_SHARED_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('PAYMENT_SERVICE_SHARED_SECRET is required in production.');
+    }
+    return {};
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = crypto
+    .createHmac('sha256', PAYMENT_SERVICE_SHARED_SECRET)
+    .update(canonicalCheckoutPayload(payload, timestamp))
+    .digest('hex');
+
+  return {
+    'X-Payment-Service-Timestamp': String(timestamp),
+    'X-Payment-Service-Signature': signature,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // createCheckout
@@ -45,6 +80,8 @@ const STARTUP_HEALTH_TIMEOUT_MS = 60_000; // Render free-tier cold starts take u
  *   orderId:        string   — "{userId}_{planId}_{timestamp}"
  *   userId:         string
  *   planId:         string
+ *   productType?:   string   — "membership" | "coins"
+ *   productId?:     string
  *   countryCode:    string   — ISO-3166-1 alpha-2, e.g. "NG" | "US"
  *   currency:       string   — "NGN" | "USD"
  *   amount:         number
@@ -58,24 +95,32 @@ const STARTUP_HEALTH_TIMEOUT_MS = 60_000; // Render free-tier cold starts take u
  */
 export async function createCheckout(params) {
   const url = `${PAYMENT_SERVICE_URL}/api/payments/create`;
+  const payload = {
+    orderId:       params.orderId       ?? '',
+    userId:        params.userId        ?? '',
+    planId:        params.planId        ?? '',
+    productType:   params.productType   ?? 'membership',
+    productId:     params.productId     ?? params.planId ?? '',
+    provider:      params.provider      ?? process.env.PAYMENT_PROVIDER ?? process.env.PAYMENT_DEFAULT_PROVIDER ?? '',
+    countryCode:   params.countryCode   ?? '',
+    currency:      params.currency      ?? 'USD',
+    amount:        params.amount        ?? 0,
+    productName:   params.productName   ?? '',
+    customerEmail: params.customerEmail ?? '',
+    customerName:  params.customerName  ?? 'Member',
+    customerPhone: params.customerPhone ?? '',
+    inlineCheckout: Boolean(params.inlineCheckout),
+    metadata:      params.metadata      ?? {},
+  };
+  const requestBody = JSON.stringify(payload);
+  const headers = { 'Content-Type': 'application/json', ...signedCheckoutHeaders(payload) };
 
   let response;
   try {
     response = await fetch(url, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        orderId:       params.orderId       ?? '',
-        userId:        params.userId        ?? '',
-        planId:        params.planId        ?? '',
-        countryCode:   params.countryCode   ?? '',
-        currency:      params.currency      ?? 'USD',
-        amount:        params.amount        ?? 0,
-        productName:   params.productName   ?? '',
-        customerEmail: params.customerEmail ?? '',
-        customerName:  params.customerName  ?? 'Member',
-        customerPhone: params.customerPhone ?? '',
-      }),
+      headers,
+      body: requestBody,
       signal: AbortSignal.timeout(CHECKOUT_TIMEOUT_MS),
     });
   } catch (err) {
@@ -89,9 +134,9 @@ export async function createCheckout(params) {
   }
 
   // Parse response body — guard against non-JSON (HTML error pages etc.)
-  let body;
+  let responseBody;
   try {
-    body = await response.json();
+    responseBody = await response.json();
   } catch {
     throw new Error(`Payment service returned an invalid response (HTTP ${response.status}).`);
   }
@@ -99,21 +144,27 @@ export async function createCheckout(params) {
   if (!response.ok) {
     // ASP.NET problem details: { title, detail, message }
     const msg =
-      body?.message ??
-      body?.detail  ??
-      body?.title   ??
+      responseBody?.message ??
+      responseBody?.detail  ??
+      responseBody?.title   ??
       `Payment service error (HTTP ${response.status}).`;
     throw new Error(msg);
   }
 
-  if (!body?.checkoutUrl || !body?.provider || !body?.reference) {
+  if (!responseBody?.provider || !responseBody?.reference) {
+    throw new Error('Payment service returned an incomplete checkout response.');
+  }
+
+  const isFlutterwaveInline = responseBody.provider === 'flutterwave' && responseBody.flutterwave;
+  if (!isFlutterwaveInline && !responseBody.checkoutUrl) {
     throw new Error('Payment service returned an incomplete checkout response.');
   }
 
   return {
-    provider:    body.provider,
-    checkoutUrl: body.checkoutUrl,
-    reference:   body.reference,
+    provider:    responseBody.provider,
+    checkoutUrl: responseBody.checkoutUrl || null,
+    reference:   responseBody.reference,
+    flutterwave: responseBody.flutterwave || null,
   };
 }
 

@@ -402,6 +402,161 @@ function getFrom() {
   return process.env.RESEND_FROM_EMAIL || 'XstreamVideos <support@xstreamvideos.site>';
 }
 
+function emailEsc(value) {
+  return String(value ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+}
+
+function contentRemovalEmailShell({ title, eyebrow = 'TRUST & SAFETY', bodyHtml }) {
+  const year = new Date().getFullYear();
+  const supportEmail = emailEsc(process.env.SUPPORT_EMAIL || 'support@xstreamvideos.site');
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${emailEsc(title)}</title></head>
+<body style="margin:0;padding:0;background:#f4f6fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#f4f6fb;padding:40px 16px;">
+  <tr><td align="center">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:600px;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 16px 40px rgba(15,23,42,0.10);">
+      <tr>
+        <td style="background:#111113;padding:30px 34px;">
+          <div style="color:#FF4654;font-size:23px;font-weight:900;letter-spacing:-0.4px;">XStreamVideos</div>
+          <div style="margin-top:8px;color:#ffffff99;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;">${emailEsc(eyebrow)}</div>
+        </td>
+      </tr>
+      <tr><td style="padding:34px;">
+        ${bodyHtml}
+      </td></tr>
+      <tr>
+        <td style="background:#f8fafc;border-top:1px solid #e5e7eb;padding:22px 34px;">
+          <p style="margin:0 0 6px;font-size:12px;line-height:1.6;color:#64748b;">Need help? Contact <a href="mailto:${supportEmail}" style="color:#FF4654;text-decoration:none;">${supportEmail}</a>.</p>
+          <p style="margin:0;font-size:12px;color:#94a3b8;">&copy; ${year} XStreamVideos. All rights reserved.</p>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
+}
+
+async function sendContentRemovalMail({ to, subject, html, required = false }) {
+  const resend = getResend();
+  if (!resend) {
+    if (required) throw new Error('Email service not configured - set RESEND_API_KEY in environment.');
+    console.warn('[email] content removal email skipped: RESEND_API_KEY is missing.');
+    return null;
+  }
+  const { data, error } = await resend.emails.send({ from: getFrom(), to, subject, html });
+  if (error) throw new Error(`Resend error: ${error.message}`);
+  return { id: data?.id || null };
+}
+
+export async function sendContentRemovalConfirmationEmail({ to, name, requestId, contentUrl, deadlineAt }) {
+  const safeName = emailEsc(name || 'there');
+  const safeRequestId = emailEsc(requestId);
+  const safeUrl = emailEsc(contentUrl);
+  const deadline = deadlineAt ? new Date(deadlineAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'within 2 weeks';
+  const html = contentRemovalEmailShell({
+    title: 'Content removal request received',
+    bodyHtml: `
+      <h1 style="margin:0 0 12px;font-size:24px;line-height:1.25;color:#111827;">Your request has been received</h1>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">Hi ${safeName},</p>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">We received your content removal application. It is now visible to our admin team, and the review process has started.</p>
+      <div style="margin:24px 0;padding:18px;border:1px solid #e5e7eb;border-radius:14px;background:#f9fafb;">
+        <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Request ID</p>
+        <p style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px;font-weight:800;color:#111827;">${safeRequestId}</p>
+        <p style="margin:16px 0 8px;font-size:13px;color:#64748b;">Content URL</p>
+        <p style="margin:0;font-size:13px;line-height:1.5;color:#111827;word-break:break-all;">${safeUrl}</p>
+      </div>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">Our Trust & Safety team aims to complete the review within <strong>2 weeks</strong>. Current target decision date: <strong>${emailEsc(deadline)}</strong>.</p>
+      <p style="margin:0;font-size:13px;line-height:1.7;color:#64748b;">Please keep your Request ID for future correspondence. We may contact you if we need additional evidence or clarification.</p>
+    `,
+  });
+  return sendContentRemovalMail({
+    to,
+    subject: `Content removal request received - ${requestId}`,
+    html,
+  });
+}
+
+export async function sendContentRemovalStatusEmail({ to, name, requestId, status, statusLabel, message, deadlineAt }) {
+  const copy = {
+    under_review: {
+      subject: 'Your content removal request is under review',
+      title: 'Review has started',
+      body: 'An admin has started reviewing your content removal request.',
+    },
+    approved: {
+      subject: 'Your content removal request was approved',
+      title: 'Request approved',
+      body: 'Your content removal request was granted. Our team will complete the required content action and document the outcome.',
+    },
+    rejected: {
+      subject: 'Your content removal request was not approved',
+      title: 'Request not approved',
+      body: 'After review, your content removal request was denied based on the information provided and our platform policies.',
+    },
+    needs_info: {
+      subject: 'More information is needed for your content removal request',
+      title: 'Additional information required',
+      body: 'We need more proof or clarification before we can complete the review.',
+    },
+  }[status] || {
+    subject: 'Your content removal request was updated',
+    title: 'Request updated',
+    body: 'Your content removal request has a new update.',
+  };
+
+  const safeMessage = emailEsc(message || 'No additional admin message was provided.');
+  const deadline = deadlineAt ? new Date(deadlineAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'within 2 weeks';
+  const html = contentRemovalEmailShell({
+    title: copy.title,
+    bodyHtml: `
+      <h1 style="margin:0 0 12px;font-size:24px;line-height:1.25;color:#111827;">${emailEsc(copy.title)}</h1>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">Hi ${emailEsc(name || 'there')},</p>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">${emailEsc(copy.body)}</p>
+      <div style="margin:24px 0;padding:18px;border:1px solid #e5e7eb;border-radius:14px;background:#f9fafb;">
+        <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Request ID</p>
+        <p style="margin:0 0 16px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px;font-weight:800;color:#111827;">${emailEsc(requestId)}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Current status</p>
+        <p style="margin:0;font-size:15px;font-weight:800;color:#111827;">${emailEsc(statusLabel || status)}</p>
+      </div>
+      <div style="margin:24px 0;padding:18px;border-left:4px solid #FF4654;border-radius:12px;background:#fff5f6;">
+        <p style="margin:0 0 8px;font-size:13px;font-weight:800;color:#991b1b;">Admin message</p>
+        <p style="margin:0;font-size:14px;line-height:1.7;color:#374151;white-space:pre-wrap;">${safeMessage}</p>
+      </div>
+      <p style="margin:0;font-size:13px;line-height:1.7;color:#64748b;">Policy reference: Terms of Service, Privacy Policy, Content Removal Policy, and Community Guidelines. Target decision timeline remains ${emailEsc(deadline)} unless additional information is required.</p>
+    `,
+  });
+  return sendContentRemovalMail({
+    to,
+    subject: `${copy.subject} - ${requestId}`,
+    html,
+  });
+}
+
+export async function sendContentRemovalFeedbackEmail({ to, name, requestId, message }) {
+  const html = contentRemovalEmailShell({
+    title: 'Message about your content removal request',
+    bodyHtml: `
+      <h1 style="margin:0 0 12px;font-size:24px;line-height:1.25;color:#111827;">Admin feedback</h1>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">Hi ${emailEsc(name || 'there')},</p>
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">Our Trust & Safety team sent a message about your content removal request.</p>
+      <div style="margin:24px 0;padding:18px;border:1px solid #e5e7eb;border-radius:14px;background:#f9fafb;">
+        <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Request ID</p>
+        <p style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px;font-weight:800;color:#111827;">${emailEsc(requestId)}</p>
+      </div>
+      <div style="margin:24px 0;padding:18px;border-left:4px solid #FF4654;border-radius:12px;background:#fff5f6;">
+        <p style="margin:0;font-size:14px;line-height:1.7;color:#374151;white-space:pre-wrap;">${emailEsc(message)}</p>
+      </div>
+    `,
+  });
+  return sendContentRemovalMail({
+    to,
+    subject: `Message about your content removal request - ${requestId}`,
+    html,
+    required: true,
+  });
+}
+
 // ── Payout email helpers ──────────────────────────────────────────────────────
 
 function payoutEmailShell({ title, bodyHtml }) {

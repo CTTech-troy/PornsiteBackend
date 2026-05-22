@@ -3,10 +3,11 @@ import * as adminCtrl from '../controller/admin.controller.js';
 import * as adminSystem from '../controller/adminSystem.controller.js';
 import * as adminUsers from '../controller/adminUsers.controller.js';
 import { createFounderAdmin } from '../controller/adminFounder.controller.js';
-import { requireAdminAuth } from '../middleware/adminAuth.js';
+import { attachAdminFromBearerToken, requireAdminAuth } from '../middleware/adminAuth.js';
 import { adminDeleteUserLimiter } from '../middleware/adminRateLimit.js';
 import adminContentRouter from './adminContent.route.js';
 import adminModerationRouter from './adminModeration.route.js';
+import contentRemovalRouter from './ContentRemoval.route.js';
 
 const router = express.Router();
 
@@ -17,6 +18,7 @@ router.post('/activate', adminCtrl.activateAdmin);
 router.post('/auth/activate', adminCtrl.activateAdmin);
 router.post('/login', adminCtrl.loginAdmin);
 router.post('/auth/login', adminCtrl.loginAdmin);
+router.post('/auth/logout', attachAdminFromBearerToken, adminCtrl.logoutAdmin);
 router.post('/founder-create', createFounderAdmin);
 router.post('/auth/founder-create', createFounderAdmin);
 router.get('/invite/verify/:token', adminCtrl.verifyInviteToken);
@@ -69,6 +71,7 @@ router.get('/system/latency', adminSystem.getRouteLatency);
 
 // --- Sub-routers ---
 router.use('/content', adminContentRouter);
+router.use('/content-removal', contentRemovalRouter);
 router.use('/moderation', adminModerationRouter);
 
 export default router;

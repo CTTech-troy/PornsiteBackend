@@ -1,0 +1,18 @@
+{
+  "provider": "upstash",
+  "requiredEnv": [
+    "UPSTASH_REDIS_REST_URL",
+    "UPSTASH_REDIS_REST_TOKEN"
+  ],
+  "cache": {
+    "defaultTtlSeconds": 30,
+    "apiMetricsTtlSeconds": 10,
+    "moderationStateTtlSeconds": 3600
+  },
+  "queues": {
+    "prefix": "xstream",
+    "maxLocalFallbackItems": 5000,
+    "deadLetterPrefix": "xstream:dead-letter"
+  }
+}
+

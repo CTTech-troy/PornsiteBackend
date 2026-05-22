@@ -1,5 +1,10 @@
 import { supabase, isConfigured } from './supabase.js';
-import { getFirebaseRtdb, isFirebaseReady } from './firebase.js';
+import {
+  ensureFirebaseAdminUsable,
+  getFirebaseRtdb,
+  isFirebaseReady,
+  markFirebaseAdminUnavailable,
+} from './firebase.js';
 
 let syncSkipLogged = false;
 
@@ -316,7 +321,7 @@ async function incrementFollow(userId) {
  */
 async function syncRtdbToSupabase() {
   if (!isConfigured()) return { users: 0, creator_applications: 0, media: 0 };
-  if (!isFirebaseReady || !getFirebaseRtdb()) {
+  if (!isFirebaseReady || !(await ensureFirebaseAdminUsable('RTDB to Supabase startup sync')) || !getFirebaseRtdb()) {
     if (!syncSkipLogged) {
       syncSkipLogged = true;
       console.warn('[syncRtdbToSupabase] Disabled: Firebase Admin is inactive — RTDB sync will not run.');
@@ -355,6 +360,7 @@ async function syncRtdbToSupabase() {
       }
     }
   } catch (err) {
+    markFirebaseAdminUnavailable(err, 'syncRtdbToSupabase users');
     console.warn('syncRtdbToSupabase users:', err?.message || err);
   }
 
@@ -369,6 +375,7 @@ async function syncRtdbToSupabase() {
       }
     }
   } catch (err) {
+    markFirebaseAdminUnavailable(err, 'syncRtdbToSupabase creator_applications');
     console.warn('syncRtdbToSupabase creator_applications:', err?.message || err);
   }
 
@@ -383,6 +390,7 @@ async function syncRtdbToSupabase() {
       }
     }
   } catch (err) {
+    markFirebaseAdminUnavailable(err, 'syncRtdbToSupabase media');
     console.warn('syncRtdbToSupabase media:', err?.message || err);
   }
 

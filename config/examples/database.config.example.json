@@ -1,0 +1,17 @@
+{
+  "provider": "supabase-postgres",
+  "requiredEnv": [
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY"
+  ],
+  "migrationFolder": "backend/supabase/migrations",
+  "sourceOfTruth": [
+    "users",
+    "membership_plans",
+    "user_memberships",
+    "coin_wallets",
+    "coin_wallet_transactions",
+    "monetization_orders"
+  ]
+}
+

@@ -103,23 +103,132 @@ async function _getSupabaseProfile(uid) {
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('avatar, followers, following, coin_balance, email_verified, email, username, role, creator_application_ban')
+      .select('avatar, avatar_url, followers, following, coin_balance, email_verified, email, username, role, creator, verified, display_name, full_name, created_at, updated_at, creator_application_ban')
       .eq('id', uid)
       .maybeSingle();
     if (error || !data) return {};
     const evParsed = isEmailVerifiedFlag(data.email_verified);
     return {
-      avatar:        data.avatar        ?? null,
+      email:         data.email         ?? null,
+      username:      data.username      ?? null,
+      role:          data.role          ?? null,
+      displayName:   data.display_name  ?? null,
+      fullName:      data.full_name     ?? null,
+      avatar:        data.avatar        ?? data.avatar_url ?? null,
+      avatarUrl:     data.avatar_url    ?? data.avatar ?? null,
+      creator:       data.creator === true,
+      creatorStatus: typeof data.verified === 'string' ? data.verified : null,
       followers:     Number(data.followers    ?? 0),
       following:     Number(data.following    ?? 0),
       tokenBalance:  Number(data.coin_balance ?? 0),
       coinBalance:   Number(data.coin_balance ?? 0),
       emailVerified: evParsed === true ? true : evParsed === false ? false : null,
+      createdAt:     data.created_at    ?? null,
+      updatedAt:     data.updated_at    ?? null,
       creatorApplicationBan: data.creator_application_ban || null,
     };
   } catch {
     return {};
   }
+}
+
+function authFallbackAvatar(emailOrUid) {
+  return `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(emailOrUid || 'user')}`;
+}
+
+function firestoreProfileData(snapshot) {
+  return snapshot?.exists ? snapshot.data() || {} : {};
+}
+
+function buildAuthUserProfile({
+  uid,
+  email,
+  displayName,
+  userRecord = null,
+  creatorPack = {},
+  supaProfile = {},
+  firestoreProfile = {},
+  emailVerified = false,
+}) {
+  const cleanEmail = String(email || supaProfile.email || userRecord?.email || firestoreProfile.email || '')
+    .trim()
+    .toLowerCase();
+  const resolvedName =
+    displayName ||
+    supaProfile.displayName ||
+    supaProfile.fullName ||
+    firestoreProfile.displayName ||
+    firestoreProfile.name ||
+    userRecord?.displayName ||
+    (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+  const resolvedAvatar =
+    supaProfile.avatar ||
+    supaProfile.avatarUrl ||
+    firestoreProfile.avatar ||
+    firestoreProfile.photoURL ||
+    userRecord?.photoURL ||
+    authFallbackAvatar(cleanEmail || uid);
+  const creatorStatus =
+    creatorPack.creatorStatus ||
+    supaProfile.creatorStatus ||
+    firestoreProfile.creatorStatus ||
+    (creatorPack.creator || supaProfile.creator || firestoreProfile.creator ? 'approved' : 'none');
+  const creator = creatorPack.creator === true || supaProfile.creator === true || creatorStatus === 'approved';
+  const role = supaProfile.role || firestoreProfile.role || (creator ? 'creator' : 'user');
+  const tokenBalance = Number(supaProfile.tokenBalance ?? supaProfile.coinBalance ?? firestoreProfile.tokenBalance ?? firestoreProfile.coinBalance ?? 0);
+  const followers = Number(supaProfile.followers ?? firestoreProfile.followers ?? 0);
+  const following = Number(supaProfile.following ?? firestoreProfile.following ?? 0);
+
+  return {
+    id: uid,
+    uid,
+    email: cleanEmail,
+    name: resolvedName,
+    displayName: resolvedName,
+    username: supaProfile.username || firestoreProfile.username || null,
+    profilePicture: resolvedAvatar,
+    avatar: resolvedAvatar,
+    photoURL: resolvedAvatar,
+    role,
+    creator,
+    creatorStatus,
+    isPremium:
+      firestoreProfile.isPremium === true ||
+      firestoreProfile.membership === 'active' ||
+      firestoreProfile.membershipStatus === 'active',
+    followers,
+    following,
+    tokenBalance,
+    coinBalance: tokenBalance,
+    emailVerified: emailVerified === true,
+    createdAt: supaProfile.createdAt || firestoreProfile.createdAt || null,
+    updatedAt: supaProfile.updatedAt || firestoreProfile.updatedAt || null,
+    creatorApplicationBan: supaProfile.creatorApplicationBan || firestoreProfile.creatorApplicationBan || null,
+  };
+}
+
+function legacyUserDataFromAuthUser(user) {
+  return {
+    email: user.email,
+    name: user.name,
+    displayName: user.displayName,
+    username: user.username,
+    avatar: user.avatar,
+    avatarUrl: user.profilePicture,
+    profilePicture: user.profilePicture,
+    role: user.role,
+    creator: user.creator,
+    creatorStatus: user.creatorStatus,
+    isPremium: user.isPremium,
+    followers: user.followers,
+    following: user.following,
+    tokenBalance: user.tokenBalance,
+    coinBalance: user.coinBalance,
+    emailVerified: user.emailVerified,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    creatorApplicationBan: user.creatorApplicationBan,
+  };
 }
 
 function isCreatorApplicationBanActive(ban) {
@@ -758,11 +867,16 @@ export async function me(req, res) {
     const displayName =
       userRecord.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
 
-    const profileAvatar =
-      supaProfile.avatar ||
-      userRecord.photoURL ||
-      (userDoc?.exists ? userDoc.data()?.avatar || userDoc.data()?.photoURL : null) ||
-      null;
+    const user = buildAuthUserProfile({
+      uid,
+      email: cleanEmail,
+      displayName,
+      userRecord,
+      creatorPack,
+      supaProfile,
+      firestoreProfile: firestoreProfileData(userDoc),
+      emailVerified: !!(userRecord.emailVerified || supaProfile.emailVerified === true),
+    });
 
     return res.status(200).json({
       success: true,
@@ -770,23 +884,8 @@ export async function me(req, res) {
       email: cleanEmail,
       displayName,
       emailVerified: !!(userRecord.emailVerified || supaProfile.emailVerified === true),
-      userData: {
-        email:         cleanEmail,
-        name:          displayName,
-        avatar:        profileAvatar,
-        creator:       !!creatorPack.creator,
-        creatorStatus: creatorPack.creatorStatus || 'none',
-        followers:     supaProfile.followers    ?? 0,
-        following:     supaProfile.following    ?? 0,
-        tokenBalance:  supaProfile.tokenBalance ?? 0,
-        coinBalance:   supaProfile.coinBalance  ?? 0,
-        emailVerified: !!(userRecord.emailVerified || supaProfile.emailVerified === true),
-        createdAt:     (userDoc?.exists ? userDoc.data()?.createdAt : null) ?? null,
-        creatorApplicationBan:
-          supaProfile.creatorApplicationBan ||
-          (userDoc?.exists ? userDoc.data()?.creatorApplicationBan : null) ||
-          null,
-      },
+      user,
+      userData: legacyUserDataFromAuthUser(user),
     });
   } catch (error) {
     console.error('me error:', error);
@@ -936,32 +1035,35 @@ export async function login(req, res) {
       }
     }
 
-    const sessionToken = mintSessionToken(uid, cleanEmail);
+    const appSessionToken = mintSessionToken(uid, cleanEmail);
+    const sessionToken = appSessionToken || idToken;
     mark('mintSessionToken');
 
     const displayName =
       resolvedUser.displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'User');
+    const user = buildAuthUserProfile({
+      uid,
+      email: cleanEmail,
+      displayName,
+      userRecord: resolvedUser,
+      creatorPack,
+      supaProfile: resolvedSupa,
+      firestoreProfile: firestoreProfileData(firestoreUserSnap),
+      emailVerified: true,
+    });
     recordAuth('loginOk');
     return res.status(200).json({
       success: true,
       message: 'Login successful',
+      token: sessionToken,
       uid,
       email: cleanEmail,
       displayName,
       emailVerified: true,
-      ...(sessionToken && { sessionToken }),
-      userData: {
-        email:        cleanEmail,
-        name:         displayName,
-        avatar:       resolvedSupa.avatar || resolvedUser.photoURL || null,
-        creator:      !!creatorPack.creator,
-        creatorStatus: creatorPack.creatorStatus || 'none',
-        followers:    resolvedSupa.followers    ?? 0,
-        following:    resolvedSupa.following    ?? 0,
-        tokenBalance: resolvedSupa.tokenBalance ?? 0,
-        coinBalance:  resolvedSupa.coinBalance  ?? 0,
-        emailVerified: true,
-      },
+      sessionToken,
+      sessionTokenType: appSessionToken ? 'app' : 'firebase',
+      user,
+      userData: legacyUserDataFromAuthUser(user),
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -1232,30 +1334,41 @@ export async function google(req, res) {
       avatar_url: avatarForRow,
     }).catch((e) => console.warn('google insertUser:', e?.message || e));
 
-    const [userDoc, creatorStatusRow, googleCustomToken] = await Promise.all([
+    const [userDoc, creatorStatusRow, googleSupaProfile, googleCustomToken] = await Promise.all([
       db.collection('users').doc(uid).get(),
       getUserCreatorStatus(uid),
+      _getSupabaseProfile(uid),
       auth.createCustomToken(uid).catch((e) => {
         console.warn('Google login: custom token failed', e?.message || e);
         return null;
       }),
     ]);
 
-    const userData = userDoc.exists ? userDoc.data() : {};
-    userData.creator = !!creatorStatusRow.creator;
-    userData.creatorStatus = creatorStatusRow.creatorStatus || 'none';
-
-    const sessionToken = mintSessionToken(uid, cleanEmail);
+    const appSessionToken = mintSessionToken(uid, cleanEmail);
+    const sessionToken = appSessionToken || idToken;
+    const googleUser = buildAuthUserProfile({
+      uid,
+      email: cleanEmail,
+      displayName: name,
+      userRecord,
+      creatorPack: creatorStatusRow,
+      supaProfile: googleSupaProfile,
+      firestoreProfile: firestoreProfileData(userDoc),
+      emailVerified: googleEmailVerified,
+    });
 
     return res.status(200).json({
       success: true,
       message: 'Google login successful',
+      token: sessionToken,
       uid,
       email: cleanEmail,
       displayName: name,
-      ...(googleCustomToken && { token: googleCustomToken }),
-      ...(sessionToken && { sessionToken }),
-      userData,
+      ...(googleCustomToken && { customToken: googleCustomToken, firebaseCustomToken: googleCustomToken }),
+      sessionToken,
+      sessionTokenType: appSessionToken ? 'app' : 'firebase',
+      user: googleUser,
+      userData: legacyUserDataFromAuthUser(googleUser),
     });
   } catch (error) {
     console.error('Google login error:', error);

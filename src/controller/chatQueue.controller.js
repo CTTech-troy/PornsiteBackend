@@ -9,7 +9,7 @@
  * and all subsequent calls are silently skipped until the migration runs.
  */
 
-import { supabase, isConfigured } from '../config/supabase.js';
+import { supabase, isSupabaseAvailable, isSupabaseNetworkError, markSupabaseUnavailable } from '../config/supabase.js';
 
 // ---------------------------------------------------------------------------
 // Schema availability guard
@@ -69,7 +69,7 @@ function _markSchemaUnavailable(context) {
  * @param {string} socketId Current socket.id
  */
 export async function enqueueUser(userId, gender, socketId) {
-  if (!isConfigured()) throw new Error('Supabase not configured');
+  if (!isSupabaseAvailable()) throw new Error('Supabase not configured or temporarily unreachable');
   if (_schemaAvailable === false) return; // migration not applied
 
   const { error } = await supabase.rpc('enqueue_user', {
@@ -94,7 +94,7 @@ export async function enqueueUser(userId, gender, socketId) {
  * @param {string} userId
  */
 export async function dequeueUser(userId) {
-  if (!isConfigured()) return;
+  if (!isSupabaseAvailable()) return;
   if (_schemaAvailable === false) return; // migration not applied
 
   const { error } = await supabase
@@ -120,7 +120,7 @@ export async function dequeueUser(userId) {
  * @returns {Promise<{roomId: string, peerUserId: string, peerSocketId: string} | null>}
  */
 export async function dequeueAndMatch(userId, gender) {
-  if (!isConfigured()) throw new Error('Supabase not configured');
+  if (!isSupabaseAvailable()) throw new Error('Supabase not configured or temporarily unreachable');
   if (_schemaAvailable === false) return null; // migration not applied
 
   const { data, error } = await supabase.rpc('dequeue_and_match', {
@@ -158,7 +158,7 @@ export async function dequeueAndMatch(userId, gender) {
  * @param {string} roomId UUID
  */
 export async function endChatRoom(roomId) {
-  if (!isConfigured() || !roomId) return;
+  if (!isSupabaseAvailable() || !roomId) return;
   if (_schemaAvailable === false) return; // migration not applied
 
   const { error } = await supabase.rpc('end_chat_room', {
@@ -182,7 +182,7 @@ export async function endChatRoom(roomId) {
  * returns silently on every subsequent call — it will NEVER throw.
  */
 export async function cleanupStaleQueue(secondsOld = 30) {
-  if (!isConfigured()) return;
+  if (!isSupabaseAvailable()) return;
   if (_schemaAvailable === false) return; // silently skip — migration not applied
 
   const { error } = await supabase.rpc('cleanup_stale_queue', {
@@ -196,10 +196,11 @@ export async function cleanupStaleQueue(secondsOld = 30) {
     }
     // Throttle noisy network errors: log at most once per 5 minutes
     const now = Date.now();
-    const isNetworkErr = /fetch failed|ECONNREFUSED|ENOTFOUND|AbortError|timeout/i.test(error.message || '');
-    if (!isNetworkErr || !cleanupStaleQueue._lastWarnTs || now - cleanupStaleQueue._lastWarnTs > 5 * 60 * 1000) {
+    const isNetworkErr = markSupabaseUnavailable(error, 'chat queue cleanup') || isSupabaseNetworkError(error);
+    if (!isNetworkErr || !cleanupStaleQueue._lastWarnTs || now - cleanupStaleQueue._lastWarnTs > 10 * 60 * 1000) {
       cleanupStaleQueue._lastWarnTs = now;
-      console.warn('[chatQueue] cleanupStaleQueue unexpected error:', error.message);
+      const label = isNetworkErr ? 'Supabase temporarily unreachable; cleanup skipped' : 'unexpected error';
+      console.warn(`[chatQueue] cleanupStaleQueue ${label}:`, error.message);
     }
   } else {
     _schemaAvailable = true;

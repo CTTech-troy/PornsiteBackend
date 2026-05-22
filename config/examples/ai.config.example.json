@@ -1,0 +1,18 @@
+{
+  "gatewayUrlEnv": "AI_MODERATION_SERVICE_URL",
+  "workerKeyEnv": "AI_WORKER_API_KEY",
+  "modelCacheDir": "/models",
+  "lazyLoadModels": true,
+  "models": {
+    "vision": ["qwen2.5-vl", "yolov8", "nudenet"],
+    "audio": ["whisper"],
+    "text": ["detoxify"],
+    "fraud": ["isolation_forest", "pyod"]
+  },
+  "performance": {
+    "frameThrottleMs": 3000,
+    "audioChunkSeconds": 15,
+    "maxConcurrentInference": 4
+  }
+}
+

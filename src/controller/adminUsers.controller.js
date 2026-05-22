@@ -1,4 +1,4 @@
-import { randomUUID, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import sanitizeHtml from 'sanitize-html';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
@@ -15,6 +15,8 @@ import {
   fetchUserRowForAdminById,
   buildAdminUserFacetsByIds,
 } from '../services/userDirectoryService.js';
+import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
+import { setCoinBalance } from '../services/coinWallet.service.js';
 
 function detectMissingFields(appData) {
   const missing = [];
@@ -46,16 +48,7 @@ function isMissingTable(err) {
 }
 
 async function logAction(adminId, adminName, action, targetType, targetId, details = {}) {
-  await supabase.from('admin_audit_logs').insert({
-    id: randomUUID(),
-    admin_id: adminId || null,
-    admin_name: adminName || 'Admin',
-    action,
-    target_type: targetType,
-    target_id: String(targetId || ''),
-    details,
-    status: 'success',
-  });
+  await writeAuditAction(adminId, adminName, action, targetType, targetId, details);
 }
 
 function sanitizeAdminReason(value) {
@@ -630,14 +623,24 @@ export async function updateUserCoins(req, res) {
 
     let updated = false;
 
-    // 1. Try Supabase (users stored there use coin_balance)
-    const { error: sbError } = await supabase
-      .from('users')
-      .update({ coin_balance: amount })
-      .eq('id', id);
-    if (!sbError) updated = true;
+    try {
+      await setCoinBalance({
+        userId: id,
+        targetBalance: amount,
+        actorId: req.admin?.id,
+        reason: 'Admin reset coin balance',
+      });
+      updated = true;
+    } catch (walletError) {
+      console.warn('[adminUsers] coin wallet adjustment failed, falling back to legacy mirror:', walletError?.message || walletError);
+      const { error: sbError } = await supabase
+        .from('users')
+        .update({ coin_balance: amount })
+        .eq('id', id);
+      if (!sbError) updated = true;
+    }
 
-    // 2. Always sync to Firestore (Firebase-auth users store tokenBalance there)
+    // Always sync legacy Firebase mirrors for older frontend sessions.
     try {
       const firestoreDb = getFirebaseDb();
       if (firestoreDb) {

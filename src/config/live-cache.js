@@ -3,7 +3,12 @@
  * When Supabase is back, sync pushes cache to Supabase and clears RTDB.
  */
 import { supabase, isConfigured as isSupabaseConfigured } from './supabase.js';
-import { getFirebaseRtdb, isFirebaseAdminReady } from './firebase.js';
+import {
+  ensureFirebaseAdminUsable,
+  getFirebaseRtdb,
+  isFirebaseAdminReady,
+  markFirebaseAdminUnavailable,
+} from './firebase.js';
 import crypto from 'crypto';
 
 const CACHE_PATH = 'lives_cache';
@@ -109,6 +114,7 @@ async function updateInCache(liveId, updates) {
  */
 async function syncCacheToSupabase() {
   if (!isSupabaseConfigured() || !supabase) return { synced: 0, errors: [] };
+  if (!(await ensureFirebaseAdminUsable('live cache startup sync'))) return { synced: 0, errors: [] };
   const ref = cacheRef();
   if (!ref) return { synced: 0, errors: [] };
   let synced = 0;
@@ -163,6 +169,7 @@ async function syncCacheToSupabase() {
     if (synced > 0) console.log('live-cache: synced', synced, 'lives to Supabase');
     if (errors.length > 0) console.warn('live-cache: sync errors', errors);
   } catch (err) {
+    markFirebaseAdminUnavailable(err, 'live-cache syncCacheToSupabase');
     console.warn('live-cache syncCacheToSupabase failed:', err?.message || err);
   }
   return { synced, errors };

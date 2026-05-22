@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import fs from 'fs';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
 const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
@@ -16,6 +16,13 @@ const IMAGE_BUCKET = process.env.SUPABASE_IMAGE_BUCKET || 'images';
 const VIDEO_BUCKET = process.env.SUPABASE_VIDEO_BUCKET || 'videos';
 
 let supabase = null;
+let supabaseUnavailableUntil = 0;
+let supabaseLastWarnAt = 0;
+
+const SUPABASE_NETWORK_COOLDOWN_MS = Math.max(
+  30000,
+  Number(process.env.SUPABASE_NETWORK_COOLDOWN_MS || 120000)
+);
 
 if (typeof globalThis.fetch === 'undefined') {
   try {
@@ -36,17 +43,61 @@ if (typeof globalThis.fetch === 'undefined') {
 // pass their own signal) so large files still work.
 const SUPABASE_TIMEOUT_MS = parseInt(process.env.SUPABASE_TIMEOUT_MS || '20000', 10);
 
+function isSupabaseNetworkError(err) {
+  const msg = String(err?.message || err?.cause?.message || err || '');
+  return /fetch failed|AbortError|timeout|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|network/i.test(msg);
+}
+
+function markSupabaseUnavailable(err, context = 'Supabase', { log = false } = {}) {
+  if (!isSupabaseNetworkError(err)) return false;
+  supabaseUnavailableUntil = Date.now() + SUPABASE_NETWORK_COOLDOWN_MS;
+  if (log) {
+    const now = Date.now();
+    if (!supabaseLastWarnAt || now - supabaseLastWarnAt > SUPABASE_NETWORK_COOLDOWN_MS) {
+      supabaseLastWarnAt = now;
+      console.warn(
+        `[Supabase] Temporarily unreachable during ${context}: ${err?.message || err}. ` +
+        `Skipping optional Supabase calls for ${Math.ceil(SUPABASE_NETWORK_COOLDOWN_MS / 1000)}s.`
+      );
+    }
+  }
+  return true;
+}
+
+function isSupabaseAvailable() {
+  return supabase !== null && Date.now() >= supabaseUnavailableUntil;
+}
+
+function getSupabaseStatus() {
+  if (!supabase) return { configured: false, available: false, cooldownUntil: null };
+  const cooldownUntil = Date.now() < supabaseUnavailableUntil
+    ? new Date(supabaseUnavailableUntil).toISOString()
+    : null;
+  return {
+    configured: true,
+    available: !cooldownUntil,
+    cooldownUntil,
+  };
+}
+
 function supabaseFetch(url, options = {}) {
   // Skip timeout for storage uploads (they can be legitimately slow)
   // and for requests that already carry an abort signal.
   const urlStr = typeof url === 'string' ? url : (url?.toString?.() || '');
   const isStorageOp = urlStr.includes('/storage/v1/object');
   if (options.signal || isStorageOp) {
-    return (globalThis.fetch)(url, options);
+    return (globalThis.fetch)(url, options).catch((err) => {
+      markSupabaseUnavailable(err, 'HTTP request');
+      throw err;
+    });
   }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), SUPABASE_TIMEOUT_MS);
   return (globalThis.fetch)(url, { ...options, signal: ctrl.signal })
+    .catch((err) => {
+      markSupabaseUnavailable(err, 'HTTP request');
+      throw err;
+    })
     .finally(() => clearTimeout(timer));
 }
 
@@ -121,4 +172,17 @@ async function ensureBuckets() {
   }
 }
 
-export { supabase, isConfigured, uploadFileToBucket, getPublicUrl, ensureBuckets, IMAGE_BUCKET, VIDEO_BUCKET, SUPABASE_STORAGE_S3_URL };
+export {
+  supabase,
+  isConfigured,
+  isSupabaseAvailable,
+  isSupabaseNetworkError,
+  markSupabaseUnavailable,
+  getSupabaseStatus,
+  uploadFileToBucket,
+  getPublicUrl,
+  ensureBuckets,
+  IMAGE_BUCKET,
+  VIDEO_BUCKET,
+  SUPABASE_STORAGE_S3_URL,
+};

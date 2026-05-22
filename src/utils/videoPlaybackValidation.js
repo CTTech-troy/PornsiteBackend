@@ -276,17 +276,10 @@ export function filterPlayableVideos(videos = []) {
   return (Array.isArray(videos) ? videos : []).map(annotatePlayableVideo).filter((video) => video.playable === true);
 }
 
-/** Home/trending grid: show external API clips with thumbnail + page URL even when not inline-playable. */
+/** Home/trending grid: only show videos that can play inside the platform. */
 export function isListableInHomeFeed(video = {}) {
   if (!video || typeof video !== 'object') return false;
-  if (video.playable === true || video.listableInFeed === true) return true;
-  const source = String(video.source || '').toLowerCase();
-  if (source !== 'external') return false;
-  const thumb = String(video.thumbnail || video.thumbnailUrl || video.thumb || '').trim();
-  const pageUrl = String(
-    video.videoUrl || video.pageUrl || video.externalUrl || video.videoSrc || video.url || '',
-  ).trim();
-  return thumb.length > 0 && isSafeHttpUrl(pageUrl);
+  return video.playable === true;
 }
 
 export function annotateFeedListableVideo(video = {}) {

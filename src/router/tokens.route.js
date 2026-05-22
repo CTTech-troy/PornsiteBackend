@@ -8,15 +8,34 @@
  */
 
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/authFirebase.js';
+import { createRateLimitStore } from '../middleware/rateLimitStore.js';
 import {
+  createTokenCheckout,
   getTokenBalance,
+  getTokenPackages,
   sendGift,
-  TOKEN_PACKAGES,
 } from '../controller/tokens.controller.js';
-import { createCheckout } from '../services/paymentServiceClient.js';
 
 const router = express.Router();
+const purchaseLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.PAYMENT_CHECKOUT_MAX_PER_MIN || 12),
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRateLimitStore('tokens:purchase'),
+});
+
+const walletActionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.COIN_WALLET_MAX_PER_MIN || 30),
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRateLimitStore('tokens:wallet'),
+});
 
 // ---------------------------------------------------------------------------
 // GET /api/tokens/balance
@@ -35,27 +54,35 @@ router.get('/balance', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /api/tokens/packages
 // ---------------------------------------------------------------------------
-router.get('/packages', (_req, res) => {
-  return res.json({ ok: true, data: TOKEN_PACKAGES });
+router.get('/packages', async (_req, res) => {
+  try {
+    const packages = await getTokenPackages();
+    return res.json({ ok: true, data: packages });
+  } catch (err) {
+    console.error('[tokens] packages error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to load coin packages.' });
+  }
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/tokens/send-gift
 // Body: { creatorId, streamId, gift: { id, name, emoji, price }, senderName? }
 // ---------------------------------------------------------------------------
-router.post('/send-gift', requireAuth, async (req, res) => {
-  const { creatorId, streamId, gift, senderName } = req.body ?? {};
+router.post('/send-gift', requireAuth, walletActionLimiter, async (req, res) => {
+  const { creatorId, streamId, giftId, gift, senderName } = req.body ?? {};
+  const resolvedGiftId = giftId || gift?.id;
 
-  if (!creatorId || !streamId || !gift?.id || !gift?.price) {
-    return res.status(400).json({ ok: false, error: 'creatorId, streamId, and gift (id, price) are required' });
+  if (!creatorId || !streamId || !resolvedGiftId) {
+    return res.status(400).json({ ok: false, error: 'creatorId, streamId, and giftId are required' });
   }
 
   try {
     const result = await sendGift({
-      userId:    req.uid,
+      userId: req.uid,
       senderName,
       creatorId,
       streamId,
+      giftId: resolvedGiftId,
       gift,
     });
 
@@ -76,7 +103,7 @@ router.post('/send-gift', requireAuth, async (req, res) => {
 // The webhook handler (payment.route.js) recognises planId = tokens_* and
 // calls addTokens() instead of activatePlan().
 // ---------------------------------------------------------------------------
-router.post('/purchase', requireAuth, async (req, res) => {
+router.post('/purchase', requireAuth, purchaseLimiter, async (req, res) => {
   const {
     packageId,
     countryCode   = 'US',
@@ -84,27 +111,14 @@ router.post('/purchase', requireAuth, async (req, res) => {
     customerName  = 'Member',
   } = req.body ?? {};
 
-  const pkg = TOKEN_PACKAGES.find(p => p.id === packageId);
-  if (!pkg) {
-    return res.status(400).json({ ok: false, error: `Unknown package: ${packageId}` });
-  }
-
   try {
-    const isNigeria = countryCode.trim().toUpperCase() === 'NG';
-    const amount    = isNigeria ? pkg.priceNgn : pkg.priceUsd;
-    const currency  = isNigeria ? 'NGN' : 'USD';
-    const orderId   = `${req.uid}_${pkg.id}_${Date.now()}`;
-
-    const paymentResp = await createCheckout({
-      orderId,
-      userId:      req.uid,
-      planId:      pkg.id,
-      countryCode: countryCode.trim().toUpperCase(),
-      currency,
-      amount,
-      productName: `${pkg.tokens} Tokens`,
+    const paymentResp = await createTokenCheckout({
+      userId: req.uid,
+      packageId,
+      countryCode,
       customerEmail,
       customerName,
+      req,
     });
 
     return res.json({

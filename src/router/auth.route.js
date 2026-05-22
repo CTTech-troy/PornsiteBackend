@@ -3,6 +3,8 @@ import multer from 'multer';
 import * as authController from '../controller/Auth.Controller.js';
 import * as otpController from '../controller/OTP.Controller.js';
 import {
+  authForgotPasswordBurst,
+  authForgotPasswordWindow,
   authLoginBurst,
   authLoginWindow,
   authSignupBurst,
@@ -19,6 +21,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 
 const limitAuth = [authLoginBurst, authLoginWindow];
 const limitSignup = [authSignupBurst, authSignupWindow];
+const limitForgotPassword = [authForgotPasswordBurst, authForgotPasswordWindow];
 
 // MED-08: Validation rules
 const signupVal = [
@@ -81,8 +84,8 @@ const verifyOTPVal = [
 router.post('/signup', ...limitSignup, signupVal, authController.signup);
 router.post('/login', ...limitAuth, loginVal, authController.login);
 router.post('/logout', authController.logout);
-router.post('/forgot-password', ...limitAuth, forgotPasswordVal, authController.forgotPassword);
-router.post('/reset-password', ...limitAuth, resetPasswordVal, authController.resetPassword);
+router.post('/forgot-password', ...limitForgotPassword, forgotPasswordVal, authController.forgotPassword);
+router.post('/reset-password', ...limitForgotPassword, resetPasswordVal, authController.resetPassword);
 router.post('/google', ...limitAuth, googleVal, authController.google);
 router.post('/age-consent', ...limitAuth, ageConsentVal, authController.submitAgeConsent);
 router.get('/me', requireAuth, authController.me);

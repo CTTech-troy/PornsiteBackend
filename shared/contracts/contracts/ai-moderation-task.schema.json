@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AIModerationTask",
+  "type": "object",
+  "required": ["taskType"],
+  "properties": {
+    "id": { "type": ["string", "null"] },
+    "taskType": {
+      "type": "string",
+      "enum": ["text", "chat", "message", "audio", "transcript", "frame", "image", "screenshot", "object", "nudity", "behavior", "finance"]
+    },
+    "eventId": { "type": ["string", "null"] },
+    "sessionId": { "type": ["string", "null"] },
+    "sessionType": { "type": ["string", "null"] },
+    "modelHint": { "type": ["string", "null"] },
+    "content": {
+      "type": "object",
+      "properties": {
+        "message": { "type": ["string", "null"] },
+        "transcript": { "type": ["string", "null"] },
+        "contentRef": { "type": ["string", "null"] },
+        "contentId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
+

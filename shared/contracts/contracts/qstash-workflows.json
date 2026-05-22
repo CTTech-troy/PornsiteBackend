@@ -1,0 +1,14 @@
+{
+  "workflows": {
+    "monitoring": "/api/internal/qstash/monitoring",
+    "payouts": "/api/internal/qstash/payouts",
+    "aiModeration": "/api/internal/qstash/ai-moderation",
+    "monetization": "/api/internal/qstash/monetization"
+  },
+  "security": {
+    "signatureHeaders": ["Upstash-Signature"],
+    "rawBodyRequired": true,
+    "clockToleranceSeconds": 60
+  }
+}
+

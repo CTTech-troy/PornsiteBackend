@@ -5,9 +5,17 @@
   "main": "index.js",
   "scripts": {
     "test": "node scripts/test-video-playback-validation.mjs",
+    "test:payments": "node --test tests/payments/security.test.mjs",
+    "migrate:content-removal": "node scripts/apply-content-removal-migration.mjs",
     "revalidate-videos": "node scripts/revalidate-videos.mjs",
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "check:redis": "node scripts/check-upstash-redis.mjs",
+    "qstash:create-keepalive": "node scripts/create-qstash-keepalive-schedule.mjs",
+    "qstash:create-monitoring": "node scripts/create-qstash-monitoring-workflows.mjs",
+    "qstash:create-payouts": "node scripts/create-qstash-payout-workflows.mjs",
+    "qstash:create-ai-moderation": "node scripts/create-qstash-ai-moderation-workflows.mjs",
+    "qstash:create-monetization": "node scripts/create-qstash-monetization-workflows.mjs",
     "exit-all-lives": "node scripts/exit-all-lives.js",
     "stress-auth": "node scripts/stress-auth.mjs",
     "docs": "python3 scripts/doc_generator.py"
@@ -19,6 +27,8 @@
   "dependencies": {
     "@justalk/pornhub-api": "^3.5.0",
     "@supabase/supabase-js": "^2.95.3",
+    "@upstash/qstash": "^2.11.0",
+    "@upstash/redis": "^1.38.0",
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.6",

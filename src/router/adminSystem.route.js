@@ -18,6 +18,17 @@ import {
   testExternalFeedConfig,
   getExternalFeedMeta,
 } from '../controller/adminExternalFeed.controller.js';
+import {
+  getObservedApiDetail,
+  getObservedApis,
+  getObservedRequestLogs,
+  getObservabilityOverview,
+  getObservabilityState,
+  runObservabilityAggregation,
+  runObservabilityHealthChecks,
+  runObservabilityIncidentScan,
+  runObservabilitySummary,
+} from '../controller/apiObservability.controller.js';
 
 const router = Router();
 router.use(requireAdminAuth);
@@ -31,6 +42,16 @@ router.get('/health', getSystemHealth);
 router.get('/api-health', getApiHealth);
 router.get('/route-latency', getRouteLatency);
 router.get('/env', getEnvOverview);
+
+router.get('/observability/overview', getObservabilityOverview);
+router.get('/observability/apis', getObservedApis);
+router.get('/observability/apis/:routeKey', getObservedApiDetail);
+router.get('/observability/logs', getObservedRequestLogs);
+router.get('/observability/state', getObservabilityState);
+router.post('/observability/aggregate', runObservabilityAggregation);
+router.post('/observability/health-checks', runObservabilityHealthChecks);
+router.post('/observability/incidents', runObservabilityIncidentScan);
+router.post('/observability/summary', runObservabilitySummary);
 
 router.get('/external-feed', getExternalFeedConfig);
 router.put('/external-feed', updateExternalFeedConfig);
