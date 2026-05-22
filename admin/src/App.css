@@ -1,0 +1,160 @@
+/* Font — Inter Variable for crisp rendering at all weights */
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ── Light-mode (default) ──────────────────────────────────────────────────── */
+:root {
+  --bg-base:     #f8f9fb;
+  --bg-surface:  #ffffff;
+  --bg-elevated: #f0f2f5;
+  --bg-overlay:  #e8eaed;
+
+  --border-subtle:  #f0f2f5;
+  --border-default: #e5e7eb;
+  --border-strong:  #d1d5db;
+  --border-hover:   #9ca3af;
+
+  --text-primary:   #111827;
+  --text-secondary: #374151;
+  --text-tertiary:  #6b7280;
+  --text-disabled:  #9ca3af;
+
+  --chart-grid:    #e5e7eb;
+  --chart-cursor:  #f0f2f5;
+  --scrollbar-thumb: #d1d5db;
+  --scrollbar-hover: #9ca3af;
+}
+
+/* ── Dark-mode overrides ───────────────────────────────────────────────────── */
+.dark {
+  --bg-base:     #0a0a0a;
+  --bg-surface:  #111111;
+  --bg-elevated: #1a1a1a;
+  --bg-overlay:  #222222;
+
+  --border-subtle:  #141414;
+  --border-default: #1f1f1f;
+  --border-strong:  #2a2a2a;
+  --border-hover:   #3a3a3a;
+
+  --text-primary:   #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-tertiary:  #52525b;
+  --text-disabled:  #3f3f46;
+
+  --chart-grid:    #1f1f1f;
+  --chart-cursor:  #1a1a1a;
+  --scrollbar-thumb: #2a2a2a;
+  --scrollbar-hover: #3a3a3a;
+}
+
+/* ── Design System Tokens (Tailwind @theme) ────────────────────────────────── */
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+
+  --color-bg-base:     var(--bg-base);
+  --color-bg-surface:  var(--bg-surface);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-overlay:  var(--bg-overlay);
+
+  --color-border-subtle:  var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-border-strong:  var(--border-strong);
+  --color-border-hover:   var(--border-hover);
+
+  --color-text-primary:   var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary:  var(--text-tertiary);
+  --color-text-disabled:  var(--text-disabled);
+
+  /* Fixed semantic colors — same in both themes */
+  --color-accent:       #3b82f6;
+  --color-accent-hover: #2563eb;
+  --color-accent-dim:   #1e3a5f;
+  --color-success:      #22c55e;
+  --color-warning:      #f59e0b;
+  --color-danger:       #ef4444;
+  --color-info:         #38bdf8;
+
+  /* Backward-compat tokens used by existing pages */
+  --color-dark-bg:     #0a0a0a;
+  --color-dark-card:   #111111;
+  --color-dark-border: #1f1f1f;
+
+  --color-brand-50:  #fff1f2;
+  --color-brand-100: #ffe4e6;
+  --color-brand-200: #fecdd3;
+  --color-brand-300: #fda4af;
+  --color-brand-400: #fb7185;
+  --color-brand-500: #f43f5e;
+  --color-brand-600: #e11d48;
+  --color-brand-700: #be123c;
+  --color-brand-800: #9f1239;
+  --color-brand-900: #881337;
+  --color-brand-950: #4c0519;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+html {
+  height: 100%;
+  scroll-behavior: smooth;
+  font-feature-settings: 'cv11', 'cv02', 'cv03', 'cv04';
+}
+
+body {
+  min-height: 100%;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+  transition: background-color 200ms ease, color 200ms ease;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+
+/* ── Component Layer ───────────────────────────────────────────────────────── */
+@layer components {
+
+  .card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    transition: background-color 200ms ease, border-color 200ms ease;
+  }
+
+  .input-field {
+    display: block;
+    width: 100%;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 150ms ease, box-shadow 150ms ease, background-color 200ms ease;
+  }
+  .input-field::placeholder { color: var(--text-tertiary); }
+  .input-field:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+  }
+  .input-field:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+
+  ::selection { background: rgba(59, 130, 246, 0.25); color: var(--text-primary); }
+}

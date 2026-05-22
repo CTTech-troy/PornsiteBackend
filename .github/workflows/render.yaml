@@ -1,0 +1,232 @@
+# Blueprint for the platform repo root. Clone must include submodules (backend/).
+# Render: enable "Git submodules" on each service if not using this file.
+
+previews:
+  generation: automatic
+
+services:
+  - type: web
+    runtime: docker
+    name: xstream-backend
+    region: oregon
+    plan: starter
+    dockerfilePath: Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health/services
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5043
+      - key: TRUST_PROXY_HOPS
+        value: 1
+      - key: CORS_ORIGINS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_KEY
+        sync: false
+      - key: FIREBASE_DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: SESSION_JWT_SECRET
+        sync: false
+      - key: ADMIN_JWT_SECRET
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: QSTASH_TOKEN
+        sync: false
+      - key: QSTASH_CURRENT_SIGNING_KEY
+        sync: false
+      - key: QSTASH_NEXT_SIGNING_KEY
+        sync: false
+      - key: RENDER_BACKEND_URL
+        sync: false
+      - key: AI_MODERATION_SERVICE_URL
+        sync: false
+      - key: AI_WORKER_API_KEY
+        sync: false
+      - key: PAYMENT_SERVICE_URL
+        sync: false
+      - key: PAYMENT_SERVICE_SHARED_SECRET
+        sync: false
+      - key: PAYMENT_DEFAULT_PROVIDER
+        value: paystack
+      - key: PAYMENT_AFRICA_PROVIDER
+        value: flutterwave
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: FLUTTERWAVE_PUBLIC_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: FLUTTERWAVE_SECRET_KEY
+        sync: false
+      - key: FLUTTERWAVE_WEBHOOK_HASH
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+
+  - type: web
+    runtime: docker
+    name: xstream-payment-service
+    region: oregon
+    plan: starter
+    dockerfilePath: Dockerfile
+    dockerContext: ./payment-service
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: PAYMENT_SERVICE_SHARED_SECRET
+        sync: false
+      - key: PAYMENT_DEFAULT_PROVIDER
+        value: paystack
+      - key: PAYMENT_AFRICA_PROVIDER
+        value: flutterwave
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_CALLBACK_URL
+        sync: false
+      - key: PAYSTACK_CANCEL_URL
+        sync: false
+      - key: FLUTTERWAVE_PUBLIC_KEY
+        sync: false
+      - key: FLUTTERWAVE_SECRET_KEY
+        sync: false
+      - key: FLUTTERWAVE_ENCRYPTION_KEY
+        sync: false
+      - key: FLUTTERWAVE_REDIRECT_URL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_SUCCESS_URL
+        sync: false
+      - key: STRIPE_CANCEL_URL
+        sync: false
+
+  - type: web
+    runtime: docker
+    name: xstream-ai-gateway
+    region: oregon
+    plan: starter
+    dockerfilePath: Dockerfile
+    dockerContext: ./ai
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    disk:
+      name: ai-model-cache
+      mountPath: /models
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: AI_MODEL_MODE
+        value: fallback
+      - key: MODEL_CACHE_DIR
+        value: /models
+      - key: BACKEND_URL
+        sync: false
+      - key: AI_WORKER_API_KEY
+        sync: false
+
+  - type: worker
+    runtime: docker
+    name: xstream-ai-worker
+    region: oregon
+    plan: starter
+    dockerfilePath: Dockerfile
+    dockerContext: ./ai
+    dockerCommand: python -m workers.worker
+    autoDeployTrigger: commit
+    disk:
+      name: ai-worker-model-cache
+      mountPath: /models
+      sizeGB: 10
+    envVars:
+      - key: AI_MODEL_MODE
+        value: fallback
+      - key: MODEL_CACHE_DIR
+        value: /models
+      - key: BACKEND_URL
+        sync: false
+      - key: AI_WORKER_API_KEY
+        sync: false
+
+  - type: web
+    runtime: static
+    name: xstream-frontend
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: frontend/dist
+    autoDeployTrigger: commit
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SOCKET_URL
+        sync: false
+      - key: VITE_FRONTEND_URL
+        sync: false
+      - key: VITE_FLUTTERWAVE_PUBLIC_KEY
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+
+  - type: web
+    runtime: static
+    name: xstream-admin
+    rootDir: admin
+    buildCommand: npm ci && npm run build
+    staticPublishPath: admin/dist
+    autoDeployTrigger: commit
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SOCKET_URL
+        sync: false
+      - key: VITE_FRONTEND_URL
+        sync: false
+      - key: VITE_FLUTTERWAVE_PUBLIC_KEY
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
