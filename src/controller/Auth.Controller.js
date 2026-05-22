@@ -25,6 +25,7 @@ import {
 } from '../services/emailVerificationService.js';
 import {
   publicFrontendUrl,
+  buildPasswordResetContinueUrl,
   buildAppVerificationUrl,
   isLocalDevUrlsConfigured,
 } from '../utils/authPublicUrls.js';
@@ -80,6 +81,52 @@ function getApplicationDob(applicationData = {}) {
     applicationData.birth_date ||
     ''
   );
+}
+
+function normalizeEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return '';
+  return email;
+}
+
+async function resolveAuthenticatedUserEmail(uid) {
+  if (!uid) return '';
+  const profile = await _getSupabaseProfile(uid);
+  let email = normalizeEmail(profile.email);
+  if (email) return email;
+  try {
+    const auth = getFirebaseAuth();
+    if (auth) {
+      const record = await auth.getUser(uid);
+      email = normalizeEmail(record?.email);
+      if (email) return email;
+    }
+  } catch (err) {
+    console.warn('[creator-application] Failed to resolve Firebase email for uid', uid, err?.message || err);
+  }
+  return '';
+}
+
+function validateCreatorApplicationEmail(applicationData, accountEmail, uid) {
+  const submittedEmail = normalizeEmail(applicationData?.email);
+  const trustedEmail = normalizeEmail(accountEmail);
+  if (!trustedEmail) {
+    return { ok: false, status: 400, message: 'Account email is required to submit a creator application.' };
+  }
+  if (submittedEmail && submittedEmail !== trustedEmail) {
+    console.warn('[creator-application] Rejected email mismatch', {
+      uid,
+      submittedEmail: `${submittedEmail.slice(0, 2)}***@${submittedEmail.split('@')[1] || 'unknown'}`,
+      accountEmail: `${trustedEmail.slice(0, 2)}***@${trustedEmail.split('@')[1] || 'unknown'}`,
+    });
+    return {
+      ok: false,
+      status: 403,
+      code: 'EMAIL_MISMATCH',
+      message: 'Application email must match your signed-in account email.',
+    };
+  }
+  return { ok: true, email: trustedEmail };
 }
 
 function validateCreatorMinimumAge(applicationData = {}) {
@@ -571,6 +618,17 @@ export async function applyCreator(req, res) {
       ageConfirmed: true,
       minimumCreatorAge: MIN_CREATOR_AGE,
     };
+
+    const accountEmail = await resolveAuthenticatedUserEmail(uid);
+    const emailGate = validateCreatorApplicationEmail(applicationData, accountEmail, uid);
+    if (!emailGate.ok) {
+      return res.status(emailGate.status).json({
+        success: false,
+        code: emailGate.code,
+        message: emailGate.message,
+      });
+    }
+    applicationData = { ...applicationData, email: emailGate.email };
 
     // If there are uploaded files (req.files), upload them to Supabase and attach URLs
     const attachments = [];
@@ -1119,7 +1177,7 @@ export async function verifyEmail(req, res) {
   } catch (err) {
     console.error('verifyEmail error:', err);
     if (req.method === 'GET' && req.params?.token) {
-      return res.redirect(302, `${publicFrontendUrl()}/auth/verify-failed?reason=${encodeURIComponent('Server error')}`);
+      return res.redirect(302, `${publicFrontendUrl()}/auth/verify-failed?code=SERVER&reason=${encodeURIComponent('Server error')}`);
     }
     return res.status(500).json({ success: false, message: 'Failed to verify email.' });
   }
@@ -1152,9 +1210,17 @@ export async function forgotPassword(req, res) {
       });
     }
 
-    const front = publicFrontendUrl();
+    const continueUrl = buildPasswordResetContinueUrl();
+    if (!continueUrl || !/^https?:\/\//i.test(continueUrl)) {
+      console.error('forgotPassword: invalid continue URL', { continueUrl, front: publicFrontendUrl() });
+      return res.status(503).json({
+        success: false,
+        message: 'Password reset is temporarily unavailable. Please try again later.',
+      });
+    }
+
     const link = await auth.generatePasswordResetLink(emailNorm, {
-      url: `${front}/auth/reset-password`,
+      url: continueUrl,
       handleCodeInApp: false,
     });
 

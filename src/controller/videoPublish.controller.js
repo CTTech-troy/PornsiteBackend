@@ -1222,6 +1222,28 @@ export async function purchaseVideo(req, res) {
     const spend = await spendCoinsForVideoPurchase(uid, tokenPrice);
     try {
       await recordVideoPurchase(uid, video, tokenPrice);
+      const { completePremiumVideoPurchase } = await import('../services/premiumVideoPurchase.service.js');
+      const result = await completePremiumVideoPurchase({
+        userId: uid,
+        video,
+        tokenPrice,
+        paymentReference: spend.source ? `wallet:${spend.source}:${Date.now()}` : null,
+        req,
+      });
+      if (result.duplicate) {
+        return res.json({ success: true, alreadyPurchased: true, message: 'Already purchased' });
+      }
+      return res.json({
+        success: true,
+        message: 'Purchase successful',
+        purchase: {
+          id: result.purchase?.id,
+          creatorEarningsUsd: result.split?.creatorEarningsUsd,
+          platformEarningsUsd: result.split?.platformFeeUsd,
+          purchaseAmountUsd: result.purchaseAmountUsd,
+        },
+        ...(spend.newBalance !== undefined ? { newTokenBalance: spend.newBalance } : {}),
+      });
     } catch (err) {
       await refundCoins(uid, tokenPrice, spend.source);
       if (err?.code === 'ALREADY_PURCHASED') {
@@ -1229,12 +1251,6 @@ export async function purchaseVideo(req, res) {
       }
       throw err;
     }
-
-    return res.json({
-      success: true,
-      message: 'Purchase successful',
-      ...(spend.newBalance !== undefined ? { newTokenBalance: spend.newBalance } : {}),
-    });
   } catch (err) {
     console.error('videoPublish.purchaseVideo error:', err?.message || err);
     return res.status(err?.statusCode || 500).json({ success: false, message: err?.message || 'Purchase failed' });
@@ -1250,7 +1266,9 @@ export async function getVideoPurchaseStatus(req, res) {
 
     const video = await resolvePurchasablePublicVideo(videoId);
     if (!video) return res.json({ success: true, purchased: false });
-    const data = await findExistingPurchase(uid, video);
+    const { findPremiumPurchase } = await import('../services/premiumVideoPurchase.service.js');
+    const premiumRow = await findPremiumPurchase(uid, video.publicVideoId);
+    const data = premiumRow || (await findExistingPurchase(uid, video));
 
     return res.json({
       success:     true,
@@ -1268,6 +1286,55 @@ export async function getVideoPurchaseStatus(req, res) {
 }
 
 // ── Like status ───────────────────────────────────────────────────────────────
+
+export async function getPurchasedVideosLibrary(req, res) {
+  try {
+    const uid = req.uid;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { listUserPurchasedVideos } = await import('../services/premiumVideoPurchase.service.js');
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const search = req.query.search || '';
+    const result = await listUserPurchasedVideos(uid, { page, limit, search });
+    return res.json({ success: true, data: result.data, meta: result.meta });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function getPurchaseReceipt(req, res) {
+  try {
+    const uid = req.uid;
+    const { purchaseId } = req.params;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const { getPurchaseReceipt: loadReceipt } = await import('../services/premiumVideoPurchase.service.js');
+    const receipt = await loadReceipt(uid, purchaseId);
+    if (!receipt) return res.status(404).json({ success: false, message: 'Receipt not found' });
+    return res.json({ success: true, receipt });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function updateWatchProgress(req, res) {
+  try {
+    const uid = req.uid;
+    const { videoId } = req.params;
+    if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
+    const { saveWatchProgress } = await import('../services/premiumVideoPurchase.service.js');
+    const row = await saveWatchProgress(
+      uid,
+      videoId,
+      req.body?.progressSeconds,
+      req.body?.durationSeconds,
+    );
+    if (!row) return res.status(403).json({ success: false, message: 'No access to this video' });
+    return res.json({ success: true, progress: row });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
 
 export async function getLikeStatus(req, res) {
   try {

@@ -2,7 +2,7 @@ import { Resend } from 'resend';
 
 let resendClient = null;
 
-function getResend() {
+export function getResend() {
   if (!resendClient && process.env.RESEND_API_KEY) {
     resendClient = new Resend(process.env.RESEND_API_KEY);
   }
@@ -398,7 +398,7 @@ export async function sendAccountDeletionEmail({ to, name, reason, platformUrl =
   return { id: data?.id || null };
 }
 
-function getFrom() {
+export function getFrom() {
   return process.env.RESEND_FROM_EMAIL || 'XstreamVideos <support@xstreamvideos.site>';
 }
 
@@ -836,4 +836,49 @@ export async function sendAdminEmail(to, subject, message) {
   }
 
   console.log(`[email] ✓ Admin email sent to ${to} (id: ${data?.id ?? 'n/a'}, ${Date.now() - t0}ms)`);
+}
+
+export async function sendPremiumVideoPurchaseEmails({
+  creatorEmail,
+  creatorName,
+  buyerName,
+  videoTitle,
+  purchaseAmountUsd,
+  creatorEarningsUsd,
+  platformEarningsUsd,
+  purchasedAt,
+}) {
+  const resend = getResend();
+  const from = getFrom();
+  const title = String(videoTitle || 'Premium video').replace(/[<>&"]/g, '');
+  const buyer = String(buyerName || 'A user').replace(/[<>&"]/g, '');
+  const earnings = Number(creatorEarningsUsd || 0).toFixed(2);
+  const total = Number(purchaseAmountUsd || 0).toFixed(2);
+  const platform = Number(platformEarningsUsd || 0).toFixed(2);
+  const when = purchasedAt ? new Date(purchasedAt).toLocaleString() : new Date().toLocaleString();
+
+  if (creatorEmail && resend) {
+    const subject = `You earned $${earnings} — premium sale`;
+    const html = `<p>Hi ${creatorName || 'Creator'},</p>
+<p><strong>${buyer}</strong> purchased your premium video <strong>"${title}"</strong>.</p>
+<p>You earned <strong>$${earnings}</strong> (sale total $${total}).</p>
+<p>Purchase time: ${when}</p>
+<p><a href="${process.env.FRONTEND_URL || 'https://xstreamvideos.site'}/studio">Open Creator Studio</a></p>`;
+    await resend.emails.send({ from, to: creatorEmail, subject, html }).catch(() => {});
+  }
+
+  const adminEmail = process.env.ADMIN_FINANCE_EMAIL || process.env.SUPPORT_NOTIFICATIONS_EMAIL;
+  if (adminEmail && resend) {
+    const subject = `Premium video purchase — $${total}`;
+    const html = `<p>Premium video purchased.</p>
+<ul>
+<li>Buyer: ${buyer}</li>
+<li>Video: ${title}</li>
+<li>Total: $${total}</li>
+<li>Creator earnings: $${earnings}</li>
+<li>Platform earnings: $${platform}</li>
+<li>Time: ${when}</li>
+</ul>`;
+    await resend.emails.send({ from, to: adminEmail, subject, html }).catch(() => {});
+  }
 }

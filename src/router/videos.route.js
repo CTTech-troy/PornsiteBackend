@@ -46,7 +46,7 @@ function attachPublishFiles(req, res, next) {
   });
 }
 
-router.get('/stream/:id', streamCtrl.getStreamUrl);
+router.get('/stream/:id', optionalAuth, streamCtrl.getStreamUrl);
 
 // Public feed. Auth is optional so logged-in viewers can still get personalized flags later.
 router.get('/', optionalAuth, async (req, res) => {
@@ -88,6 +88,9 @@ router.delete('/public/:videoId/like', requireAuth, requireVerifiedEmail, videoP
 router.post('/public/:videoId/comments', requireAuth, requireVerifiedEmail, videoPublish.addComment);
 router.post('/public/:videoId/purchase', requireAuth, videoPublish.purchaseVideo);
 router.get('/public/:videoId/purchase-status', requireAuth, videoPublish.getVideoPurchaseStatus);
+router.get('/purchases/library', requireAuth, videoPublish.getPurchasedVideosLibrary);
+router.get('/purchases/receipt/:purchaseId', requireAuth, videoPublish.getPurchaseReceipt);
+router.patch('/purchases/progress/:videoId', requireAuth, videoPublish.updateWatchProgress);
 
 // External discovery routes are public.
 router.get('/search/pornstar', search.searchPornstars);

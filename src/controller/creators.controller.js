@@ -4,6 +4,9 @@
  */
 import { fetchPornstars } from './star.controller.js';
 import { xnxxSearch } from './xnxxSearchFallback.js';
+import { supabase, isConfigured } from '../config/supabase.js';
+import { getFirebaseRtdb } from '../config/firebase.js';
+import { fetchPublishedPublicVideos } from '../utils/platformPublicFeed.js';
 
 const SCRAPER_CACHE = new Map();
 const SCRAPER_CACHE_TTL = 10 * 60 * 1000; // 10 min
@@ -23,6 +26,15 @@ function slugFromLink(link) {
   if (!link || typeof link !== 'string') return '';
   const m = link.match(/\/model\/([^/?]+)/i);
   return m ? m[1] : '';
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(String(value || ''));
+}
+
+function isColumnMissingError(error) {
+  const msg = String(error?.message || '');
+  return error?.code === '42703' || error?.code === 'PGRST204' || /column|schema cache|Could not find/i.test(msg);
 }
 
 /**
@@ -75,6 +87,97 @@ function mapXnxxVideoToCreatorVideo(v, i) {
   };
 }
 
+function mapPlatformVideoToCreatorVideo(v, i) {
+  return {
+    id: v.videoId || v.id || `platform-v-${i}`,
+    title: v.title || 'Video',
+    thumbnail: v.thumbnailUrl || v.thumbnail || '',
+    duration: v.durationSeconds ?? v.duration ?? 0,
+    views: v.totalViews ?? v.views ?? 0,
+    url: v.videoUrl || v.streamUrl || v.playbackUrl || '',
+    likes: v.totalLikes ?? v.likes ?? 0,
+    comments: v.totalComments ?? v.comments ?? 0,
+    isPremium: v.isPremiumContent === true,
+    tokenPrice: Number(v.tokenPrice || 0),
+  };
+}
+
+async function getPlatformCreatorByIdentifier(identifier) {
+  if (!isConfigured() || !supabase) return null;
+  const raw = String(identifier || '').trim();
+  if (!raw) return null;
+  if (!isUuidLike(raw)) return null;
+
+  let { data: creator, error } = await supabase
+    .from('creators')
+    .select('id, user_id, display_name, bio, creator_type, active, status, created_at')
+    .eq('user_id', raw)
+    .maybeSingle();
+  if (error && isColumnMissingError(error)) {
+    ({ data: creator, error } = await supabase
+      .from('creators')
+      .select('id, user_id, display_name, bio, creator_type, created_at')
+      .eq('user_id', raw)
+      .maybeSingle());
+  }
+  if (error) throw error;
+
+  if (!creator && isUuidLike(raw)) {
+    ({ data: creator, error } = await supabase
+      .from('creators')
+      .select('id, user_id, display_name, bio, creator_type, active, status, created_at')
+      .eq('id', raw)
+      .maybeSingle());
+    if (error && isColumnMissingError(error)) {
+      ({ data: creator, error } = await supabase
+        .from('creators')
+        .select('id, user_id, display_name, bio, creator_type, created_at')
+        .eq('id', raw)
+        .maybeSingle());
+    }
+    if (error) throw error;
+  }
+
+  if (!creator?.user_id) return null;
+  const status = String(creator.status || 'active').toLowerCase();
+  if (creator.active === false || ['banned', 'suspended', 'removed'].includes(status)) return null;
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('username, display_name, full_name, avatar, avatar_url, followers, following')
+    .eq('id', creator.user_id)
+    .maybeSingle();
+
+  const allVideos = await fetchPublishedPublicVideos({ page: 1, limit: 500 }).catch(() => []);
+  const videos = (Array.isArray(allVideos) ? allVideos : [])
+    .filter((v) => String(v.userId || v.user_id || v.creatorId || v.creator_id || '') === String(creator.user_id))
+    .map(mapPlatformVideoToCreatorVideo);
+
+  const name =
+    creator.display_name ||
+    user?.display_name ||
+    user?.full_name ||
+    user?.username ||
+    'Creator';
+
+  return {
+    id: creator.user_id,
+    slug: creator.user_id,
+    userId: creator.user_id,
+    creatorId: creator.id,
+    name,
+    displayName: name,
+    avatar: user?.avatar_url || user?.avatar || '',
+    bio: creator.bio || '',
+    creatorType: creator.creator_type || 'pstar',
+    followers: Number(user?.followers || 0),
+    following: Number(user?.following || 0),
+    videosCount: videos.length,
+    videos,
+    _source: 'platform',
+  };
+}
+
 /**
  * GET creator by slug: fetch profile + videos from scraper API.
  * On 429 or failure: use pornhub-api-xnxx search with slug as query and return synthetic profile.
@@ -87,6 +190,16 @@ export async function getCreatorBySlug(req, res) {
   const cached = SCRAPER_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.ts < SCRAPER_CACHE_TTL) {
     return res.json({ success: true, data: cached.data });
+  }
+
+  try {
+    const platformCreator = await getPlatformCreatorByIdentifier(decodeURIComponent(slug));
+    if (platformCreator) {
+      SCRAPER_CACHE.set(cacheKey, { ts: Date.now(), data: platformCreator });
+      return res.json({ success: true, data: platformCreator });
+    }
+  } catch (platformErr) {
+    console.warn('creators.platformDetail', platformErr?.message || platformErr);
   }
 
   const key = process.env.RAPIDAPI_SCRAPER_KEY;
@@ -219,8 +332,6 @@ export async function getCreatorBySlug(req, res) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed' });
   }
 }
-import { supabase, isConfigured } from '../config/supabase.js';
-import { getFirebaseRtdb } from '../config/firebase.js';
 
 // Creator management + wallet helpers
 
@@ -305,14 +416,48 @@ async function getCreatorsByType(type, limit = 100) {
 	if (!isConfigured()) throw new Error('Supabase not configured');
 	const safeType = type === 'channel' ? 'channel' : 'pstar';
 	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
-	const { data, error } = await supabase
+	let { data, error } = await supabase
 		.from('creators')
-		.select('user_id, display_name, bio, creator_type, created_at')
+		.select('id, user_id, display_name, bio, creator_type, active, status, created_at')
 		.eq('creator_type', safeType)
 		.order('created_at', { ascending: false })
 		.limit(safeLimit);
+
+	if (error && isColumnMissingError(error)) {
+		({ data, error } = await supabase
+			.from('creators')
+			.select('id, user_id, display_name, bio, creator_type, created_at')
+			.eq('creator_type', safeType)
+			.order('created_at', { ascending: false })
+			.limit(safeLimit));
+	}
 	if (error) throw error;
-	return data || [];
+
+	const creators = (data || []).filter((c) => {
+		const status = String(c.status || 'active').toLowerCase();
+		return c.active !== false && !['banned', 'suspended', 'removed'].includes(status);
+	});
+	const userIds = creators.map((c) => c.user_id).filter(Boolean);
+	const { data: users } = userIds.length
+		? await supabase
+			.from('users')
+			.select('id, username, display_name, full_name, avatar, avatar_url, followers')
+			.in('id', userIds)
+		: { data: [] };
+	const userById = Object.fromEntries((users || []).map((u) => [u.id, u]));
+
+	return creators.map((creator) => {
+		const user = userById[creator.user_id] || {};
+		const name = creator.display_name || user.display_name || user.full_name || user.username || 'Creator';
+		return {
+			...creator,
+			display_name: name,
+			name,
+			avatar: user.avatar_url || user.avatar || '',
+			avatar_url: user.avatar_url || user.avatar || null,
+			followers: Number(user.followers || 0),
+		};
+	});
 }
 
 async function getTopPlatformCreators(limit = 5) {
@@ -352,7 +497,7 @@ async function getTopPlatformCreators(limit = 5) {
 					const snap = await rtdb.ref(`users/${c.user_id}`).once('value');
 					const val = snap.val();
 					avatar = val?.avatar || val?.photoURL || null;
-				} catch { /* no avatar — use null, frontend will fall back to dicebear */ }
+				} catch { /* no avatar; use null, frontend will fall back to dicebear */ }
 			}
 			return {
 				id: c.user_id,

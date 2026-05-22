@@ -16,13 +16,21 @@ import {
 } from '../services/financePayoutEvents.service.js';
 import {
   approvePayoutRequest,
-  getPayoutAnalytics,
+  getCreatorPayoutBalances,
+  getPayoutById,
   markPayoutCompleted,
   markPayoutFailed,
   markPayoutProcessing,
   rejectPayoutRequest,
   retryFailedPayout,
 } from '../services/payoutWorkflow.service.js';
+import { getPayoutAnalyticsWithRange, getPayoutMetrics } from '../services/payoutMetricsService.js';
+import { getCompanyRevenueMetrics, getUnifiedFinanceDashboard } from '../services/revenueMetricsService.js';
+import { getUserEarningsSummary } from '../services/revenueCalculation.service.js';
+import { getRevenueSettingsAuditHistory } from '../services/platformSettingsAudit.service.js';
+import { getRevenueSettingsPayload, saveAdminSettings } from '../services/platformSettings.service.js';
+import { getReceiptForPayout, streamReceiptPdf } from '../services/receiptService.js';
+import { normalizeCreatorApplicationKyc } from '../services/payoutKyc.service.js';
 import {
   getFraudAlerts,
   getPaymentAuditTrail,
@@ -613,9 +621,17 @@ export async function approveCreatorPayout(req, res) {
 
 // ── POST /api/admin/finance/payouts/:id/mark-paid ─────────────────────────────
 
+const markPaidIdempotency = new Map();
+
 export async function markPayoutPaid(req, res) {
   try {
     const { id } = req.params;
+    const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'];
+    if (idempotencyKey) {
+      const cached = markPaidIdempotency.get(`${id}:${idempotencyKey}`);
+      if (cached) return res.json(cached);
+    }
+
     const {
       transactionReference = null,
       proofUrl = null,
@@ -625,6 +641,9 @@ export async function markPayoutPaid(req, res) {
     } = req.body || {};
 
     if (!useGateway) {
+      if (!String(transactionReference || '').trim() && !proofUrl) {
+        return res.status(400).json({ message: 'Transaction reference or proof is required for manual payout completion.' });
+      }
       const payout = await markPayoutCompleted({
         id,
         admin: req.admin,
@@ -635,7 +654,9 @@ export async function markPayoutPaid(req, res) {
         req,
         io: req.app?.get('io'),
       });
-      return res.json({ message: 'Payout marked completed.', payout });
+      const body = { message: 'Payout marked completed.', payout };
+      if (idempotencyKey) markPaidIdempotency.set(`${id}:${idempotencyKey}`, body);
+      return res.json(body);
     }
 
     const automationEnabled = await getBooleanSetting('creator_payout_automation_enabled', true);
@@ -818,8 +839,143 @@ export async function uploadPayoutProof(req, res) {
 
 export async function getPayoutAnalyticsAdmin(req, res) {
   try {
-    const analytics = await getPayoutAnalytics();
+    const analytics = await getPayoutAnalyticsWithRange(req.query);
     return res.json({ analytics });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getFinanceDashboardMetrics(req, res) {
+  try {
+    const metrics = await getUnifiedFinanceDashboard(req.query);
+    return res.json({ metrics });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getCompanyRevenue(req, res) {
+  try {
+    const company = await getCompanyRevenueMetrics(req.query);
+    return res.json({ company });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getCreatorEarningsAdmin(req, res) {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ message: 'userId required.' });
+    const summary = await getUserEarningsSummary(userId);
+    return res.json({ earnings: summary });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getRevenueSettingsAdmin(req, res) {
+  try {
+    const payload = await getRevenueSettingsPayload();
+    const history = await getRevenueSettingsAuditHistory(40);
+    return res.json({ ...payload, history });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function saveRevenueSettingsAdmin(req, res) {
+  try {
+    const { settings } = req.body || {};
+    const admin = req.adminUser || { name: req.admin?.email || 'Admin', id: req.admin?.id };
+    const result = await saveAdminSettings(settings, admin);
+    return res.json({ message: 'Revenue settings saved.', ...result });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ message: err.message, errors: err.errors });
+  }
+}
+
+export async function getPremiumPurchasesAdmin(req, res) {
+  try {
+    if (!supabase) return res.json({ purchases: [], total: 0 });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, parseInt(req.query.limit, 10) || 20);
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+    const { data, error, count } = await supabase
+      .from('premium_video_purchases')
+      .select('*', { count: 'exact' })
+      .order('purchased_at', { ascending: false })
+      .range(from, to);
+    if (error) return res.json({ purchases: [], total: 0 });
+    return res.json({ purchases: data || [], total: count || 0, page, limit });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getRevenueSettingsHistoryAdmin(req, res) {
+  try {
+    const limit = Math.min(200, parseInt(req.query.limit, 10) || 50);
+    const history = await getRevenueSettingsAuditHistory(limit);
+    return res.json({ history });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getCreatorPayoutDetail(req, res) {
+  try {
+    const { id } = req.params;
+    const payout = await getPayoutById(id);
+    if (!payout) return res.status(404).json({ message: 'Payout not found.' });
+
+    const [balances, auditRes, ledgerRes, historyRes, receiptRes, userRes, appRes] = await Promise.all([
+      getCreatorPayoutBalances(payout.creator_id).catch(() => null),
+      supabase.from('payout_audit_logs').select('*').eq('payout_request_id', id).order('created_at', { ascending: false }).limit(50),
+      supabase.from('creator_wallet_ledger').select('*').eq('creator_id', payout.creator_id).order('created_at', { ascending: false }).limit(30),
+      supabase
+        .from('creator_payout_requests')
+        .select('id,amount_usd,amount_ngn,status,requested_at,receipt_number,reference_id,bank_name,rejection_reason,failure_reason,processed_at,paid_at')
+        .eq('creator_id', payout.creator_id)
+        .order('requested_at', { ascending: false })
+        .limit(20),
+      getReceiptForPayout(id),
+      supabase.from('users').select('id,email,username,display_name,phone,avatar_url,status').eq('id', payout.creator_id).maybeSingle(),
+      supabase.from('creator_applications').select('*').eq('user_id', payout.creator_id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    ]);
+
+    const creator = userRes.data || null;
+    const application = appRes.error && isMissingTable(appRes.error) ? null : (appRes.data || null);
+
+    return res.json({
+      payout,
+      creator,
+      application,
+      kyc: normalizeCreatorApplicationKyc(application, creator),
+      balances,
+      auditLog: auditRes.error && isMissingTable(auditRes.error) ? [] : (auditRes.data || []),
+      walletLedger: ledgerRes.error && isMissingTable(ledgerRes.error) ? [] : (ledgerRes.data || []),
+      withdrawalHistory: historyRes.data || [],
+      receipt: receiptRes || null,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getPayoutReceiptAdmin(req, res) {
+  try {
+    const payout = await getPayoutById(req.params.id);
+    if (!payout) return res.status(404).json({ message: 'Payout not found.' });
+    const receipt = await getReceiptForPayout(req.params.id, req.query.type || null);
+    if (!receipt) return res.status(404).json({ message: 'Receipt not found.' });
+    if (req.path.endsWith('.pdf') || req.query.format === 'pdf') {
+      return streamReceiptPdf(res, receipt, receipt.metadata);
+    }
+    return res.json({ receipt, payout });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

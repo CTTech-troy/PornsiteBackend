@@ -55,12 +55,29 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'live_gift_creator_percent', label: 'Live Gift Creator Share (%)', section: 'Creator Payouts', type: 'number', defaultValue: '70', min: 0, max: 100 },
   { key: 'live_gift_platform_percent', label: 'Live Gift Platform Share (%)', section: 'Creator Payouts', type: 'number', defaultValue: '30', min: 0, max: 100 },
 
+  // Revenue settings (admin commission & fees)
+  { key: 'tax_percent', label: 'Tax Percentage (%)', section: 'Revenue Settings', type: 'number', defaultValue: '0', min: 0, max: 100 },
+  { key: 'withdrawal_fee_percent', label: 'Withdrawal Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '0', min: 0, max: 100 },
+  { key: 'subscription_platform_fee_percent', label: 'Subscription Platform Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '30', min: 0, max: 100 },
+  { key: 'subscription_fee_percent', label: 'Subscription Processing Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '0', min: 0, max: 100 },
+  { key: 'processing_fee_percent', label: 'Payment Processing Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '2.9', min: 0, max: 100 },
+  {
+    key: 'revenue_commission_rules',
+    label: 'Commission Overrides (JSON)',
+    section: 'Revenue Settings',
+    type: 'json',
+    defaultValue: '{"categories":{},"creators":{}}',
+    description: 'Per-category and per-creator platform/creator percent overrides.',
+  },
+
   // Monetization
   { key: 'subscription_fee_enabled', label: 'Subscriptions Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'subscription_trial_days', label: 'Subscription Trial Days', section: 'Monetization', type: 'number', defaultValue: '0', min: 0, max: 365 },
   { key: 'ad_revenue_enabled', label: 'Ad Revenue Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true' },
   { key: 'ad_revenue_share_percent', label: 'Ad Revenue Creator Share (%)', section: 'Monetization', type: 'number', defaultValue: '50', min: 0, max: 100 },
   { key: 'coin_to_usd_rate', label: 'Coin to USD Rate', section: 'Monetization', type: 'number', defaultValue: '0.01', min: 0 },
+  { key: 'video_purchase_creator_percent', label: 'Premium Video Creator Share (%)', section: 'Monetization', type: 'number', defaultValue: '70', min: 0, max: 100 },
+  { key: 'video_purchase_platform_percent', label: 'Premium Video Platform Share (%)', section: 'Monetization', type: 'number', defaultValue: '30', min: 0, max: 100 },
   { key: 'premium_preview_seconds', label: 'Premium Preview Seconds', section: 'Monetization', type: 'number', defaultValue: '12', min: 0, max: 600, public: true },
 
   // Payment gateways
@@ -277,12 +294,18 @@ export async function getAdminSettingsPayload() {
   };
 }
 
-export async function saveAdminSettings(settings, adminName = 'Admin') {
+export async function saveAdminSettings(settings, admin = 'Admin') {
   if (!Array.isArray(settings) || settings.length === 0) {
     const err = new Error('settings array required.');
     err.status = 400;
     throw err;
   }
+
+  const adminName = typeof admin === 'string' ? admin : (admin?.name || admin?.email || 'Admin');
+  const adminMeta = typeof admin === 'object' && admin ? admin : { name: adminName };
+
+  const currentMap = await getPlatformSettingsMap(true);
+  const auditChanges = [];
 
   const errors = [];
   const rows = [];
@@ -296,6 +319,10 @@ export async function saveAdminSettings(settings, adminName = 'Admin') {
     try {
       const sanitized = sanitizeSettingValue(def, input.value);
       if (sanitized.skip) continue;
+      const oldValue = currentMap[key] ?? String(def.defaultValue ?? '');
+      if (oldValue !== sanitized.value) {
+        auditChanges.push({ key, oldValue, newValue: sanitized.value });
+      }
       rows.push({
         key,
         value: sanitized.value,
@@ -328,8 +355,29 @@ export async function saveAdminSettings(settings, adminName = 'Admin') {
   }
   if (error) throw error;
 
+  try {
+    const { logPlatformSettingChanges } = await import('./platformSettingsAudit.service.js');
+    await logPlatformSettingChanges(auditChanges, adminMeta);
+  } catch (_) {
+    /* audit optional until migration applied */
+  }
+
   invalidatePlatformSettingsCache();
   return { updatedKeys: rows.map((row) => row.key) };
+}
+
+export async function getRevenueSettingsPayload() {
+  const { settings, tableMissing } = await getAdminSettingsPayload();
+  const revenueKeys = new Set(
+    PLATFORM_SETTINGS_CATALOG.filter((d) =>
+      d.section === 'Revenue Settings' || d.section === 'Creator Payouts' || d.section === 'Monetization',
+    )
+      .map((d) => d.key),
+  );
+  return {
+    tableMissing,
+    settings: settings.filter((s) => revenueKeys.has(s.key)),
+  };
 }
 
 export async function getPublicPlatformSettings() {

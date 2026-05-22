@@ -156,6 +156,15 @@ function isMissingVerificationUserError(error) {
   );
 }
 
+function isSchemaColumnError(error) {
+  const msg = String(error?.message || '');
+  return (
+    error?.code === 'PGRST204' ||
+    error?.code === '42703' ||
+    /column|schema cache|Could not find/i.test(msg)
+  );
+}
+
 async function ensureVerificationUserRow(uid, email, displayName = '') {
   if (!isConfigured() || !supabase || !uid) return { ok: false };
 
@@ -220,12 +229,7 @@ async function ensureVerificationUserRow(uid, email, displayName = '') {
       return { ok: true };
     }
 
-    const message = String(error.message || '');
-    const canRetryWithFewerColumns =
-      error.code === 'PGRST204' ||
-      error.code === '42703' ||
-      /column|schema cache|Could not find/i.test(message);
-    if (!canRetryWithFewerColumns) {
+    if (!isSchemaColumnError(error)) {
       console.warn(`${LOG} ensure user row failed`, uid, error.message);
       return { ok: false, error };
     }
@@ -234,37 +238,72 @@ async function ensureVerificationUserRow(uid, email, displayName = '') {
   return { ok: false };
 }
 
+async function markSupabaseEmailVerified(uid, nowIso) {
+  const attempts = [
+    { email_verified: true, email_verified_at: nowIso },
+    { email_verified: true },
+  ];
+  let lastError = null;
+
+  for (const patch of attempts) {
+    const { error } = await supabase.from('users').update(patch).eq('id', uid);
+    if (!error) return { ok: true };
+
+    lastError = error;
+    if (!isSchemaColumnError(error)) {
+      return { ok: false, error };
+    }
+  }
+
+  return { ok: false, error: lastError, missingColumns: true };
+}
+
 export async function applyEmailVerificationForUid(uid) {
   if (!isConfigured() || !supabase) {
     return { ok: false, message: 'Service temporarily unavailable.', code: 'SERVICE' };
   }
   if (!uid) return { ok: false, message: 'Invalid verification request.', code: 'INVALID' };
 
-  const { error: upErr } = await supabase.from('users').update({
-    email_verified: true,
-    email_verified_at: new Date().toISOString(),
-  }).eq('id', uid);
-  if (upErr) {
-    console.warn(`${LOG} apply users update failed`, upErr.message);
-    return { ok: false, message: 'Could not update verification status.', code: 'DB_UPDATE' };
+  const nowIso = new Date().toISOString();
+  const supabaseResult = await markSupabaseEmailVerified(uid, nowIso);
+  if (!supabaseResult.ok) {
+    console.warn(`${LOG} apply users update failed`, supabaseResult.error?.message || 'unknown error');
   }
 
+  let firebaseAuthUpdated = false;
   try {
     const auth = getFirebaseAuth();
-    if (auth) await auth.updateUser(uid, { emailVerified: true });
+    if (auth) {
+      await auth.updateUser(uid, { emailVerified: true });
+      firebaseAuthUpdated = true;
+    }
   } catch (fbErr) {
     console.warn(`${LOG} Firebase updateUser emailVerified:`, fbErr?.message);
   }
 
-  const db = getFirebaseDb();
-  if (db) {
-    await db.collection('users').doc(uid).set(
-      { emailVerified: true, updatedAt: new Date().toISOString() },
-      { merge: true }
-    );
+  let firestoreUpdated = false;
+  try {
+    const db = getFirebaseDb();
+    if (db) {
+      await db.collection('users').doc(uid).set(
+        { emailVerified: true, updatedAt: nowIso },
+        { merge: true }
+      );
+      firestoreUpdated = true;
+    }
+  } catch (firestoreErr) {
+    console.warn(`${LOG} Firestore emailVerified:`, firestoreErr?.message);
   }
 
-  return { ok: true, message: 'Email verified successfully. You can now log in.', code: 'OK' };
+  if (!supabaseResult.ok && !firebaseAuthUpdated && !firestoreUpdated) {
+    return { ok: false, message: 'Could not update verification status.', code: 'DB_UPDATE' };
+  }
+
+  return {
+    ok: true,
+    message: 'Email verified successfully. You can now log in.',
+    code: supabaseResult.ok ? 'OK' : 'OK_PARTIAL',
+  };
 }
 
 export async function invalidateUnusedTokensForUser(uid) {

@@ -14,7 +14,16 @@ import {
   getPaymentAuditAdmin,
   getPaymentReconciliationAdmin,
   getCreatorPayoutsAdmin,
+  getCreatorPayoutDetail,
+  getFinanceDashboardMetrics,
+  getCompanyRevenue,
+  getCreatorEarningsAdmin,
+  getRevenueSettingsAdmin,
+  saveRevenueSettingsAdmin,
+  getRevenueSettingsHistoryAdmin,
+  getPremiumPurchasesAdmin,
   getPayoutAnalyticsAdmin,
+  getPayoutReceiptAdmin,
   approveCreatorPayout,
   exportPayoutsCsv,
   markPayoutPaid,
@@ -62,7 +71,18 @@ router.get('/payment-intents/:id/audit', getPaymentAuditAdmin);
 // Creator Payouts
 router.get('/payouts', getCreatorPayoutsAdmin);
 router.get('/payouts/analytics', getPayoutAnalyticsAdmin);
+router.get('/dashboard-metrics', getFinanceDashboardMetrics);
+router.get('/payouts/dashboard-metrics', getFinanceDashboardMetrics);
+router.get('/company-revenue', getCompanyRevenue);
+router.get('/creator-earnings/:userId', getCreatorEarningsAdmin);
+router.get('/revenue-settings', getRevenueSettingsAdmin);
+router.put('/revenue-settings', saveRevenueSettingsAdmin);
+router.get('/revenue-settings/history', getRevenueSettingsHistoryAdmin);
+router.get('/premium-purchases', getPremiumPurchasesAdmin);
 router.get('/payouts/export.csv', exportPayoutsCsv);
+router.get('/payouts/:id/receipt.pdf', getPayoutReceiptAdmin);
+router.get('/payouts/:id/receipt', getPayoutReceiptAdmin);
+router.get('/payouts/:id', getCreatorPayoutDetail);
 router.post('/payouts/:id/approve', approveCreatorPayout);
 router.post('/payouts/:id/mark-processing', markPayoutProcessingAdmin);
 router.post('/payouts/:id/mark-paid', markPayoutPaid);

@@ -10,10 +10,13 @@ import {
   sendPayoutRejectedEmail,
   sendPayoutRequestedEmail,
 } from './emailService.js';
+import { createPayoutReceipt, getReceiptForPayout } from './receiptService.js';
+import { sendPayoutReceiptEmail, receiptEmailSubject } from './payoutEmailService.js';
 import {
   emitFinancePayoutEvent,
   writeFinancePayoutLog,
 } from './financePayoutEvents.service.js';
+import { getCreatorWalletBalance, invalidateRevenueCache } from './revenueCalculation.service.js';
 
 const ACTIVE_STATUSES = ['pending', 'approved', 'processing'];
 const COMMITTED_STATUSES = ['pending', 'approved', 'processing', 'paid', 'completed'];
@@ -73,6 +76,7 @@ async function writeCache(key, value, ttlSeconds = 30) {
 }
 
 async function invalidatePayoutCache() {
+  invalidateRevenueCache();
   if (!upstashRedis) return;
   try {
     await upstashRedis.del(PAYOUT_ANALYTICS_CACHE_KEY);
@@ -169,24 +173,26 @@ async function insertPayoutTransaction({ payout, status, provider = 'manual', re
 export async function getCreatorPayoutBalances(creatorId) {
   if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
 
-  const [earningsRes, payoutsRes, walletRes] = await Promise.all([
-    supabase.from('creator_earnings').select('amount_usd').eq('creator_id', creatorId),
-    supabase.from('creator_payout_requests').select('amount_usd,status').eq('creator_id', creatorId),
-    supabase.from('wallets').select('*').eq('owner_id', creatorId).maybeSingle(),
-  ]);
+  const wallet = await getCreatorWalletBalance(creatorId);
+  const { data: payouts } = await supabase
+    .from('creator_payout_requests')
+    .select('amount_usd,status')
+    .eq('creator_id', creatorId);
+  const payoutRows = payouts || [];
+  const pending = money(payoutRows.filter((row) => row.status === 'pending').reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
+  const processing = money(payoutRows.filter((row) => ['approved', 'processing'].includes(row.status)).reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
+  const withdrawn = money(wallet.paidOut);
+  const failed = money(payoutRows.filter((row) => row.status === 'failed').reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
+  const rejected = money(payoutRows.filter((row) => row.status === 'rejected').reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
+  const available = wallet.available;
+  const total = wallet.totalEarnings;
 
-  if (earningsRes.error && !isMissingDbFeature(earningsRes.error)) throw earningsRes.error;
-  if (payoutsRes.error && !isMissingDbFeature(payoutsRes.error)) throw payoutsRes.error;
-
-  const earnings = earningsRes.data || [];
-  const payouts = payoutsRes.data || [];
-  const total = money(earnings.reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
-  const pending = money(payouts.filter((row) => row.status === 'pending').reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
-  const processing = money(payouts.filter((row) => ['approved', 'processing'].includes(row.status)).reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
-  const withdrawn = money(payouts.filter((row) => ['paid', 'completed'].includes(row.status)).reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
-  const failed = money(payouts.filter((row) => row.status === 'failed').reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
-  const rejected = money(payouts.filter((row) => row.status === 'rejected').reduce((sum, row) => sum + Number(row.amount_usd || 0), 0));
-  const available = money(Math.max(0, total - pending - processing - withdrawn));
+  let walletRes = { data: null };
+  try {
+    walletRes = await supabase.from('wallets').select('*').eq('owner_id', creatorId).maybeSingle();
+  } catch (_) {
+    /* optional */
+  }
 
   return {
     total,
@@ -223,7 +229,7 @@ async function enqueuePayoutWorkflow(path, body, { delaySeconds = 0, retries = 3
 }
 
 export async function enqueuePayoutNotification(type, payout, extra = {}) {
-  return enqueuePayoutWorkflow('/notify', {
+  const queued = await enqueuePayoutWorkflow('/notify', {
     type,
     payoutId: payout.id,
     creatorId: payout.creator_id,
@@ -234,6 +240,14 @@ export async function enqueuePayoutNotification(type, payout, extra = {}) {
   }, {
     retries: readPositiveInteger('QSTASH_PAYOUT_NOTIFICATION_RETRIES', 3),
   });
+  if (!queued?.queued) {
+    await runPayoutNotification({
+      type,
+      payoutId: payout.id,
+      payload: { payout, ...extra },
+    });
+  }
+  return queued;
 }
 
 export async function runPayoutNotification({ type, payoutId, payload = {} }) {
@@ -294,8 +308,39 @@ export async function runPayoutNotification({ type, payoutId, payload = {} }) {
   if (payout.creator_email) {
     if (type === 'submitted') await sendPayoutRequestedEmail(emailPayload);
     else if (type === 'approved' || type === 'processing') await sendPayoutApprovedEmail(emailPayload);
-    else if (type === 'completed') await sendPayoutPaidEmail(emailPayload);
-    else if (type === 'rejected' || type === 'failed') await sendPayoutRejectedEmail({ ...emailPayload, reason: config.message });
+    else if (type === 'completed') {
+      let receipt = await getReceiptForPayout(payout.id, 'paid');
+      if (!receipt?.html_body) receipt = await createPayoutReceipt(payout, 'paid');
+      const htmlBody = receipt?.html_body || receipt?.htmlBody;
+      if (htmlBody) {
+        await sendPayoutReceiptEmail({
+          to: payout.creator_email,
+          subject: receiptEmailSubject('paid', receipt.receiptNumber, payout.amount_usd),
+          htmlBody,
+          payoutId: payout.id,
+          receiptId: receipt?.id,
+        });
+      } else {
+        await sendPayoutPaidEmail(emailPayload);
+      }
+    } else if (type === 'rejected') {
+      let receipt = await getReceiptForPayout(payout.id, 'rejected');
+      if (!receipt?.html_body) receipt = await createPayoutReceipt(payout, 'rejected');
+      const htmlBody = receipt?.html_body || receipt?.htmlBody;
+      if (htmlBody) {
+        await sendPayoutReceiptEmail({
+          to: payout.creator_email,
+          subject: receiptEmailSubject('rejected', receipt.receiptNumber, payout.amount_usd),
+          htmlBody,
+          payoutId: payout.id,
+          receiptId: receipt?.id,
+        });
+      } else {
+        await sendPayoutRejectedEmail({ ...emailPayload, reason: config.message });
+      }
+    } else if (type === 'failed') {
+      await sendPayoutRejectedEmail({ ...emailPayload, reason: config.message });
+    }
   }
 
   return { success: true, type, payoutId: payout.id };
@@ -599,9 +644,14 @@ export async function rejectPayoutRequest({ id, admin, reason, req = null, io = 
     nextStatus: 'rejected',
     actorId: admin?.id || null,
     reason: String(reason).trim().slice(0, 1000),
-    metadata: { action: 'rejected' },
+    metadata: { action: 'rejected', adminId: admin?.id || null },
     req,
   });
+  try {
+    await createPayoutReceipt({ ...payout, rejection_reason: reason }, 'rejected', { adminId: admin?.id || null });
+  } catch (err) {
+    console.warn('[payout] rejection receipt failed:', err.message);
+  }
   await writeFinancePayoutLog(payout, 'rejected', { errorMessage: reason, metadata: { adminId: admin?.id || null } });
   await logAdminAction(req || { admin }, {
     admin,
@@ -633,16 +683,27 @@ export async function markPayoutProcessing({ id, admin, transactionReference = n
 }
 
 export async function markPayoutCompleted({ id, admin, transactionReference = null, proofUrl = null, provider = 'manual', notes = '', req = null, io = null }) {
+  const ref = transactionReference || `PAY-${randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
   const payout = await transitionPayout({
     id,
     nextStatus: 'completed',
     actorId: admin?.id || null,
     reason: notes,
-    transactionReference,
+    transactionReference: ref,
     proofUrl,
     metadata: { action: 'manual_completion', provider, notes },
     req,
   });
+  let receipt = null;
+  try {
+    receipt = await createPayoutReceipt(
+      { ...payout, transaction_reference: payout.transaction_reference || ref },
+      'paid',
+      { adminId: admin?.id || null },
+    );
+  } catch (err) {
+    console.warn('[payout] paid receipt failed:', err.message);
+  }
   await insertPayoutTransaction({ payout, status: 'completed', provider, reference: transactionReference, proofUrl, actorId: admin?.id || null, metadata: { notes } });
   await writeFinancePayoutLog(payout, 'completed', { provider, transactionReference, paymentDate: new Date().toISOString(), metadata: { action: 'completed', adminId: admin?.id || null } });
   await logAdminAction(req || { admin }, {
@@ -654,7 +715,7 @@ export async function markPayoutCompleted({ id, admin, transactionReference = nu
   });
   emitPayoutRealtime(io, 'finance:payout-updated', payout, { status: 'completed' });
   await enqueuePayoutNotification('completed', payout);
-  return publicPayout(payout);
+  return { ...publicPayout(payout), receiptId: receipt?.id || null, receiptNumber: receipt?.receiptNumber || payout.receipt_number || null };
 }
 
 export async function markPayoutFailed({ id, admin, reason, req = null, io = null }) {
