@@ -30,6 +30,7 @@ import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoId
 import { getPathSafeVideoId } from '../utils/videoPathId.js';
 import { annotatePlayableVideo, validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
 import { validateEmbedWithProbe } from '../services/videoSourceProbe.service.js';
+import { creditCoins as creditCoinWallet, spendCoins as debitCoinWallet } from '../services/coinWallet.service.js';
 
 async function resolvePlaybackValidation(videoInput) {
   const base = validateVideoPlaybackSource(videoInput);
@@ -970,6 +971,24 @@ async function spendSupabaseCoins(uid, amount) {
   if (!price) return { newBalance: undefined, source: 'none' };
   if (!supabase) throw new Error('Token wallet is temporarily unavailable.');
 
+  try {
+    const result = await debitCoinWallet({
+      userId: uid,
+      amount: price,
+      type: 'spend',
+      sourceType: 'premium_video',
+      metadata: { reason: 'premium_video_purchase' },
+    });
+    return { newBalance: Number(result.balance), source: 'coin_wallet' };
+  } catch (walletError) {
+    if (/insufficient/i.test(String(walletError?.message || ''))) {
+      const err = new Error('Insufficient tokens. Please purchase more tokens.');
+      err.statusCode = 402;
+      throw err;
+    }
+    console.warn('[videoPurchase] coin wallet spend failed, trying legacy path:', walletError?.message || walletError);
+  }
+
   const rpc = await supabase.rpc('spend_coins', {
     p_user_id: uid,
     p_amount:  price,
@@ -1105,6 +1124,16 @@ async function refundCoins(uid, amount, source) {
   }
 
   if (!supabase) return;
+  try {
+    await creditCoinWallet({
+      userId: uid,
+      amount: price,
+      type: 'refund',
+      sourceType: 'premium_video_refund',
+      metadata: { source },
+    });
+    return;
+  } catch (_) {}
   const rpc = await supabase.rpc('add_coins', { p_user_id: uid, p_amount: price });
   if (!rpc.error) return;
   const { data } = await supabase.from('users').select('coin_balance').eq('id', uid).maybeSingle();

@@ -6,7 +6,7 @@ import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 import { isXnxxApiConfigured, fetchXnxxSearch } from '../utils/xnxxRapidApi.js';
 import { filterPlayableVideos } from '../utils/videoPlaybackValidation.js';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 function homeCardToSearchItem(card) {
   if (!card) return null;

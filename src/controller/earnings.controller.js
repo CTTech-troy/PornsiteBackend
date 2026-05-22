@@ -1,12 +1,38 @@
-import { supabase, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import {
+  supabase,
+  isConfigured as isSupabaseConfigured,
+  isSupabaseAvailable,
+  isSupabaseNetworkError,
+  markSupabaseUnavailable,
+} from '../config/supabase.js';
 import { getNgnToUsdRate, ngnToUsd } from '../utils/exchangeRate.js';
+import { getCreatorPayoutBalances } from '../services/payoutWorkflow.service.js';
 
 const CREATOR_SHARE = 0.70;
 const VIEW_MILESTONE = 1000;
 const VIEW_MILESTONE_USD = 0.65;
 
 function ensureSupabase() {
-  if (!isSupabaseConfigured() || !supabase) throw new Error('Supabase not configured');
+  if (!isSupabaseConfigured() || !isSupabaseAvailable() || !supabase) throw new Error('Supabase not configured');
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function emptyEarningsResponse(degraded = false) {
+  return {
+    success: true,
+    totalUsd: 0,
+    availableUsd: 0,
+    pendingUsd: 0,
+    processingUsd: 0,
+    withdrawnUsd: 0,
+    liveUsd: 0,
+    viewsUsd: 0,
+    rows: [],
+    degraded,
+  };
 }
 
 async function insertEarning(creatorId, amountUsd, source, sourceId) {
@@ -73,7 +99,9 @@ export async function getEarnings(req, res) {
   try {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
-    ensureSupabase();
+    if (!isSupabaseConfigured() || !isSupabaseAvailable() || !supabase) {
+      return res.json(emptyEarningsResponse(true));
+    }
 
     const { data, error } = await supabase
       .from('creator_earnings')
@@ -88,14 +116,42 @@ export async function getEarnings(req, res) {
     const liveUsd  = rows.filter(r => r.source === 'live_gifts').reduce((s, r) => s + (Number(r.amount_usd) || 0), 0);
     const viewsUsd = rows.filter(r => r.source === 'video_views').reduce((s, r) => s + (Number(r.amount_usd) || 0), 0);
 
-    return res.json({ success: true, totalUsd, liveUsd, viewsUsd, rows });
+    let balances = {
+      total: roundMoney(totalUsd),
+      available: roundMoney(totalUsd),
+      pending: 0,
+      processing: 0,
+      withdrawn: 0,
+    };
+
+    try {
+      // Withdrawals live in creator_payout_requests, not creator_earnings.
+      // Use payout-aware balances so profile cards drop immediately after a
+      // creator requests or completes a withdrawal.
+      balances = await getCreatorPayoutBalances(uid);
+    } catch (balanceErr) {
+      console.warn('[earnings] payout balance fallback:', balanceErr?.message || balanceErr);
+    }
+
+    return res.json({
+      success: true,
+      totalUsd: roundMoney(balances.total ?? totalUsd),
+      availableUsd: roundMoney(balances.available ?? totalUsd),
+      pendingUsd: roundMoney(balances.pending ?? 0),
+      processingUsd: roundMoney(balances.processing ?? 0),
+      withdrawnUsd: roundMoney(balances.withdrawn ?? 0),
+      liveUsd: roundMoney(liveUsd),
+      viewsUsd: roundMoney(viewsUsd),
+      rows,
+    });
   } catch (err) {
     const msg = err?.message || '';
     console.error('[earnings] getEarnings error:', msg);
-    const isNetworkErr = /fetch failed|ECONNREFUSED|ENOTFOUND|AbortError|timeout/i.test(msg);
-    return res.status(isNetworkErr ? 503 : 500).json({
+    const isNetworkErr = markSupabaseUnavailable(err, 'creator earnings') || isSupabaseNetworkError(err);
+    if (isNetworkErr) return res.json(emptyEarningsResponse(true));
+    return res.status(500).json({
       success: false,
-      message: isNetworkErr ? 'Database temporarily unavailable. Try again shortly.' : msg || 'Failed',
+      message: msg || 'Failed',
     });
   }
 }

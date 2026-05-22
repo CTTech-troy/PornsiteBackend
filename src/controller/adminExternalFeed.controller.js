@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
 import {
   loadExternalFeedConfig,
@@ -8,19 +7,11 @@ import {
   getActiveProviderRuntime,
 } from '../services/externalFeedConfig.service.js';
 import { clearXnxxBestPageCache, fetchXnxxBestPage } from '../utils/xnxxRapidApi.js';
+import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
 
 async function logAction(adminId, adminName, action, details = {}) {
   try {
-    await supabase.from('admin_audit_logs').insert({
-      id: randomUUID(),
-      admin_id: adminId || null,
-      admin_name: adminName || 'Admin',
-      action,
-      target_type: 'external_feed',
-      target_id: 'config',
-      details,
-      status: 'success',
-    });
+    await writeAuditAction(adminId, adminName, action, 'external_feed', 'config', details);
   } catch (_) {}
 }
 

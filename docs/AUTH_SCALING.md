@@ -8,14 +8,14 @@
 
 ## Current scaling limits (before horizontal scale)
 
-1. **In-memory rate limits** (`express-rate-limit`): counts are **per Node process**. Behind multiple instances without a shared store, each instance has its own counters; effective limits scale with instance count unless you add Redis (or similar).
+1. **Redis-backed rate limits** (`express-rate-limit` + `rate-limit-redis` + Upstash): counts are shared across Node processes when `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are configured. If Redis is unavailable, the app falls back to a per-process memory store until Redis recovers.
 2. **JWT session** (`mintSessionToken`): signed with `JWT_SECRET` / `SESSION_JWT_SECRET`. Stateless; safe across instances if the same secret is configured everywhere.
 3. **Cold starts** (e.g. serverless): first request after idle can be seconds; not fixed in application code—use minimum instances, warm pings, or dedicated VMs for steady latency.
 4. **Firebase quotas**: High global QPS to Firebase Auth / Admin SDK is governed by Google Cloud/Firebase quotas and regions.
 
 ## Implemented in code
 
-- **Separate rate limits** for **login** vs **signup** (signup stricter against abuse).
+- **Separate rate limits** for **login**, **signup**, **forgot/reset password**, and general API requests.
 - **Configurable env** (see below).
 - **`insertUser` → upsert** on `id` for idempotent profile rows.
 - **Firestore user doc** on signup uses **`set(..., { merge: true })`** to avoid clobber races on retry.
@@ -27,25 +27,31 @@
 
 | Variable | Purpose | Suggested |
 |----------|---------|-----------|
-| `AUTH_LOGIN_BURST_PER_MIN` | Login burst per IP per minute | 120 |
-| `AUTH_LOGIN_MAX_PER_15M` | Login window per IP per 15m | 800 |
-| `AUTH_SIGNUP_BURST_PER_MIN` | Signup burst per IP per minute | 15 |
-| `AUTH_SIGNUP_MAX_PER_15M` | Signup window per IP per 15m | 60 |
+| `AUTH_LOGIN_BURST_PER_MIN` | Login burst per IP per minute | 20 |
+| `AUTH_LOGIN_MAX_PER_15M` | Login window per IP per 15m | 100 |
+| `AUTH_SIGNUP_BURST_PER_MIN` | Signup burst per IP per minute | 5 |
+| `AUTH_SIGNUP_MAX_PER_15M` | Signup window per IP per 15m | 25 |
+| `AUTH_FORGOT_PASSWORD_BURST_PER_MIN` | Forgot/reset password burst per IP per minute | 5 |
+| `AUTH_FORGOT_PASSWORD_MAX_PER_15M` | Forgot/reset password window per IP per 15m | 15 |
 | `AUTH_ME_MAX_PER_15M` | GET `/api/auth/me` per IP per 15m | 400 |
+| `API_GENERAL_MAX_PER_MIN` | General API requests per IP per minute | 300 |
+| `UPSTASH_REDIS_REST_URL` | Upstash Redis REST endpoint | From Upstash console |
+| `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis REST token | From Upstash console |
+| `UPSTASH_REDIS_COMMAND_TIMEOUT_MS` | Per-command Redis timeout | 5000 |
+| `RATE_LIMIT_REDIS_PREFIX` | Redis key prefix for rate limits | `xstream:rl` |
 | `AUTH_METRICS` | Enable `/api/health/auth-metrics` | `1` in staging |
 | `AUTH_TIMING` / `AUTH_LOGIN_TIMING` | Stage timing logs | `1` when profiling |
 | `JWT_SECRET` or `SESSION_JWT_SECRET` | Session JWT (required in production) | Strong random |
-| `REDIS_URL` | **Planned**: shared rate-limit store | Redis URL when running ≥2 API instances |
 
 ## Redis (multi-instance rate limits)
 
-Install `redis` and `rate-limit-redis`, then wire **one Redis client** and **separate `RedisStore` instances** (distinct prefixes) per limiter—**do not** share a single store across multiple limiters. See `rate-limit-redis` docs for `sendCommand` + `prefix`.
+Implemented in `src/config/redis.js`, `src/middleware/rateLimitStore.js`, `src/middleware/authRateLimit.js`, and `src/middleware/apiRateLimit.js`. Each limiter receives its own `RedisStore` prefix; stores are not shared across limiters.
 
 ## Horizontal scaling checklist
 
 - [ ] Same `JWT_SECRET` on all API replicas.
 - [ ] `trust proxy` already set in `index.js` for correct `req.ip` behind load balancers.
-- [ ] Redis-backed rate limiting OR edge/WAF rate limits.
+- [x] Redis-backed rate limiting through Upstash REST credentials.
 - [ ] Firebase Admin credentials available on every instance.
 - [ ] Optional: queue (BullMQ, Cloud Tasks) for welcome email, analytics, audit—**not** in the auth request path today.
 

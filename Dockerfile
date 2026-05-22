@@ -1,17 +1,17 @@
 FROM node:20-alpine AS deps
-WORKDIR /app/backend
-COPY backend/package*.json ./
+WORKDIR /app
+COPY package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 FROM node:20-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=5043
-WORKDIR /app/backend
+WORKDIR /app
 
 RUN addgroup -S nodeapp && adduser -S nodeapp -G nodeapp
 
-COPY --from=deps /app/backend/node_modules ./node_modules
-COPY backend ./
+COPY --from=deps /app/node_modules ./node_modules
+COPY . ./
 
 USER nodeapp
 EXPOSE 5043

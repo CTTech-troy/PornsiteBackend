@@ -1,4 +1,9 @@
-import { supabase, isConfigured } from '../config/supabase.js';
+import {
+  supabase,
+  isSupabaseAvailable,
+  isSupabaseNetworkError,
+  markSupabaseUnavailable,
+} from '../config/supabase.js';
 import { admin, getFirebaseAuth, getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 
 export function paginateAdmin(page, limit) {
@@ -155,6 +160,8 @@ const MAX_RTDB_USER_SCAN = 8000;
 const MAX_AUTH_USER_SCAN = 10000;
 const MAX_FIRESTORE_USER_SCAN = 10000;
 const DIRECTORY_PROVIDER_TIMEOUT_MS = Math.max(3000, Number(process.env.ADMIN_DIRECTORY_PROVIDER_TIMEOUT_MS) || 12000);
+const USER_DIRECTORY_SUPABASE_WARN_MS = Math.max(30000, Number(process.env.USER_DIRECTORY_SUPABASE_WARN_MS || 120000));
+let userDirectorySupabaseLastWarnAt = 0;
 
 function hasValue(value) {
   return value !== undefined && value !== null && value !== '';
@@ -168,6 +175,20 @@ function withTimeout(promise, label, timeoutMs = DIRECTORY_PROVIDER_TIMEOUT_MS) 
       timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+function warnSupabaseDirectoryFallback(context, err) {
+  const message = err?.message || String(err || 'Unknown error');
+  const isNetwork = markSupabaseUnavailable(err, context) || isSupabaseNetworkError(err);
+  if (isNetwork) {
+    const now = Date.now();
+    if (!userDirectorySupabaseLastWarnAt || now - userDirectorySupabaseLastWarnAt > USER_DIRECTORY_SUPABASE_WARN_MS) {
+      userDirectorySupabaseLastWarnAt = now;
+      console.warn(`[userDirectory] ${context}: Supabase temporarily unreachable; using Firebase/local fallbacks: ${message}`);
+    }
+    return;
+  }
+  console.warn(`[userDirectory] ${context}`, message);
 }
 
 function firebaseTimeToIso(value) {
@@ -229,7 +250,7 @@ async function listFirebaseAuthRows() {
 }
 
 async function listSupabaseUserRows() {
-  if (!isConfigured() || !supabase) return [];
+  if (!isSupabaseAvailable() || !supabase) return [];
   const rows = [];
   const CHUNK = 1000;
   for (let from = 0; from < MAX_AUTH_USER_SCAN; from += CHUNK) {
@@ -391,7 +412,7 @@ async function collectMergedUserDirectoryRows({ includeCreatorState = true } = {
     try {
       return await listSupabaseUserRows();
     } catch (err) {
-      console.warn('[userDirectory] listSupabaseUserRows', err?.message || err);
+      warnSupabaseDirectoryFallback('listSupabaseUserRows', err);
       return [];
     }
   })();
@@ -416,7 +437,7 @@ async function collectMergedUserDirectoryRows({ includeCreatorState = true } = {
 async function getCreatorStateByUserId(userIds) {
   const ids = [...new Set((userIds || []).filter(Boolean))];
   const state = new Map();
-  if (!ids.length || !isConfigured() || !supabase) return state;
+  if (!ids.length || !isSupabaseAvailable() || !supabase) return state;
 
   const CHUNK = 400;
   for (let i = 0; i < ids.length; i += CHUNK) {
@@ -551,15 +572,20 @@ export async function buildAdminUserFacetsByIds(userIds) {
   const ids = [...new Set((userIds || []).filter(Boolean))];
   if (!ids.length) return {};
   const rows = [];
-  if (isConfigured() && supabase) {
+  if (isSupabaseAvailable() && supabase) {
     const CHUNK = 200;
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      const slice = ids.slice(i, i + CHUNK);
-      const { data } = await supabase
-        .from('users')
-        .select('id, username, display_name, full_name, email, avatar, avatar_url, email_verified')
-        .in('id', slice);
-      for (const r of data || []) rows.push(r);
+    try {
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        const { data, error } = await supabase
+          .from('users')
+          .select('id, username, display_name, full_name, email, avatar, avatar_url, email_verified')
+          .in('id', slice);
+        if (error) throw error;
+        for (const r of data || []) rows.push(r);
+      }
+    } catch (err) {
+      warnSupabaseDirectoryFallback('buildAdminUserFacetsByIds', err);
     }
   }
   const have = new Set(rows.map((r) => r.id));
@@ -781,7 +807,7 @@ export async function listPlatformCreatorsFromDirectory(query) {
   const { page, limit, offset } = paginateAdmin(query.page, query.limit);
   const searchTrim = String(search || '').trim();
 
-  if (!isConfigured() || !supabase) {
+  if (!isSupabaseAvailable() || !supabase) {
     return { creators: [], total: 0, page, limit };
   }
 
@@ -792,6 +818,9 @@ export async function listPlatformCreatorsFromDirectory(query) {
       .select('user_id')
       .eq('creator_type', typeFilter);
     if (tidErr) {
+      if (markSupabaseUnavailable(tidErr, 'listPlatformCreatorsFromDirectory')) {
+        return { creators: [], total: 0, page, limit, error: 'Supabase temporarily unreachable' };
+      }
       return { creators: [], total: 0, page, limit, error: tidErr.message };
     }
     typeUserIds = [...new Set((idRows || []).map((r) => r.user_id).filter(Boolean))];
@@ -810,6 +839,9 @@ export async function listPlatformCreatorsFromDirectory(query) {
 
   const { count: totalCount, error: countErr } = await countQ;
   if (countErr) {
+    if (markSupabaseUnavailable(countErr, 'listPlatformCreatorsFromDirectory')) {
+      return { creators: [], total: 0, page, limit, error: 'Supabase temporarily unreachable' };
+    }
     return { creators: [], total: 0, page, limit, error: countErr.message };
   }
 
@@ -829,6 +861,9 @@ export async function listPlatformCreatorsFromDirectory(query) {
 
   const { data: userRows, error } = await q;
   if (error) {
+    if (markSupabaseUnavailable(error, 'listPlatformCreatorsFromDirectory')) {
+      return { creators: [], total: 0, page, limit, error: 'Supabase temporarily unreachable' };
+    }
     return { creators: [], total: 0, page, limit, error: error.message };
   }
   if (!userRows?.length) {
@@ -870,9 +905,14 @@ export async function listPlatformCreatorsFromDirectory(query) {
 
 export async function fetchUserRowForAdminById(id) {
   const rows = [];
-  if (isConfigured() && supabase) {
-    const { data: raw, error } = await supabase.from('users').select('*').eq('id', id).maybeSingle();
-    if (!error && raw) rows.push({ ...raw, source: 'supabase', supabase_user_id: raw.id });
+  if (isSupabaseAvailable() && supabase) {
+    try {
+      const { data: raw, error } = await supabase.from('users').select('*').eq('id', id).maybeSingle();
+      if (error) throw error;
+      if (!error && raw) rows.push({ ...raw, source: 'supabase', supabase_user_id: raw.id });
+    } catch (err) {
+      warnSupabaseDirectoryFallback('fetchUserRowForAdminById', err);
+    }
   }
 
   const rtdb = getFirebaseRtdb();

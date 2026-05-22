@@ -4,6 +4,7 @@ import { AccessToken } from 'livekit-server-sdk';
 import * as liveCtrl from '../controller/live.controller.js';
 import { requireAuth } from '../middleware/authFirebase.js';
 import { resolveUidFromBearerToken } from '../utils/sessionToken.js';
+import { endAiSession, ensureAiSession } from '../services/aiModeration.service.js';
 
 const router = express.Router();
 
@@ -51,6 +52,14 @@ router.post('/start', async (req, res) => {
   try {
     const live = await liveCtrl.createLive(creatorId, hostDisplayName);
     const session = liveCtrl.buildSession(live, []);
+    ensureAiSession({
+      sessionId: session.sessionId,
+      sessionType: 'livestream',
+      creatorId,
+      title: hostDisplayName || 'Livestream',
+      metadata: { hidden: true, role: 'system_ai', source: 'live.start' },
+      io: req.app.get('io'),
+    }).catch((error) => console.warn('[ai-moderation] live start failed:', error?.message || error));
     broadcast(req.app.get('io'), 'live_started', { session });
     res.json({ ok: true, session });
   } catch (err) {
@@ -164,6 +173,7 @@ router.post('/end/:sessionId', async (req, res) => {
     emitToLive(io, sessionId, 'live_ended', { sessionId, payout });
     emitToLive(io, sessionId, 'live-ended', payout);
     broadcast(io, 'live_ended', { sessionId, payout });
+    endAiSession({ sessionId, status: 'ended', metadata: { reason: 'live.end', creatorId }, io }).catch(() => {});
     res.json({ ok: true, payout, sessionId });
   } catch (err) {
     console.error('live.end session error', err && err.message ? err.message : err);
@@ -190,6 +200,14 @@ router.post('/create', requireAuth, async (req, res) => {
   try {
     const live = await liveCtrl.createLive(hostId, hostDisplayName);
     const session = liveCtrl.buildSession(live, []);
+    ensureAiSession({
+      sessionId: session.sessionId,
+      sessionType: 'livestream',
+      creatorId: hostId,
+      title: hostDisplayName || 'Livestream',
+      metadata: { hidden: true, role: 'system_ai', source: 'live.create' },
+      io: req.app.get('io'),
+    }).catch((error) => console.warn('[ai-moderation] live create failed:', error?.message || error));
     broadcast(req.app.get('io'), 'live_started', { session });
     res.json({ ok: true, data: live, session });
   } catch (err) {
@@ -229,6 +247,7 @@ router.post('/:id/end', requireAuth, async (req, res) => {
     const io = req.app.get('io');
     emitToLive(io, id, 'live_ended', { sessionId: id, payout });
     emitToLive(io, id, 'live-ended', payout);
+    endAiSession({ sessionId: id, status: 'ended', metadata: { reason: 'live.id.end', creatorId: req.uid }, io }).catch(() => {});
     res.json({ ok: true, payout });
   } catch (err) {
     console.error('live.end error', err && err.message ? err.message : err);

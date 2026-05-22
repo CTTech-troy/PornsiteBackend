@@ -15,7 +15,8 @@ This platform uses server-created payment intents and provider webhooks as the o
 ## Important Files
 
 - `backend/src/services/securePayments.service.js` - payment intent orchestration, fraud signals, webhook processing, admin monitoring.
-- `backend/src/services/paymentGateway.service.js` - Paystack, Monnify, Stripe, and Flutterwave signature and verification adapters.
+- `backend/src/services/paymentGateway.service.js` - Paystack, Flutterwave, and Stripe signature and verification adapters.
+- `backend/src/services/paymentRegion.service.js` - Africa → Flutterwave, international → Paystack routing.
 - `backend/src/services/paymentServiceClient.js` - signed internal checkout requests to the C# payment service.
 - `payment-service/Gateways/*Gateway.cs` - provider checkout adapters.
 - `backend/supabase/migrations/20260521190000_enterprise_payment_security.sql` - payment intents, immutable logs, webhook replay tracking, and atomic coin fulfillment RPC.
@@ -30,16 +31,15 @@ Set these on Render and never expose them to frontend builds:
 PAYMENT_SERVICE_URL=
 PAYMENT_SERVICE_SHARED_SECRET=
 PAYMENT_DEFAULT_PROVIDER=paystack
-PAYMENT_NG_PROVIDER=monnify
+PAYMENT_AFRICA_PROVIDER=flutterwave
 
 PAYSTACK_SECRET_KEY=
-MONNIFY_API_KEY=
-MONNIFY_SECRET_KEY=
-MONNIFY_CONTRACT_CODE=
+FLUTTERWAVE_PUBLIC_KEY=
+FLUTTERWAVE_SECRET_KEY=
+FLUTTERWAVE_ENCRYPTION_KEY=
+FLUTTERWAVE_WEBHOOK_HASH=
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
-FLUTTERWAVE_SECRET_KEY=
-FLUTTERWAVE_WEBHOOK_HASH=
 ```
 
 Use the same `PAYMENT_SERVICE_SHARED_SECRET` in both the Node backend and C# payment service. Rotate provider webhook secrets by configuring the new provider secret first, updating the provider dashboard, then deploying.
@@ -77,6 +77,16 @@ Webhook tests should include:
 - Amount mismatch marks the intent `suspicious` and writes `fraud_detection_logs`.
 - Concurrent duplicate webhooks create only one `token_credits` row.
 
+## Wallet and gift security
+
+- `GET /api/coins/gifts` returns server-side `gift_catalog` pricing
+- `POST /api/tokens/send-gift` and `POST /api/coins/gift` accept `giftId` only (client `price` ignored)
+- Spend/transfer/gift routes use `COIN_WALLET_MAX_PER_MIN` rate limiting
+
+## Membership fulfillment
+
+- `secure_fulfill_membership_payment` RPC activates membership atomically with idempotency on `payment_reference`
+
 ## QStash Workflows
 
 Create schedules from the backend service:
@@ -93,7 +103,6 @@ This includes membership expiry/reminders plus payment intent expiration, reconc
 - Keep `SUPABASE_SERVICE_ROLE_KEY`, provider secrets, QStash signing keys, and `PAYMENT_SERVICE_SHARED_SECRET` server-side only.
 - Configure provider dashboard webhook URLs:
   - `/api/payments/webhooks/paystack`
-  - `/api/payments/webhooks/monnify`
   - `/api/payments/webhooks/stripe`
   - `/api/payments/webhooks/flutterwave`
 - Do not credit balances from frontend callbacks. The callback page only reads intent status.

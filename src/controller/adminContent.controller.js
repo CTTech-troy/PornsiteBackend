@@ -1,8 +1,8 @@
-import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { buildAdminUserFacetsByIds } from '../services/userDirectoryService.js';
 import { validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
+import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
 
 function paginate(page, limit) {
   const p = Math.max(1, parseInt(page, 10) || 1);
@@ -20,16 +20,7 @@ function isMissingColumn(err) {
 }
 
 async function logAction(adminId, adminName, action, targetType, targetId, details = {}) {
-  await supabase.from('admin_audit_logs').insert({
-    id: randomUUID(),
-    admin_id: adminId || null,
-    admin_name: adminName || 'Admin',
-    action,
-    target_type: targetType,
-    target_id: String(targetId || ''),
-    details,
-    status: 'success',
-  });
+  await writeAuditAction(adminId, adminName, action, targetType, targetId, details);
 }
 
 // Maps a Supabase tiktok_videos row to the standard admin Video shape.

@@ -1,9 +1,10 @@
 import path from 'path';
 import fs from 'fs';
+import dns from 'dns/promises';
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 let credentialSourceUsed = '';
 let gacMissingFileLogged = false;
@@ -158,6 +159,11 @@ function resolveAdminCredential() {
 
 let firebaseInitialized = false;
 let initFailureReason = '';
+let firebaseAdminUnavailableUntil = 0;
+let firebaseAdminLastWarnAt = 0;
+const FIREBASE_NETWORK_COOLDOWN_MS = Number(process.env.FIREBASE_NETWORK_COOLDOWN_MS || 120000);
+const FIREBASE_NETWORK_CHECK_TIMEOUT_MS = Number(process.env.FIREBASE_NETWORK_CHECK_TIMEOUT_MS || 2500);
+const FIREBASE_OAUTH_HOST = 'accounts.google.com';
 
 /** @type {import('firebase-admin/auth').Auth | null} */
 let auth = null;
@@ -165,6 +171,55 @@ let auth = null;
 let db = null;
 /** @type {import('firebase-admin/database').Database | null} */
 let rtdb = null;
+
+function isFirebaseNetworkError(err) {
+  const msg = String(err?.message || err || '');
+  return /ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network|accounts\.google\.com/i.test(msg);
+}
+
+export function markFirebaseAdminUnavailable(err, context = 'Firebase Admin') {
+  if (!isFirebaseNetworkError(err)) return false;
+  firebaseAdminUnavailableUntil = Date.now() + FIREBASE_NETWORK_COOLDOWN_MS;
+  const now = Date.now();
+  if (!firebaseAdminLastWarnAt || now - firebaseAdminLastWarnAt > FIREBASE_NETWORK_COOLDOWN_MS) {
+    firebaseAdminLastWarnAt = now;
+    console.warn(
+      `[Firebase Admin] Temporarily unavailable during ${context}: ${err?.message || err}. ` +
+      `Skipping Firebase calls for ${Math.ceil(FIREBASE_NETWORK_COOLDOWN_MS / 1000)}s.`
+    );
+  }
+  return true;
+}
+
+export function isFirebaseAdminUsable() {
+  return firebaseInitialized && Date.now() >= firebaseAdminUnavailableUntil;
+}
+
+async function lookupWithTimeout(hostname) {
+  let timer;
+  try {
+    return await Promise.race([
+      dns.lookup(hostname),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`DNS lookup timeout for ${hostname}`)), FIREBASE_NETWORK_CHECK_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function ensureFirebaseAdminUsable(context = 'Firebase Admin') {
+  if (!firebaseInitialized) return false;
+  if (Date.now() < firebaseAdminUnavailableUntil) return false;
+  try {
+    await lookupWithTimeout(FIREBASE_OAUTH_HOST);
+    return true;
+  } catch (err) {
+    markFirebaseAdminUnavailable(err, context);
+    return false;
+  }
+}
 
 try {
   const hasDbUrl = Boolean((process.env.FIREBASE_DATABASE_URL || '').trim());
@@ -202,19 +257,22 @@ try {
 }
 
 export function getFirebaseAuth() {
+  if (!isFirebaseAdminUsable()) return null;
   return auth;
 }
 
 export function getFirebaseDb() {
+  if (!isFirebaseAdminUsable()) return null;
   return db;
 }
 
 export function getFirebaseRtdb() {
+  if (!isFirebaseAdminUsable()) return null;
   return rtdb;
 }
 
 export function isRtdbSyncEnabled() {
-  return firebaseInitialized && rtdb != null && Boolean((process.env.FIREBASE_DATABASE_URL || '').trim());
+  return isFirebaseAdminUsable() && rtdb != null && Boolean((process.env.FIREBASE_DATABASE_URL || '').trim());
 }
 
 export {
@@ -228,7 +286,16 @@ export {
 };
 
 export function getFirebaseInitDetail() {
-  if (firebaseInitialized) return { ok: true, reason: '', credentialSource: credentialSourceUsed };
+  if (firebaseInitialized) {
+    if (!isFirebaseAdminUsable()) {
+      return {
+        ok: false,
+        reason: `temporarily unavailable until ${new Date(firebaseAdminUnavailableUntil).toISOString()}`,
+        credentialSource: credentialSourceUsed,
+      };
+    }
+    return { ok: true, reason: '', credentialSource: credentialSourceUsed };
+  }
   return { ok: false, reason: initFailureReason || 'not initialized', credentialSource: '' };
 }
 
@@ -270,7 +337,7 @@ export function printFirebaseStartupSummary() {
     '[Startup] Firebase Admin credentials source:',
     firebaseInitialized && credentialSourceUsed ? credentialSourceUsed : 'none (Admin inactive)'
   );
-  console.log('[Startup] Firebase Admin status:', firebaseInitialized ? 'active' : `inactive (${initFailureReason || 'unknown'})`);
+  console.log('[Startup] Firebase Admin status:', isFirebaseAdminUsable() ? 'active' : `inactive (${getFirebaseInitDetail().reason || initFailureReason || 'unknown'})`);
   console.log('[Startup] RTDB → Supabase sync:', isRtdbSyncEnabled() ? 'enabled' : 'skipped (Firebase Admin or RTDB unavailable)');
 
   const hints = listMissingFirebaseEnvHints();

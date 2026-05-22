@@ -1,11 +1,37 @@
 import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
-import { isConfigured } from '../config/supabase.js';
+import { isConfigured, getPublicUrl } from '../config/supabase.js';
 import {
   sendPayoutApprovedEmail,
   sendPayoutPaidEmail,
   sendPayoutRejectedEmail,
 } from '../services/emailService.js';
+import { getNgnToUsdRate } from '../utils/exchangeRate.js';
+import { processCreatorPayoutTransfer } from '../services/paystackTransfer.service.js';
+import { getBooleanSetting } from '../services/platformSettings.service.js';
+import {
+  emitFinancePayoutEvent,
+  subscribeFinanceEvents,
+  writeFinancePayoutLog,
+} from '../services/financePayoutEvents.service.js';
+import {
+  approvePayoutRequest,
+  getPayoutAnalytics,
+  markPayoutCompleted,
+  markPayoutFailed,
+  markPayoutProcessing,
+  rejectPayoutRequest,
+  retryFailedPayout,
+} from '../services/payoutWorkflow.service.js';
+import {
+  getFraudAlerts,
+  getPaymentAuditTrail,
+  getPaymentMonitoring,
+  getPaymentReconciliationReport,
+  getWebhookEvents,
+} from '../services/securePayments.service.js';
+
+export { subscribeFinanceEvents };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +52,53 @@ function isMissingTable(err) {
     err.code === 'PGRST200' ||
     (typeof err.message === 'string' && err.message.includes('schema cache'))
   );
+}
+
+function isMissingColumn(err) {
+  return err?.code === '42703';
+}
+
+function isStatusConstraintError(err) {
+  return err?.code === '23514' && /status/i.test(err?.message || '');
+}
+
+function publicPayoutLogFromRequest(row) {
+  return {
+    id: `payout-${row.id}`,
+    payout_request_id: row.id,
+    creator_id: row.creator_id,
+    creator_name: row.creator_name || row.account_name || null,
+    amount_usd: fmt(row.amount_usd),
+    amount_ngn: row.amount_ngn == null ? null : fmt(row.amount_ngn),
+    transaction_reference: row.paystack_transaction_reference || row.reference_id || null,
+    payout_status: row.status || 'pending',
+    payment_date: row.paid_at || row.processed_at || row.requested_at,
+    provider: row.payment_provider || 'paystack',
+    error_message: row.failure_reason || row.rejection_reason || null,
+    created_at: row.processed_at || row.requested_at,
+  };
+}
+
+async function updatePayoutStatus(id, payload, options = {}) {
+  const statuses = options.statuses || null;
+  let query = supabase.from('creator_payout_requests').update(payload).eq('id', id);
+  if (statuses?.length) query = query.in('status', statuses);
+  const result = await query.select().maybeSingle();
+
+  if ((isMissingColumn(result.error) || isStatusConstraintError(result.error)) && options.fallbackPayload) {
+    let fallback = supabase.from('creator_payout_requests').update(options.fallbackPayload).eq('id', id);
+    if (statuses?.length) fallback = fallback.in('status', statuses);
+    return fallback.select().maybeSingle();
+  }
+
+  return result;
+}
+
+async function resolvePayoutNgnAmount(payout) {
+  const current = Number(payout.amount_ngn || 0);
+  if (current > 0) return current;
+  const rate = await getNgnToUsdRate();
+  return parseFloat((Number(payout.amount_usd || 0) * rate).toFixed(2));
 }
 
 // PostgREST returns PGRST103 when .range() is beyond the total row count.
@@ -80,6 +153,23 @@ export async function getFinanceSummary(req, res) {
       if (txUsers) txUsers.forEach(u => { txUsernameMap[u.id] = u.username; });
     }
 
+    let payoutLogs = [];
+    const { data: financeLogs, error: financeLogsErr } = await supabase
+      .from('finance_payout_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (!isMissingTable(financeLogsErr) && !isMissingColumn(financeLogsErr)) {
+      payoutLogs = financeLogs || [];
+    } else {
+      const { data: fallbackPayoutLogs, error: fallbackPayoutErr } = await supabase
+        .from('creator_payout_requests')
+        .select('id, creator_id, creator_name, amount_usd, amount_ngn, status, reference_id, processed_at, requested_at, rejection_reason')
+        .order('requested_at', { ascending: false })
+        .limit(20);
+      if (!fallbackPayoutErr) payoutLogs = (fallbackPayoutLogs || []).map(publicPayoutLogFromRequest);
+    }
+
     return res.json({
       totalRevenue,
       pendingPayouts,
@@ -96,6 +186,7 @@ export async function getFinanceSummary(req, res) {
         status: t.status || 'unknown',
         date: t.started_at,
       })),
+      payoutLogs,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -314,6 +405,9 @@ export async function getSubscribers(req, res) {
 
 export async function getPaymentsAdmin(req, res) {
   try {
+    const securePayments = await getPaymentMonitoring(req.query);
+    if (securePayments) return res.json(securePayments);
+
     const { search = '', statusFilter = '', methodFilter = '' } = req.query;
     const { page, limit, offset } = paginate(req.query.page, req.query.limit);
 
@@ -403,7 +497,17 @@ export async function getPaymentsAdmin(req, res) {
 
 // ── GET /api/admin/finance/payouts ────────────────────────────────────────────
 
-const EMPTY_PAYOUT_STATS = { pendingTotal: 0, processedThisMonth: 0, totalCreatorBalances: 0, avgPayout: 0 };
+const EMPTY_PAYOUT_STATS = {
+  pendingTotal: 0,
+  approvedTotal: 0,
+  processingTotal: 0,
+  completedTotal: 0,
+  failedTotal: 0,
+  processedThisMonth: 0,
+  totalCreatorBalances: 0,
+  avgPayout: 0,
+  highRiskCount: 0,
+};
 
 export async function getCreatorPayoutsAdmin(req, res) {
   try {
@@ -447,13 +551,32 @@ export async function getCreatorPayoutsAdmin(req, res) {
     // Stats
     const { data: allPayouts } = await supabase
       .from('creator_payout_requests')
-      .select('amount_usd, status');
+      .select('amount_usd, status, requested_at, processed_at, risk_score');
 
     const pendingTotal = (allPayouts || [])
       .filter(r => r.status === 'pending')
       .reduce((s, r) => s + fmt(r.amount_usd), 0);
+    const approvedTotal = (allPayouts || [])
+      .filter(r => r.status === 'approved')
+      .reduce((s, r) => s + fmt(r.amount_usd), 0);
+    const processingTotal = (allPayouts || [])
+      .filter(r => r.status === 'processing')
+      .reduce((s, r) => s + fmt(r.amount_usd), 0);
+    const completedTotal = (allPayouts || [])
+      .filter(r => ['paid', 'completed'].includes(r.status))
+      .reduce((s, r) => s + fmt(r.amount_usd), 0);
+    const failedTotal = (allPayouts || [])
+      .filter(r => r.status === 'failed')
+      .reduce((s, r) => s + fmt(r.amount_usd), 0);
+    const highRiskCount = (allPayouts || []).filter(r => Number(r.risk_score || 0) >= 50).length;
 
-    const completed = (allPayouts || []).filter(r => r.status === 'completed');
+    const currentMonth = new Date();
+    const monthStart = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1).getTime();
+    const completed = (allPayouts || []).filter((r) => {
+      if (!['paid', 'completed'].includes(r.status)) return false;
+      const ts = r.processed_at || r.requested_at;
+      return ts ? new Date(ts).getTime() >= monthStart : true;
+    });
     const processedThisMonth = completed.reduce((s, r) => s + fmt(r.amount_usd), 0);
     const avgPayout = completed.length ? processedThisMonth / completed.length : 0;
 
@@ -462,7 +585,7 @@ export async function getCreatorPayoutsAdmin(req, res) {
       total,
       page,
       limit,
-      stats: { pendingTotal, processedThisMonth, totalCreatorBalances, avgPayout },
+      stats: { pendingTotal, approvedTotal, processingTotal, completedTotal, failedTotal, processedThisMonth, totalCreatorBalances, avgPayout, highRiskCount },
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -474,33 +597,15 @@ export async function getCreatorPayoutsAdmin(req, res) {
 export async function approveCreatorPayout(req, res) {
   try {
     const { id } = req.params;
-    const { data, error } = await supabase
-      .from('creator_payout_requests')
-      .update({ status: 'processing', processed_at: new Date().toISOString(), processed_by: req.admin?.id || null })
-      .eq('id', id)
-      .eq('status', 'pending')
-      .select()
-      .single();
-
-    if (error) return res.status(500).json({ message: error.message });
-    if (!data) return res.status(404).json({ message: 'Payout not found or already processed.' });
-
-    // Send approval email (non-blocking)
-    const email = data.creator_email;
-    if (email) {
-      sendPayoutApprovedEmail({
-        to:            email,
-        name:          data.creator_name,
-        amountUsd:     data.amount_usd,
-        amountNgn:     data.amount_ngn,
-        bankName:      data.bank_name,
-        accountNumber: data.account_number,
-        accountName:   data.account_name || data.creator_name,
-        referenceId:   data.reference_id,
-      }).catch(e => console.error('[finance] payout approved email:', e.message));
-    }
-
-    return res.json({ message: 'Payout approved.', payout: data });
+    const payout = await approvePayoutRequest({
+      id,
+      admin: req.admin,
+      notes: req.body?.notes || req.body?.adminNotes || '',
+      financeAssigneeId: req.body?.financeAssigneeId || null,
+      req,
+      io: req.app?.get('io'),
+    });
+    return res.json({ message: 'Payout approved and assigned to finance workflow.', payout });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -511,32 +616,100 @@ export async function approveCreatorPayout(req, res) {
 export async function markPayoutPaid(req, res) {
   try {
     const { id } = req.params;
-    const { data, error } = await supabase
-      .from('creator_payout_requests')
-      .update({ status: 'paid', processed_at: new Date().toISOString(), processed_by: req.admin?.id || null })
-      .eq('id', id)
-      .eq('status', 'processing')
-      .select()
-      .single();
+    const {
+      transactionReference = null,
+      proofUrl = null,
+      provider = 'manual',
+      notes = '',
+      useGateway = false,
+    } = req.body || {};
 
-    if (error) return res.status(500).json({ message: error.message });
-    if (!data) return res.status(404).json({ message: 'Payout not found or not in processing state.' });
-
-    const email = data.creator_email;
-    if (email) {
-      sendPayoutPaidEmail({
-        to:            email,
-        name:          data.creator_name,
-        amountUsd:     data.amount_usd,
-        amountNgn:     data.amount_ngn,
-        bankName:      data.bank_name,
-        accountNumber: data.account_number,
-        accountName:   data.account_name || data.creator_name,
-        referenceId:   data.reference_id,
-      }).catch(e => console.error('[finance] payout paid email:', e.message));
+    if (!useGateway) {
+      const payout = await markPayoutCompleted({
+        id,
+        admin: req.admin,
+        transactionReference,
+        proofUrl,
+        provider,
+        notes,
+        req,
+        io: req.app?.get('io'),
+      });
+      return res.json({ message: 'Payout marked completed.', payout });
     }
 
-    return res.json({ message: 'Payout marked as paid.', payout: data });
+    const automationEnabled = await getBooleanSetting('creator_payout_automation_enabled', true);
+    if (!automationEnabled) {
+      return res.status(403).json({ message: 'Creator payout automation is disabled in Platform Settings.' });
+    }
+    const { data: payout, error: fetchError } = await supabase
+      .from('creator_payout_requests')
+      .select('*')
+      .eq('id', id)
+      .in('status', ['approved', 'processing'])
+      .maybeSingle();
+
+    if (fetchError) return res.status(500).json({ message: fetchError.message });
+    if (!payout) return res.status(404).json({ message: 'Payout not found or not payable.' });
+
+    const amountNgn = await resolvePayoutNgnAmount(payout);
+    const paystackReference = `XST-PAYOUT-${String(payout.reference_id || payout.id).replace(/[^a-zA-Z0-9-]/g, '').slice(0, 40)}`;
+
+    const processingPayout = await markPayoutProcessing({
+      id,
+      admin: req.admin,
+      transactionReference: paystackReference,
+      notes: 'Paystack transfer started',
+      req,
+      io: req.app?.get('io'),
+    });
+
+    let transfer;
+    try {
+      transfer = await processCreatorPayoutTransfer({
+        ...processingPayout,
+        amount_ngn: amountNgn,
+        paystack_reference: paystackReference,
+      });
+    } catch (transferError) {
+      const failedPayout = await markPayoutFailed({
+        id,
+        admin: req.admin,
+        reason: transferError.message || 'Paystack transfer failed.',
+        req,
+        io: req.app?.get('io'),
+      });
+      return res.status(502).json({
+        message: transferError.message || 'Paystack transfer failed. Payout has been marked as failed.',
+        payout: failedPayout,
+      });
+    }
+
+    const completedPayout = await markPayoutCompleted({
+      id,
+      admin: req.admin,
+      transactionReference: transfer.reference,
+      provider: 'paystack',
+      notes: 'Paystack transfer success',
+      req,
+      io: req.app?.get('io'),
+    });
+
+    await updatePayoutStatus(id, {
+      amount_ngn: amountNgn,
+      payment_provider: 'paystack',
+      paystack_recipient_code: transfer.recipientCode,
+      paystack_transfer_code: transfer.transferCode,
+      paystack_transaction_reference: transfer.reference,
+      payment_metadata: {
+        paystackStatus: transfer.status,
+        transferCode: transfer.transferCode,
+      },
+    }, {
+      statuses: ['completed'],
+    });
+
+    return res.json({ message: 'Payout paid successfully through Paystack.', payout: completedPayout });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -548,39 +721,133 @@ export async function rejectCreatorPayout(req, res) {
   try {
     const { id } = req.params;
     const { reason = '' } = req.body;
-    const { data, error } = await supabase
-      .from('creator_payout_requests')
-      .update({
-        status:           'rejected',
-        rejection_reason: reason,
-        processed_at:     new Date().toISOString(),
-        processed_by:     req.admin?.id || null,
-      })
-      .eq('id', id)
-      .in('status', ['pending', 'processing'])
-      .select()
-      .single();
-
-    if (error) return res.status(500).json({ message: error.message });
-    if (!data) return res.status(404).json({ message: 'Payout not found or already completed.' });
-
-    const email = data.creator_email;
-    if (email) {
-      sendPayoutRejectedEmail({
-        to:       email,
-        name:     data.creator_name,
-        amountUsd: data.amount_usd,
-        reason,
-      }).catch(e => console.error('[finance] payout rejected email:', e.message));
-    }
-
-    return res.json({ message: 'Payout rejected.', payout: data });
+    const payout = await rejectPayoutRequest({
+      id,
+      admin: req.admin,
+      reason,
+      req,
+      io: req.app?.get('io'),
+    });
+    return res.json({ message: 'Payout rejected and creator balance restored.', payout });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
 }
 
 // ── GET /api/admin/finance/ads ────────────────────────────────────────────────
+
+export async function markPayoutProcessingAdmin(req, res) {
+  try {
+    const payout = await markPayoutProcessing({
+      id: req.params.id,
+      admin: req.admin,
+      transactionReference: req.body?.transactionReference || null,
+      notes: req.body?.notes || '',
+      req,
+      io: req.app?.get('io'),
+    });
+    return res.json({ message: 'Payout marked as processing.', payout });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function markPayoutFailedAdmin(req, res) {
+  try {
+    const payout = await markPayoutFailed({
+      id: req.params.id,
+      admin: req.admin,
+      reason: req.body?.reason || req.body?.failureReason || '',
+      req,
+      io: req.app?.get('io'),
+    });
+    return res.json({ message: 'Payout marked as failed and creator balance restored.', payout });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function retryPayoutAdmin(req, res) {
+  try {
+    const payout = await retryFailedPayout({
+      id: req.params.id,
+      admin: req.admin,
+      req,
+      io: req.app?.get('io'),
+    });
+    return res.json({ message: 'Payout retry queued.', payout });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function uploadPayoutProof(req, res) {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Proof file is required.' });
+    if (!isConfigured() || !supabase) return res.status(503).json({ message: 'Storage not configured.' });
+
+    const bucket = process.env.SUPABASE_PAYOUT_PROOF_BUCKET || process.env.SUPABASE_IMAGE_BUCKET || 'images';
+    const ext = String(req.file.originalname || '').split('.').pop()?.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'bin';
+    const path = `payout-proofs/${req.params.id}/${Date.now()}-${randomUUID()}.${ext.slice(0, 10)}`;
+
+    const { error } = await supabase.storage
+      .from(bucket)
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype || 'application/octet-stream',
+        upsert: false,
+      });
+    if (error) throw error;
+
+    const proofUrl = getPublicUrl(bucket, path);
+    const payout = await markPayoutCompleted({
+      id: req.params.id,
+      admin: req.admin,
+      transactionReference: req.body?.transactionReference || null,
+      proofUrl,
+      provider: req.body?.provider || 'manual',
+      notes: req.body?.notes || 'Proof of payment uploaded',
+      req,
+      io: req.app?.get('io'),
+    });
+
+    return res.json({ message: 'Proof uploaded and payout completed.', proofUrl, payout });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getPayoutAnalyticsAdmin(req, res) {
+  try {
+    const analytics = await getPayoutAnalytics();
+    return res.json({ analytics });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function exportPayoutsCsv(req, res) {
+  try {
+    const { data, error } = await supabase
+      .from('creator_payout_requests')
+      .select('reference_id,creator_id,creator_name,creator_email,amount_usd,amount_ngn,bank_name,account_name,status,requested_at,processed_at,paid_at,completed_at,transaction_reference')
+      .order('requested_at', { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+
+    const headers = ['reference_id', 'creator_id', 'creator_name', 'creator_email', 'amount_usd', 'amount_ngn', 'bank_name', 'account_name', 'status', 'requested_at', 'processed_at', 'paid_at', 'completed_at', 'transaction_reference'];
+    const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const csv = [
+      headers.join(','),
+      ...(data || []).map((row) => headers.map((key) => escapeCsv(row[key])).join(',')),
+    ].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="creator-payouts-${new Date().toISOString().slice(0, 10)}.csv"`);
+    return res.send(csv);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
 
 const EMPTY_AD_RESPONSE = { campaigns: [], stats: { activeCampaigns: 0, totalImpressions: 0, adRevenue: 0 } };
 
@@ -758,6 +1025,44 @@ export async function deleteAdCampaign(req, res) {
     const { error } = await supabase.from('ad_campaigns').delete().eq('id', id);
     if (error) return res.status(500).json({ message: error.message });
     return res.json({ message: 'Campaign deleted.' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getFraudAlertsAdmin(req, res) {
+  try {
+    const data = await getFraudAlerts(req.query);
+    return res.json(data);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getWebhookEventsAdmin(req, res) {
+  try {
+    const data = await getWebhookEvents(req.query);
+    return res.json(data);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getPaymentAuditAdmin(req, res) {
+  try {
+    const data = await getPaymentAuditTrail(req.params.id);
+    return res.json(data);
+  } catch (err) {
+    const status = /not found/i.test(err.message) ? 404 : 500;
+    return res.status(status).json({ message: err.message });
+  }
+}
+
+export async function getPaymentReconciliationAdmin(req, res) {
+  try {
+    const hours = Number(req.query.hours) || 24;
+    const data = await getPaymentReconciliationReport({ hours });
+    return res.json(data);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

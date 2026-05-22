@@ -1,8 +1,14 @@
-import { randomUUID } from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { pingServices } from '../utils/servicePing.js';
 import { getUserDirectoryAggregateStats, safeCount } from '../services/userDirectoryService.js';
+import {
+  getAdminSettingsPayload,
+  getPublicPlatformSettings,
+  saveAdminSettings,
+  invalidatePlatformSettingsCache,
+} from '../services/platformSettings.service.js';
+import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
 
 function isMissingTable(err) {
   return err?.code === '42P01' || err?.code === 'PGRST200' ||
@@ -10,30 +16,26 @@ function isMissingTable(err) {
 }
 
 async function logAction(adminId, adminName, action, targetType, targetId, details = {}) {
-  await supabase.from('admin_audit_logs').insert({
-    id: randomUUID(),
-    admin_id: adminId || null,
-    admin_name: adminName || 'Admin',
-    action,
-    target_type: targetType,
-    target_id: String(targetId || ''),
-    details,
-    status: 'success',
-  });
+  await writeAuditAction(adminId, adminName, action, targetType, targetId, details);
 }
 
 // ── GET /api/admin/system/settings ────────────────────────────────────────────
 
 export async function getSettings(req, res) {
   try {
-    const { data, error } = await supabase.from('platform_settings').select('key, value, updated_at');
-    if (error) {
-      if (isMissingTable(error)) return res.json({ settings: [] });
-      return res.status(500).json({ message: error.message });
-    }
-    return res.json({ settings: data || [] });
+    const payload = await getAdminSettingsPayload();
+    return res.json(payload);
   } catch (err) {
     return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getPublicSettings(req, res) {
+  try {
+    const settings = await getPublicPlatformSettings();
+    return res.json({ success: true, settings });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 }
 
@@ -42,31 +44,14 @@ export async function getSettings(req, res) {
 export async function updateSettings(req, res) {
   try {
     const { settings } = req.body; // [{ key, value }]
-    if (!Array.isArray(settings) || settings.length === 0) {
-      return res.status(400).json({ message: 'settings array required.' });
-    }
-
-    const upserts = settings.map(s => ({
-      key: s.key,
-      value: String(s.value ?? ''),
-      updated_at: new Date().toISOString(),
-      updated_by: req.admin?.name || 'Admin',
-    }));
-
-    const { error } = await supabase.from('platform_settings')
-      .upsert(upserts, { onConflict: 'key' });
-
-    if (error) {
-      if (isMissingTable(error)) return res.status(404).json({ message: 'platform_settings table not found.' });
-      return res.status(500).json({ message: error.message });
-    }
+    const result = await saveAdminSettings(settings, req.admin?.name || 'Admin');
 
     await logAction(req.admin?.id, req.admin?.name, 'Settings updated', 'settings', 'platform', {
-      keys: settings.map(s => s.key),
+      keys: result.updatedKeys,
     });
-    return res.json({ message: 'Settings saved successfully.' });
+    return res.json({ message: 'Settings saved successfully.', updatedKeys: result.updatedKeys });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err.status || 500).json({ message: err.message, errors: err.errors || undefined });
   }
 }
 
@@ -78,18 +63,13 @@ export async function updateSetting(req, res) {
     const { value } = req.body;
     if (value === undefined) return res.status(400).json({ message: 'value required.' });
 
-    const { error } = await supabase.from('platform_settings')
-      .upsert({ key, value: String(value), updated_at: new Date().toISOString(), updated_by: req.admin?.name || 'Admin' }, { onConflict: 'key' });
+    await saveAdminSettings([{ key, value }], req.admin?.name || 'Admin');
+    invalidatePlatformSettingsCache();
 
-    if (error) {
-      if (isMissingTable(error)) return res.status(404).json({ message: 'platform_settings table not found.' });
-      return res.status(500).json({ message: error.message });
-    }
-
-    await logAction(req.admin?.id, req.admin?.name, `Setting updated: ${key}`, 'settings', key, { value });
+    await logAction(req.admin?.id, req.admin?.name, `Setting updated: ${key}`, 'settings', key, { value: '[updated]' });
     return res.json({ message: 'Setting updated successfully.' });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err.status || 500).json({ message: err.message, errors: err.errors || undefined });
   }
 }
 
@@ -98,6 +78,9 @@ export async function updateSetting(req, res) {
 export async function getSystemHealth(req, res) {
   try {
     const { firebase, supabase: supabaseStatus } = await pingServices();
+    const memory = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    const apiMetrics = req.app?.get('apiMetrics')?.snapshot?.() || null;
 
     // Count active lives
     let activeLives = 0;
@@ -130,15 +113,50 @@ export async function getSystemHealth(req, res) {
 
     return res.json({
       services: {
+        api_server: {
+          status: 'active',
+          detail: `Uptime ${Math.floor(process.uptime())}s`,
+          active: true,
+        },
+        database: {
+          status: supabaseStatus.status,
+          detail: supabaseStatus.detail,
+          active: supabaseStatus.status === 'active',
+        },
         supabase: {
           status: supabaseStatus.status,
           detail: supabaseStatus.detail,
           active: supabaseStatus.status === 'active',
         },
+        authentication: {
+          status: firebase.status === 'active' ? 'active' : 'degraded',
+          detail: firebase.detail,
+          active: firebase.status === 'active',
+        },
         firebase: {
           status: firebase.status,
           detail: firebase.detail,
           active: firebase.status === 'active',
+        },
+        paystack: {
+          status: process.env.PAYSTACK_SECRET_KEY ? 'configured' : 'missing',
+          detail: process.env.PAYSTACK_SECRET_KEY ? 'Paystack secret is configured.' : 'Paystack secret is missing.',
+          active: !!process.env.PAYSTACK_SECRET_KEY,
+        },
+        email_service: {
+          status: process.env.RESEND_API_KEY ? 'configured' : 'missing',
+          detail: process.env.RESEND_API_KEY ? 'Email service is configured.' : 'Email service key is missing.',
+          active: !!process.env.RESEND_API_KEY,
+        },
+        uploads_storage: {
+          status: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? 'configured' : 'missing',
+          detail: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Storage credentials are configured.' : 'Storage credentials are incomplete.',
+          active: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
+        },
+        realtime: {
+          status: 'active',
+          detail: 'Socket.IO server is attached to the API process.',
+          active: true,
         },
       },
       stats: {
@@ -148,6 +166,17 @@ export async function getSystemHealth(req, res) {
         activeSubscriptions,
         pendingPayouts,
       },
+      runtime: {
+        memory: {
+          rss: memory.rss,
+          heapUsed: memory.heapUsed,
+          heapTotal: memory.heapTotal,
+          external: memory.external,
+        },
+        cpu,
+        uptime: Math.floor(process.uptime()),
+      },
+      apiMetrics,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -159,25 +188,28 @@ export async function getSystemHealth(req, res) {
 
 export async function getEnvOverview(req, res) {
   try {
-    // Return safe, non-sensitive env overview (no secret values)
-    const envVars = [
-      { key: 'NODE_ENV', value: process.env.NODE_ENV || 'development', sensitive: false },
-      { key: 'PORT', value: process.env.PORT || '5043', sensitive: false },
-      { key: 'SUPABASE_URL', value: process.env.SUPABASE_URL ? '✓ Set' : '✗ Missing', sensitive: false },
-      { key: 'SUPABASE_SERVICE_ROLE_KEY', value: process.env.SUPABASE_SERVICE_ROLE_KEY ? '✓ Set (hidden)' : '✗ Missing', sensitive: true },
-      { key: 'FIREBASE_DATABASE_URL', value: process.env.FIREBASE_DATABASE_URL || '✗ Missing', sensitive: false },
-      { key: 'GOOGLE_APPLICATION_CREDENTIALS', value: process.env.GOOGLE_APPLICATION_CREDENTIALS ? '✓ Set' : '✗ Missing', sensitive: false },
-      { key: 'ADMIN_JWT_SECRET', value: process.env.ADMIN_JWT_SECRET ? '✓ Set (hidden)' : '⚠ Using fallback', sensitive: true },
-      { key: 'LIVEKIT_API_KEY', value: process.env.LIVEKIT_API_KEY ? '✓ Set' : '✗ Missing', sensitive: false },
-      { key: 'LIVEKIT_API_SECRET', value: process.env.LIVEKIT_API_SECRET ? '✓ Set (hidden)' : '✗ Missing', sensitive: true },
-      { key: 'CORS_ORIGINS', value: process.env.CORS_ORIGINS || '(defaults)', sensitive: false },
-      { key: 'PAYSTACK_SECRET_KEY', value: process.env.PAYSTACK_SECRET_KEY ? '✓ Set (hidden)' : '✗ Missing', sensitive: true },
-      { key: 'MONNIFY_API_KEY', value: process.env.MONNIFY_API_KEY ? '✓ Set (hidden)' : '✗ Missing', sensitive: true },
-      { key: 'RAPIDAPI_VIDEO_KEY', value: process.env.RAPIDAPI_VIDEO_KEY ? '✓ Set (hidden)' : '✗ Missing', sensitive: true },
-    ];
-
+    const envStatus = (key, sensitive = false) => ({
+      key,
+      value: process.env[key] ? (sensitive ? 'Set (hidden)' : 'Configured') : 'Missing',
+      sensitive,
+    });
     return res.json({
-      env: envVars,
+      env: [
+        { key: 'NODE_ENV', value: process.env.NODE_ENV === 'production' ? 'production' : 'non-production', sensitive: false },
+        { key: 'PORT', value: process.env.PORT ? 'Configured' : 'Default', sensitive: false },
+        envStatus('SUPABASE_URL'),
+        envStatus('SUPABASE_SERVICE_ROLE_KEY', true),
+        envStatus('FIREBASE_DATABASE_URL'),
+        envStatus('GOOGLE_APPLICATION_CREDENTIALS', true),
+        envStatus('ADMIN_JWT_SECRET', true),
+        envStatus('LIVEKIT_API_KEY', true),
+        envStatus('LIVEKIT_API_SECRET', true),
+        envStatus('CORS_ORIGINS'),
+        envStatus('PAYSTACK_SECRET_KEY', true),
+        envStatus('RESEND_API_KEY', true),
+        envStatus('FLUTTERWAVE_SECRET_KEY', true),
+        envStatus('RAPIDAPI_VIDEO_KEY', true),
+      ],
       nodeVersion: process.version,
       platform: process.platform,
       uptime: Math.floor(process.uptime()),
@@ -191,17 +223,41 @@ export async function getEnvOverview(req, res) {
 
 export async function getAdminUsers(req, res) {
   try {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('admin_users')
-      .select('id, name, email, role, is_active, is_super_admin, created_at, last_login')
+      .select('id, name, email, role, permissions, is_active, is_super_admin, created_at, last_login, last_active_at, avatar_url')
       .order('created_at', { ascending: false });
+
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+      const fallback = await supabase
+        .from('admin_users')
+        .select('id, name, email, permissions, is_active, is_super_admin, created_at, last_login')
+        .order('created_at', { ascending: false });
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (error) {
       if (isMissingTable(error)) return res.json({ admins: [] });
       return res.status(500).json({ message: error.message });
     }
 
-    return res.json({ admins: data || [] });
+    const now = Date.now();
+    const admins = (data || []).map((admin) => {
+      const lastActiveMs = admin.last_active_at ? new Date(admin.last_active_at).getTime() : 0;
+      const online = Number.isFinite(lastActiveMs) && now - lastActiveMs < 5 * 60 * 1000;
+      return {
+        ...admin,
+        name: admin.name || admin.email,
+        role: admin.is_super_admin ? 'super_admin' : (admin.role || 'admin'),
+        permissions: Array.isArray(admin.permissions) ? admin.permissions : [],
+        online,
+        account_status: admin.is_active ? 'active' : 'suspended',
+        last_active_at: admin.last_active_at || admin.last_login || null,
+      };
+    });
+
+    return res.json({ admins, users: admins });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -304,14 +360,17 @@ export async function getApiHealth(req, res) {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
       } finally { clearTimeout(t); }
     }),
-    ping('Monnify', async () => {
-      if (!process.env.MONNIFY_API_KEY) throw new Error('Not configured');
+    ping('Flutterwave', async () => {
+      if (!process.env.FLUTTERWAVE_SECRET_KEY) throw new Error('Not configured');
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 4000);
       try {
-        const r = await fetch('https://api.monnify.com/api/v1/auth/login', { method: 'POST', signal: ctrl.signal });
+        const r = await fetch('https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=health-check-probe', {
+          headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` },
+          signal: ctrl.signal,
+        });
         clearTimeout(t);
-        if (!r.ok && r.status !== 401) throw new Error(`HTTP ${r.status}`);
+        if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`);
       } finally { clearTimeout(t); }
     }),
     ping('Resend (Email)', async () => {
@@ -376,7 +435,6 @@ const MONITORED_ROUTES = [
   { group: 'Admin · Content',    path: '/api/admin/content/random-sessions',  adminAuth: true },
   { group: 'Admin · Content',    path: '/api/admin/content/premium-videos',   adminAuth: true },
   // ── Admin — moderation ────────────────────────────────────────────────────
-  { group: 'Admin · Moderation', path: '/api/admin/moderation/reports',       adminAuth: true },
   { group: 'Admin · Moderation', path: '/api/admin/moderation/audit-logs',    adminAuth: true },
   { group: 'Admin · Moderation', path: '/api/admin/moderation/ai-flags',      adminAuth: true },
   // ── Admin — users ─────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { getFirebaseAuth } from '../config/firebase.js';
+import { getFirebaseAuth, markFirebaseAdminUnavailable } from '../config/firebase.js';
 
 function getSecret() {
   const s = process.env.JWT_SECRET || process.env.SESSION_JWT_SECRET;
@@ -28,7 +28,8 @@ export async function resolveUidFromBearerToken(token) {
     try {
       const decoded = await authSvc.verifyIdToken(token, true);
       return decoded.uid;
-    } catch {
+    } catch (err) {
+      markFirebaseAdminUnavailable(err, 'verify Firebase ID token');
       /* fall through to session JWT */
     }
   } else {
@@ -44,7 +45,8 @@ export async function resolveUidFromBearerToken(token) {
       try {
         const user = await authSvc.getUser(uid);
         if (user.disabled) return null;
-      } catch {
+      } catch (err) {
+        markFirebaseAdminUnavailable(err, 'load Firebase session user');
         return null;
       }
     }

@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { supabase } from '../config/supabase.js';
 import { sendAdminInviteEmail } from '../services/emailService.js';
 import { sendVerificationEmail } from '../services/emailService.js';
+import { logAdminAction } from '../services/adminAudit.service.js';
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
@@ -121,7 +122,16 @@ export async function loginAdmin(req, res) {
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || '');
 
-    if (!email || !password) return res.status(400).json({ message: 'Email and password are required' });
+    if (!email || !password) {
+      await logAdminAction(req, {
+        action: 'Admin login failed',
+        targetType: 'admin_session',
+        targetId: email || 'missing-email',
+        status: 'failure',
+        details: { reason: 'missing_credentials', email },
+      });
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
 
     const { data: user, error } = await supabase
       .from('admin_users')
@@ -131,18 +141,46 @@ export async function loginAdmin(req, res) {
       .maybeSingle();
 
     if (error) return res.status(500).json({ message: error.message });
-    if (!user || !user.password_hash) return res.status(401).json({ message: 'Invalid email or password' });
+    if (!user || !user.password_hash) {
+      await logAdminAction(req, {
+        action: 'Admin login failed',
+        targetType: 'admin_session',
+        targetId: email,
+        status: 'failure',
+        details: { reason: 'invalid_credentials', email },
+      });
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ message: 'Invalid email or password' });
+    if (!ok) {
+      await logAdminAction(req, {
+        action: 'Admin login failed',
+        targetType: 'admin_session',
+        targetId: user.id,
+        status: 'failure',
+        details: { reason: 'invalid_password', email },
+        admin: { id: user.id, name: user.name, email: user.email },
+      });
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
 
     await supabase.from('admin_users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
 
     const token = signAdminJwt({
       id: user.id,
+      name: user.name,
       email: user.email,
       is_super_admin: !!user.is_super_admin,
       permissions: Array.isArray(user.permissions) ? user.permissions : [],
+    });
+
+    await logAdminAction(req, {
+      action: 'Admin login',
+      targetType: 'admin_session',
+      targetId: user.id,
+      details: { email: user.email },
+      admin: { id: user.id, name: user.name, email: user.email },
     });
 
     return res.json({
@@ -155,6 +193,21 @@ export async function loginAdmin(req, res) {
         permissions: Array.isArray(user.permissions) ? user.permissions : [],
       },
     });
+  } catch (err) {
+    return res.status(500).json({ message: err?.message || String(err) });
+  }
+}
+
+export async function logoutAdmin(req, res) {
+  try {
+    if (req.admin?.id || req.admin?.email) {
+      await logAdminAction(req, {
+        action: 'Admin logout',
+        targetType: 'admin_session',
+        targetId: req.admin?.id || req.admin?.email || '',
+      });
+    }
+    return res.json({ message: 'Logged out' });
   } catch (err) {
     return res.status(500).json({ message: err?.message || String(err) });
   }
@@ -197,6 +250,13 @@ export async function inviteAdmin(req, res) {
 
     const inviteUrl = `${process.env.ADMIN_FRONTEND_URL || 'http://localhost:5174'}/invite/complete?token=${token}`;
     await sendAdminInviteEmail({ to: email, name, inviteUrl, permissions });
+
+    await logAdminAction(req, {
+      action: 'Admin invited',
+      targetType: 'admin_user',
+      targetId: email,
+      details: { email, name, permissions },
+    });
 
     return res.json({ message: 'Invite sent successfully' });
   } catch (err) {
@@ -290,6 +350,13 @@ export async function completeInvite(req, res) {
 
     await supabase.from('admin_invites').update({ used_at: new Date().toISOString() }).eq('id', invite.id);
 
+    await logAdminAction(req, {
+      action: 'Admin invite completed',
+      targetType: 'admin_user',
+      targetId: invite.email,
+      details: { email: invite.email },
+    });
+
     return res.json({ message: 'Account created successfully. You can now log in.' });
   } catch (err) {
     return res.status(500).json({ message: err?.message || String(err) });
@@ -298,13 +365,38 @@ export async function completeInvite(req, res) {
 
 export async function listAdminUsers(req, res) {
   try {
-    const { data: users, error } = await supabase
+    let { data: users, error } = await supabase
       .from('admin_users')
-      .select('id,name,email,permissions,is_active,is_super_admin,last_login,created_at')
+      .select('id,name,email,role,permissions,is_active,is_super_admin,last_login,last_active_at,created_at,avatar_url')
       .order('created_at', { ascending: false });
 
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+      const fallback = await supabase
+        .from('admin_users')
+        .select('id,name,email,permissions,is_active,is_super_admin,last_login,created_at')
+        .order('created_at', { ascending: false });
+      users = fallback.data;
+      error = fallback.error;
+    }
     if (error) return res.status(500).json({ message: error.message });
-    return res.json({ users: users || [] });
+
+    const now = Date.now();
+    const rows = (users || []).map((admin) => {
+      const lastActiveAt = admin.last_active_at || admin.last_login || null;
+      const lastActiveMs = lastActiveAt ? new Date(lastActiveAt).getTime() : 0;
+      return {
+        ...admin,
+        name: admin.name || admin.email,
+        role: admin.is_super_admin ? 'super_admin' : (admin.role || 'admin'),
+        avatar_url: admin.avatar_url || null,
+        permissions: Array.isArray(admin.permissions) ? admin.permissions : [],
+        online: Number.isFinite(lastActiveMs) && now - lastActiveMs < 5 * 60 * 1000,
+        last_active_at: lastActiveAt,
+        account_status: admin.is_active ? 'active' : 'suspended',
+      };
+    });
+
+    return res.json({ users: rows, admins: rows });
   } catch (err) {
     return res.status(500).json({ message: err?.message || String(err) });
   }
@@ -318,6 +410,11 @@ export async function deleteAdminUser(req, res) {
 
     const { error } = await supabase.from('admin_users').delete().eq('id', id);
     if (error) return res.status(500).json({ message: error.message });
+    await logAdminAction(req, {
+      action: 'Admin removed',
+      targetType: 'admin_user',
+      targetId: id,
+    });
     return res.json({ message: 'User deleted' });
   } catch (err) {
     return res.status(500).json({ message: err?.message || String(err) });
@@ -328,11 +425,35 @@ export async function updateUserPermissions(req, res) {
   try {
     const id = String(req.params?.id || '').trim();
     const permissions = req.body?.permissions;
+    const role = req.body?.role ? String(req.body.role).trim().toLowerCase() : null;
     if (!id) return res.status(400).json({ message: 'User id is required' });
-    if (!Array.isArray(permissions)) return res.status(400).json({ message: 'Permissions must be an array' });
+    if (permissions !== undefined && !Array.isArray(permissions)) return res.status(400).json({ message: 'Permissions must be an array' });
+    if (role && !['admin', 'moderator', 'finance', 'support', 'operations'].includes(role)) {
+      return res.status(400).json({ message: 'Invalid admin role' });
+    }
 
-    const { error } = await supabase.from('admin_users').update({ permissions }).eq('id', id);
+    const update = {};
+    if (permissions !== undefined) update.permissions = permissions;
+    if (role) update.role = role;
+    if (Object.keys(update).length === 0) return res.status(400).json({ message: 'Nothing to update' });
+
+    let { error } = await supabase.from('admin_users').update(update).eq('id', id);
+    if (error && update.role && (error.code === '42703' || error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+      const fallbackUpdate = { ...update };
+      delete fallbackUpdate.role;
+      if (Object.keys(fallbackUpdate).length === 0) {
+        return res.status(500).json({ message: 'Admin role column is not available. Run the latest database migration before editing roles.' });
+      }
+      const fallback = await supabase.from('admin_users').update(fallbackUpdate).eq('id', id);
+      error = fallback.error;
+    }
     if (error) return res.status(500).json({ message: error.message });
+    await logAdminAction(req, {
+      action: 'Admin permissions updated',
+      targetType: 'admin_user',
+      targetId: id,
+      details: update,
+    });
     return res.json({ message: 'Permissions updated' });
   } catch (err) {
     return res.status(500).json({ message: err?.message || String(err) });

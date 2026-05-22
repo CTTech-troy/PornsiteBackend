@@ -117,6 +117,14 @@ export async function getHomeFeed(req, res) {
     });
   } catch (err) {
     console.error('[homeFeed] getHomeFeed error:', err?.message || err);
-    return res.status(500).json({ success: false, data: [], hasMore: false, error: err?.message || 'Failed to load home feed' });
+    return res.status(200).json({
+      success: false,
+      data: [],
+      hasMore: false,
+      nextPage: Math.max(1, parseInt(req.query.page, 10) || 1) + 1,
+      page: Math.max(1, parseInt(req.query.page, 10) || 1),
+      recoverable: true,
+      error: err?.message || 'Failed to load home feed',
+    });
   }
 }

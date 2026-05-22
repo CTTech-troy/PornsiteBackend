@@ -1,7 +1,13 @@
 import rateLimit from 'express-rate-limit';
+import { createRateLimitStore } from './rateLimitStore.js';
 import { recordAuth } from '../utils/authMetrics.js';
 
 const jsonMessage = { success: false, message: 'Too many requests. Please wait and try again.' };
+
+function readLimit(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 function limitHandler(req, res, _next, options) {
   recordAuth('rateLimited');
@@ -10,60 +16,67 @@ function limitHandler(req, res, _next, options) {
   );
 }
 
-if (process.env.NODE_ENV === 'production' && !(process.env.REDIS_URL || '').trim()) {
-  console.warn(
-    '[authRateLimit] REDIS_URL not set: limits are per-process only. Use Redis + rate-limit-redis for multi-instance (see docs/AUTH_SCALING.md).'
-  );
-}
+function makeLimiter({ name, windowMs, max, burstMax, burstWindowMs }) {
+  const common = {
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    passOnStoreError: true,
+    message: jsonMessage,
+    handler: limitHandler,
+  };
 
-function makeLimiter({ windowMs, max, burstMax, burstWindowMs }) {
   const burst = rateLimit({
+    ...common,
     windowMs: burstWindowMs,
     max: burstMax,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: jsonMessage,
-    handler: limitHandler,
+    store: createRateLimitStore(`auth:${name}:burst`),
   });
+
   const window = rateLimit({
+    ...common,
     windowMs,
     max,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: jsonMessage,
-    handler: limitHandler,
+    store: createRateLimitStore(`auth:${name}:window`),
   });
+
   return [burst, window];
 }
 
-const loginBurstMax = Number(process.env.AUTH_LOGIN_BURST_PER_MIN || 120);
-const loginWindowMax = Number(process.env.AUTH_LOGIN_MAX_PER_15M || 800);
-const signupBurstMax = Number(process.env.AUTH_SIGNUP_BURST_PER_MIN || 15);
-const signupWindowMax = Number(process.env.AUTH_SIGNUP_MAX_PER_15M || 60);
-const meWindowMax = Number(process.env.AUTH_ME_MAX_PER_15M || 400);
-
 export const [authLoginBurst, authLoginWindow] = makeLimiter({
+  name: 'login',
   burstWindowMs: 60 * 1000,
-  burstMax: loginBurstMax,
+  burstMax: readLimit('AUTH_LOGIN_BURST_PER_MIN', 20),
   windowMs: 15 * 60 * 1000,
-  max: loginWindowMax,
+  max: readLimit('AUTH_LOGIN_MAX_PER_15M', 100),
 });
 
 export const [authSignupBurst, authSignupWindow] = makeLimiter({
+  name: 'signup',
   burstWindowMs: 60 * 1000,
-  burstMax: signupBurstMax,
+  burstMax: readLimit('AUTH_SIGNUP_BURST_PER_MIN', 5),
   windowMs: 15 * 60 * 1000,
-  max: signupWindowMax,
+  max: readLimit('AUTH_SIGNUP_MAX_PER_15M', 25),
+});
+
+export const [authForgotPasswordBurst, authForgotPasswordWindow] = makeLimiter({
+  name: 'forgot-password',
+  burstWindowMs: 60 * 1000,
+  burstMax: readLimit('AUTH_FORGOT_PASSWORD_BURST_PER_MIN', 5),
+  windowMs: 15 * 60 * 1000,
+  max: readLimit('AUTH_FORGOT_PASSWORD_MAX_PER_15M', 15),
 });
 
 export const authMeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: meWindowMax,
-  standardHeaders: true,
+  max: readLimit('AUTH_ME_MAX_PER_15M', 400),
+  standardHeaders: 'draft-8',
   legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRateLimitStore('auth:me'),
   message: jsonMessage,
   handler: limitHandler,
 });
 
+// Backward-compatible exports used by older routes/tests.
 export const authRouteLimiter = authLoginWindow;
 export const authBurstLimiter = authLoginBurst;

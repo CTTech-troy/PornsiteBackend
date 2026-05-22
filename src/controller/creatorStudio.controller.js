@@ -1,10 +1,25 @@
 import { randomUUID } from 'crypto';
 import { getFirebaseRtdb } from '../config/firebase.js';
-import { supabase, isConfigured } from '../config/supabase.js';
+import {
+  supabase,
+  isConfigured,
+  isSupabaseAvailable,
+  isSupabaseNetworkError,
+  markSupabaseUnavailable,
+} from '../config/supabase.js';
 import { getNgnToUsdRate } from '../utils/exchangeRate.js';
 import {
   sendPayoutRequestedEmail,
 } from '../services/emailService.js';
+import {
+  emitFinancePayoutEvent,
+  writeFinancePayoutLog,
+} from '../services/financePayoutEvents.service.js';
+import { getBooleanSetting, getNumberSetting } from '../services/platformSettings.service.js';
+import {
+  createCreatorWithdrawalRequest,
+  getCreatorPayoutBalances,
+} from '../services/payoutWorkflow.service.js';
 
 function isMissingTable(err) {
   return err?.code === '42P01' || err?.code === 'PGRST200' ||
@@ -13,6 +28,28 @@ function isMissingTable(err) {
 
 function isMissingColumn(err) {
   return err?.code === '42703';
+}
+
+function emptyStudioEarnings() {
+  return { total: 0, available: 0, pending: 0, bySource: [], rows: [] };
+}
+
+function studioSupabaseReady() {
+  return isConfigured() && isSupabaseAvailable() && supabase;
+}
+
+async function safeStudioQuery(label, query, fallback) {
+  if (!studioSupabaseReady()) return fallback;
+  try {
+    const result = await (typeof query === 'function' ? query() : query);
+    if (result?.error && (markSupabaseUnavailable(result.error, label) || isSupabaseNetworkError(result.error))) {
+      return fallback;
+    }
+    return result;
+  } catch (err) {
+    if (markSupabaseUnavailable(err, label) || isSupabaseNetworkError(err)) return fallback;
+    throw err;
+  }
 }
 
 // ── Level definitions ─────────────────────────────────────────────────────────
@@ -185,8 +222,16 @@ export async function getOverview(req, res) {
 
     const [videos, userRes, earningsRes] = await Promise.all([
       getCreatorVideos(uid),
-      isConfigured() ? supabase.from('users').select('followers, following, coin_balance').eq('id', uid).maybeSingle() : Promise.resolve({ data: null }),
-      isConfigured() ? supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid) : Promise.resolve({ data: [] }),
+      safeStudioQuery(
+        'studio overview user profile',
+        () => supabase.from('users').select('followers, following, coin_balance').eq('id', uid).maybeSingle(),
+        { data: null }
+      ),
+      safeStudioQuery(
+        'studio overview earnings',
+        () => supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid),
+        { data: [] }
+      ),
     ]);
 
     const user     = userRes?.data || {};
@@ -203,6 +248,18 @@ export async function getOverview(req, res) {
     const monthlyEarnings = earnings
       .filter(e => new Date(e.created_at) >= thirtyAgo)
       .reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
+
+    let payoutBalances = {
+      available: parseFloat(totalUsd.toFixed(2)),
+      pending: 0,
+      processing: 0,
+      withdrawn: 0,
+    };
+    try {
+      payoutBalances = await getCreatorPayoutBalances(uid);
+    } catch (balanceErr) {
+      console.warn('[studio] overview payout balance fallback:', balanceErr?.message || balanceErr);
+    }
 
     const level    = computeLevel(followers, totalViews);
     const lvlIdx   = CREATOR_LEVELS.indexOf(level);
@@ -232,6 +289,10 @@ export async function getOverview(req, res) {
         totalUploads:    videos.length,
         premiumUploads:  premiumVids.length,
         totalEarnings:   parseFloat(totalUsd.toFixed(2)),
+        availableEarnings: parseFloat(Number(payoutBalances.available || 0).toFixed(2)),
+        pendingEarnings: parseFloat(Number(payoutBalances.pending || 0).toFixed(2)),
+        processingEarnings: parseFloat(Number(payoutBalances.processing || 0).toFixed(2)),
+        withdrawnEarnings: parseFloat(Number(payoutBalances.withdrawn || 0).toFixed(2)),
         monthlyEarnings: parseFloat(monthlyEarnings.toFixed(2)),
         engagementRate:  totalViews > 0 ? Number(((totalLikes / totalViews) * 100).toFixed(1)) : 0,
         coinBalance:     Number(user.coin_balance) || 0,
@@ -258,10 +319,16 @@ export async function getAnalytics(req, res) {
 
     const [videos, userRes, earningsRes] = await Promise.all([
       getCreatorVideos(uid),
-      isConfigured() ? supabase.from('users').select('followers').eq('id', uid).maybeSingle() : Promise.resolve({ data: null }),
-      isConfigured()
-        ? supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid).gte('created_at', since.toISOString()).order('created_at', { ascending: true })
-        : Promise.resolve({ data: [] }),
+      safeStudioQuery(
+        'studio analytics user profile',
+        () => supabase.from('users').select('followers').eq('id', uid).maybeSingle(),
+        { data: null }
+      ),
+      safeStudioQuery(
+        'studio analytics earnings',
+        () => supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid).gte('created_at', since.toISOString()).order('created_at', { ascending: true }),
+        { data: [] }
+      ),
     ]);
 
     const earningsRows = earningsRes?.data || [];
@@ -356,26 +423,48 @@ export async function getVideos(req, res) {
 export async function getEarnings(req, res) {
   try {
     const uid = req.uid;
-    if (!isConfigured()) return res.json({ success: true, data: { total: 0, available: 0, pending: 0, bySource: [], rows: [] } });
+    if (!studioSupabaseReady()) return res.json({ success: true, data: emptyStudioEarnings(), degraded: true });
 
     const [earningsRes, pendingRes] = await Promise.all([
-      supabase.from('creator_earnings').select('*').eq('creator_id', uid).order('created_at', { ascending: false }),
-      supabase.from('creator_payout_requests').select('amount_usd, status').eq('creator_id', uid).in('status', ['pending', 'processing']),
+      safeStudioQuery(
+        'studio earnings rows',
+        supabase.from('creator_earnings').select('*').eq('creator_id', uid).order('created_at', { ascending: false }),
+        { data: [], error: null, degraded: true }
+      ),
+      safeStudioQuery(
+        'studio earnings pending payouts',
+        supabase.from('creator_payout_requests').select('amount_usd, status').eq('creator_id', uid).in('status', ['pending', 'approved', 'processing', 'paid', 'completed']),
+        { data: [], error: null, degraded: true }
+      ),
     ]);
 
     if (earningsRes.error) {
       if (isMissingTable(earningsRes.error)) {
-        return res.json({ success: true, data: { total: 0, available: 0, pending: 0, bySource: [], rows: [] } });
+        return res.json({ success: true, data: emptyStudioEarnings() });
       }
       throw earningsRes.error;
     }
 
     const earnings = earningsRes?.data || [];
-    const pending  = pendingRes?.data  || [];
+    const pending  = pendingRes?.error && (isMissingTable(pendingRes.error) || isMissingColumn(pendingRes.error))
+      ? []
+      : (pendingRes?.data || []);
 
     const total          = earnings.reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
-    const pendingAmount  = pending.reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
-    const available      = Math.max(0, total - pendingAmount);
+    const pendingAmount  = pending.filter(w => w.status === 'pending').reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
+    const processingAmount = pending.filter(w => ['approved', 'processing'].includes(w.status)).reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
+    const withdrawnAmount = pending.filter(w => ['paid', 'completed'].includes(w.status)).reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
+    let balances = {
+      total,
+      available: Math.max(0, total - pendingAmount - processingAmount - withdrawnAmount),
+      pending: pendingAmount,
+      processing: processingAmount,
+      withdrawn: withdrawnAmount,
+    };
+    try {
+      balances = await getCreatorPayoutBalances(uid);
+    } catch (_) {}
+    const available = balances.available;
 
     const grouped = {};
     for (const e of earnings) {
@@ -389,9 +478,11 @@ export async function getEarnings(req, res) {
     return res.json({
       success: true,
       data: {
-        total:    parseFloat(total.toFixed(2)),
+        total:    parseFloat(Number(balances.total || total).toFixed(2)),
         available: parseFloat(available.toFixed(2)),
-        pending:  parseFloat(pendingAmount.toFixed(2)),
+        pending:  parseFloat(Number(balances.pending || 0).toFixed(2)),
+        processing: parseFloat(Number(balances.processing || 0).toFixed(2)),
+        withdrawn: parseFloat(Number(balances.withdrawn || 0).toFixed(2)),
         ngnRate,
         bySource: Object.entries(grouped).map(([source, amount]) => ({
           source,
@@ -411,11 +502,11 @@ export async function getEarnings(req, res) {
 export async function getWithdrawals(req, res) {
   try {
     const uid = req.uid;
-    if (!isConfigured()) return res.json({ success: true, data: [] });
+    if (!studioSupabaseReady()) return res.json({ success: true, data: [], degraded: true });
 
     const { data, error } = await supabase
       .from('creator_payout_requests')
-      .select('id, amount_usd, amount_ngn, status, bank_name, bank_code, account_number, account_name, creator_name, reference_id, rejection_reason, requested_at, processed_at')
+      .select('id, amount_usd, amount_ngn, status, bank_name, bank_code, account_number, account_name, creator_name, reference_id, transaction_reference, proof_url, rejection_reason, failure_reason, requested_at, approved_at, finance_assigned_at, processed_at, paid_at, completed_at, risk_score, risk_flags')
       .eq('creator_id', uid)
       .order('requested_at', { ascending: false });
 
@@ -426,6 +517,9 @@ export async function getWithdrawals(req, res) {
     return res.json({ success: true, data: data || [] });
   } catch (err) {
     console.error('[studio] getWithdrawals:', err.message);
+    if (markSupabaseUnavailable(err, 'studio withdrawals') || isSupabaseNetworkError(err)) {
+      return res.json({ success: true, data: [], degraded: true });
+    }
     return res.status(500).json({ success: false, message: err.message });
   }
 }
@@ -436,112 +530,39 @@ export async function createWithdrawal(req, res) {
   try {
     const uid = req.uid;
     const { amount, bankName, bankCode, accountNumber, accountName } = req.body;
+    const payoutsEnabled = await getBooleanSetting('creator_payouts_enabled', true);
+    if (!payoutsEnabled) return res.status(403).json({ success: false, message: 'Creator payouts are currently disabled.' });
+    const minPayoutUsd = await getNumberSetting('min_payout_usd', 5);
 
     const amountNum = Number(amount);
     if (!amountNum || amountNum <= 0)  return res.status(400).json({ success: false, message: 'Invalid amount' });
-    if (amountNum < 5)                 return res.status(400).json({ success: false, message: 'Minimum withdrawal is $5.00' });
+    if (amountNum < minPayoutUsd)      return res.status(400).json({ success: false, message: `Minimum withdrawal is $${minPayoutUsd.toFixed(2)}` });
     if (!bankName?.trim())             return res.status(400).json({ success: false, message: 'Bank name is required' });
     if (!accountNumber?.trim())        return res.status(400).json({ success: false, message: 'Account number is required' });
     if (!accountName?.trim())          return res.status(400).json({ success: false, message: 'Account holder name is required' });
-    if (!isConfigured())               return res.status(503).json({ success: false, message: 'Database not configured' });
+    if (!studioSupabaseReady())        return res.status(503).json({ success: false, message: 'Database temporarily unavailable. Please try again shortly.' });
 
-    // Validate no duplicate pending request
-    const { data: existing } = await supabase
-      .from('creator_payout_requests')
-      .select('id')
-      .eq('creator_id', uid)
-      .eq('status', 'pending')
-      .limit(1);
-    if (existing && existing.length > 0) {
-      return res.status(409).json({ success: false, message: 'You already have a pending withdrawal request. Please wait for it to be processed.' });
-    }
+    const data = await createCreatorWithdrawalRequest({
+      creatorId: uid,
+      amount: amountNum,
+      bankName,
+      bankCode,
+      accountNumber,
+      accountName,
+      req,
+      io: req.app?.get('io'),
+    });
 
-    // Compute available balance
-    const [earningsRes, pendingRes, userRes] = await Promise.all([
-      supabase.from('creator_earnings').select('amount_usd').eq('creator_id', uid),
-      supabase.from('creator_payout_requests').select('amount_usd').eq('creator_id', uid).in('status', ['pending', 'processing']),
-      isConfigured() ? supabase.from('users').select('email, username, display_name').eq('id', uid).maybeSingle() : Promise.resolve({ data: null }),
-    ]);
-    const totalEarned   = (earningsRes?.data || []).reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
-    const pendingAmount = (pendingRes?.data  || []).reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
-    const available     = Math.max(0, totalEarned - pendingAmount);
-
-    if (amountNum > available) {
-      return res.status(400).json({ success: false, message: `Insufficient balance. Available: $${available.toFixed(2)}` });
-    }
-
-    // Compute NGN equivalent
-    let amountNgn = null;
-    try {
-      const rate = await getNgnToUsdRate();
-      amountNgn = parseFloat((amountNum * rate).toFixed(2));
-    } catch (_) {}
-
-    const referenceId = `XPAY-${randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
-    const creatorEmail = userRes?.data?.email || null;
-    const creatorDisplayName = userRes?.data?.display_name || userRes?.data?.username || accountName.trim();
-
-    const { data, error } = await supabase
-      .from('creator_payout_requests')
-      .insert({
-        creator_id:     uid,
-        creator_name:   creatorDisplayName,
-        creator_email:  creatorEmail,
-        bank_name:      bankName.trim(),
-        bank_code:      bankCode?.trim() || null,
-        account_number: accountNumber.trim(),
-        account_name:   accountName.trim(),
-        amount_usd:     amountNum,
-        amount_ngn:     amountNgn,
-        reference_id:   referenceId,
-        method:         'bank_transfer',
-        status:         'pending',
-      })
-      .select()
-      .maybeSingle();
-
-    if (error) {
-      if (isMissingTable(error)) {
-        return res.status(503).json({ success: false, message: 'Payout system not available yet. Please contact support.' });
-      }
-      // Fallback: insert without new columns if they don't exist yet
-      if (isMissingColumn(error)) {
-        const { data: fallbackData, error: fallbackErr } = await supabase
-          .from('creator_payout_requests')
-          .insert({
-            creator_id:     uid,
-            creator_name:   creatorDisplayName,
-            bank_name:      bankName.trim(),
-            account_number: accountNumber.trim(),
-            amount_usd:     amountNum,
-            method:         'bank_transfer',
-            status:         'pending',
-          })
-          .select()
-          .maybeSingle();
-        if (fallbackErr) throw fallbackErr;
-        return res.status(201).json({ success: true, data: fallbackData });
-      }
-      throw error;
-    }
-
-    // Send confirmation email (non-blocking)
-    if (creatorEmail) {
-      sendPayoutRequestedEmail({
-        to:            creatorEmail,
-        name:          creatorDisplayName,
-        amountUsd:     amountNum,
-        amountNgn,
-        bankName:      bankName.trim(),
-        accountNumber: accountNumber.trim(),
-        accountName:   accountName.trim(),
-        referenceId,
-      }).catch(e => console.error('[studio] payout email:', e.message));
-    }
-
-    return res.status(201).json({ success: true, data });
+    return res.status(201).json({
+      success: true,
+      data,
+      message: 'Withdrawal request submitted. Payment processing may take up to 24 hours after approval.',
+    });
   } catch (err) {
     console.error('[studio] createWithdrawal:', err.message);
+    if (markSupabaseUnavailable(err, 'studio withdrawal create') || isSupabaseNetworkError(err)) {
+      return res.status(503).json({ success: false, message: 'Database temporarily unavailable. Please try again shortly.' });
+    }
     return res.status(500).json({ success: false, message: err.message });
   }
 }
@@ -551,7 +572,7 @@ export async function createWithdrawal(req, res) {
 export async function getSettings(req, res) {
   try {
     const uid = req.uid;
-    if (!isConfigured()) return res.json({ success: true, data: {} });
+    if (!studioSupabaseReady()) return res.json({ success: true, data: {}, degraded: true });
 
     let { data, error } = await supabase
       .from('creators')
@@ -577,6 +598,9 @@ export async function getSettings(req, res) {
     return res.json({ success: true, data: data || {} });
   } catch (err) {
     console.error('[studio] getSettings:', err.message);
+    if (markSupabaseUnavailable(err, 'studio settings') || isSupabaseNetworkError(err)) {
+      return res.json({ success: true, data: {}, degraded: true });
+    }
     return res.status(500).json({ success: false, message: err.message });
   }
 }
@@ -586,7 +610,7 @@ export async function getSettings(req, res) {
 export async function updateSettings(req, res) {
   try {
     const uid = req.uid;
-    if (!isConfigured()) return res.status(503).json({ success: false, message: 'Database not configured' });
+    if (!studioSupabaseReady()) return res.status(503).json({ success: false, message: 'Database temporarily unavailable. Please try again shortly.' });
 
     const { displayName, bio, socialLinks } = req.body;
     const update = { user_id: uid, updated_at: new Date().toISOString() };
@@ -611,6 +635,9 @@ export async function updateSettings(req, res) {
     return res.json({ success: true });
   } catch (err) {
     console.error('[studio] updateSettings:', err.message);
+    if (markSupabaseUnavailable(err, 'studio settings update') || isSupabaseNetworkError(err)) {
+      return res.status(503).json({ success: false, message: 'Database temporarily unavailable. Please try again shortly.' });
+    }
     return res.status(500).json({ success: false, message: err.message });
   }
 }
