@@ -191,6 +191,94 @@ function warnSupabaseDirectoryFallback(context, err) {
   console.warn(`[userDirectory] ${context}`, message);
 }
 
+const USERS_FACET_REQUIRED_COLUMNS = 'id, username, display_name, avatar, avatar_url';
+const USERS_FACET_OPTIONAL_COLUMNS = ['email', 'email_verified', 'full_name'];
+const usersOptionalColumnAvailability = {};
+
+function getMissingUsersColumnName(err) {
+  if (!err) return null;
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '').toLowerCase();
+  if (code !== '42703' && code !== 'PGRST204' && !msg.includes('does not exist')) {
+    return null;
+  }
+  for (const col of USERS_FACET_OPTIONAL_COLUMNS) {
+    if (
+      msg.includes(`column users.${col} does not exist`)
+      || (msg.includes(`'${col}'`) && msg.includes('does not exist'))
+    ) {
+      return col;
+    }
+  }
+  return null;
+}
+
+async function probeUsersOptionalColumn(column) {
+  if (usersOptionalColumnAvailability[column] !== undefined) {
+    return usersOptionalColumnAvailability[column];
+  }
+  if (!isSupabaseAvailable() || !supabase) {
+    usersOptionalColumnAvailability[column] = false;
+    return false;
+  }
+  const { error } = await supabase.from('users').select(column).limit(1);
+  if (error) {
+    if (getMissingUsersColumnName(error) === column) {
+      usersOptionalColumnAvailability[column] = false;
+      return false;
+    }
+    return false;
+  }
+  usersOptionalColumnAvailability[column] = true;
+  return true;
+}
+
+async function usersFacetSelectColumns() {
+  const cols = USERS_FACET_REQUIRED_COLUMNS.split(', ');
+  for (const optional of USERS_FACET_OPTIONAL_COLUMNS) {
+    if (await probeUsersOptionalColumn(optional)) {
+      cols.push(optional);
+    }
+  }
+  return cols.join(', ');
+}
+
+function userSearchOrFilter(searchTrim) {
+  const term = String(searchTrim || '').trim().replace(/,/g, ' ').slice(0, 120);
+  if (!term) return null;
+  const parts = [
+    `username.ilike.%${term}%`,
+    `display_name.ilike.%${term}%`,
+  ];
+  if (usersOptionalColumnAvailability.email !== false) {
+    parts.push(`email.ilike.%${term}%`);
+  }
+  if (usersOptionalColumnAvailability.full_name !== false) {
+    parts.push(`full_name.ilike.%${term}%`);
+  }
+  return parts.join(',');
+}
+
+async function fetchUsersByIdsForFacets(ids) {
+  const rows = [];
+  const CHUNK = 200;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    let selectCols = await usersFacetSelectColumns();
+    let { data, error } = await supabase.from('users').select(selectCols).in('id', slice);
+    while (error) {
+      const missing = getMissingUsersColumnName(error);
+      if (!missing) break;
+      usersOptionalColumnAvailability[missing] = false;
+      selectCols = await usersFacetSelectColumns();
+      ({ data, error } = await supabase.from('users').select(selectCols).in('id', slice));
+    }
+    if (error) throw error;
+    for (const r of data || []) rows.push(r);
+  }
+  return rows;
+}
+
 function firebaseTimeToIso(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -573,17 +661,9 @@ export async function buildAdminUserFacetsByIds(userIds) {
   if (!ids.length) return {};
   const rows = [];
   if (isSupabaseAvailable() && supabase) {
-    const CHUNK = 200;
     try {
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        const slice = ids.slice(i, i + CHUNK);
-        const { data, error } = await supabase
-          .from('users')
-          .select('id, username, display_name, full_name, email, avatar, avatar_url, email_verified')
-          .in('id', slice);
-        if (error) throw error;
-        for (const r of data || []) rows.push(r);
-      }
+      const fetched = await fetchUsersByIdsForFacets(ids);
+      rows.push(...fetched);
     } catch (err) {
       warnSupabaseDirectoryFallback('buildAdminUserFacetsByIds', err);
     }
@@ -829,12 +909,11 @@ export async function listPlatformCreatorsFromDirectory(query) {
     }
   }
 
+  await usersFacetSelectColumns();
+
   let countQ = supabase.from('users').select('*', { count: 'exact', head: true }).eq('creator', true);
-  if (searchTrim) {
-    countQ = countQ.or(
-      `username.ilike.%${searchTrim}%,email.ilike.%${searchTrim}%,display_name.ilike.%${searchTrim}%,full_name.ilike.%${searchTrim}%`
-    );
-  }
+  const searchOr = userSearchOrFilter(searchTrim);
+  if (searchOr) countQ = countQ.or(searchOr);
   if (typeUserIds) countQ = countQ.in('id', typeUserIds);
 
   const { count: totalCount, error: countErr } = await countQ;
@@ -851,11 +930,7 @@ export async function listPlatformCreatorsFromDirectory(query) {
   }
 
   let q = supabase.from('users').select('*').eq('creator', true);
-  if (searchTrim) {
-    q = q.or(
-      `username.ilike.%${searchTrim}%,email.ilike.%${searchTrim}%,display_name.ilike.%${searchTrim}%,full_name.ilike.%${searchTrim}%`
-    );
-  }
+  if (searchOr) q = q.or(searchOr);
   if (typeUserIds) q = q.in('id', typeUserIds);
   q = q.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
 

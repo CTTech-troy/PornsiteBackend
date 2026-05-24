@@ -11,8 +11,6 @@
 
 .env
 .env.*
-!**/.env.example
-
 logs
 *.log
 docs

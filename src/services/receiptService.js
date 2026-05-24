@@ -1,13 +1,8 @@
-import { readFile } from 'fs/promises';
-import { fileURLToPath } from 'url';
-import path from 'path';
 import { randomUUID } from 'crypto';
 import PDFDocument from 'pdfkit';
 import { supabase } from '../config/supabase.js';
 import { getCreatorPayoutBalances } from './payoutWorkflow.service.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TEMPLATE_DIR = path.join(__dirname, '../templates');
+import { renderEmailTemplate } from './emailTemplates.js';
 
 function isMissingDbFeature(error) {
   const message = String(error?.message || '');
@@ -19,32 +14,8 @@ function isMissingDbFeature(error) {
   );
 }
 
-function escHtml(value) {
-  return String(value ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
-}
-
 function fmtUsd(value) {
   return `$${Number(value || 0).toFixed(2)}`;
-}
-
-function fmtDateTime(value) {
-  if (!value) return new Date().toLocaleString('en-US', { timeZone: process.env.FINANCE_TZ || 'America/Lagos' });
-  return new Date(value).toLocaleString('en-US', {
-    timeZone: process.env.FINANCE_TZ || 'America/Lagos',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
-}
-
-async function loadTemplate(name) {
-  return readFile(path.join(TEMPLATE_DIR, name), 'utf8');
-}
-
-function applyTemplate(template, vars) {
-  return Object.entries(vars).reduce(
-    (html, [key, value]) => html.replaceAll(`{{${key}}}`, escHtml(value)),
-    template,
-  );
 }
 
 export async function generateReceiptNumber() {
@@ -86,24 +57,26 @@ export function buildReceiptMetadata(payout, type, balances = {}) {
 }
 
 export async function renderReceiptHtml(type, metadata, receiptNumber) {
-  const templateName = type === 'paid' ? 'payoutReceiptPaid.html' : 'payoutReceiptRejected.html';
-  const template = await loadTemplate(templateName);
-  const vars = {
+  const templateKey = type === 'paid' ? 'withdrawal_receipt_paid' : 'withdrawal_receipt_rejected';
+  const rendered = renderEmailTemplate(templateKey, {
     receiptNumber,
-    logoUrl: metadata.logoUrl,
     creatorName: metadata.creatorName,
     creatorId: metadata.creatorId,
-    amountUsd: fmtUsd(metadata.amountUsd),
-    remainingBalance: metadata.remainingBalance == null ? '—' : fmtUsd(metadata.remainingBalance),
+    amountUsd: metadata.amountUsd,
+    amountNgn: metadata.amountNgn,
+    walletBalanceBefore: metadata.walletBalanceBefore,
+    walletBalanceAfter: metadata.walletBalanceAfter,
+    remainingBalance: metadata.remainingBalance,
     paymentMethod: metadata.paymentMethod,
     transactionId: metadata.transactionId,
-    paidAt: fmtDateTime(metadata.paidAt),
-    rejectedAt: fmtDateTime(metadata.rejectedAt),
+    referenceId: metadata.referenceId,
+    paidAt: metadata.paidAt,
+    rejectedAt: metadata.rejectedAt,
     reason: metadata.reason || 'No reason provided.',
     ceoName: metadata.ceoName,
     supportEmail: metadata.supportEmail,
-  };
-  return applyTemplate(template, vars);
+  });
+  return rendered.html;
 }
 
 export function generateReceiptPdfBuffer(metadata, receiptNumber) {

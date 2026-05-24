@@ -25,6 +25,7 @@ import {
   getAnnouncements,
   getActivity,
 } from '../controller/creatorStudio.controller.js';
+import { getStudioVastAnalytics as getVastAdAnalytics } from '../controller/vastAd.controller.js';
 
 const router = express.Router();
 
@@ -55,5 +56,6 @@ router.get('/subscriptions', getSubscriptions);
 router.get('/verification', getVerification);
 router.get('/announcements', getAnnouncements);
 router.get('/activity', getActivity);
+router.get('/analytics/ads', getVastAdAnalytics);
 
 export default router;

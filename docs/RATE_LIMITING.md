@@ -6,7 +6,7 @@ This backend uses `express-rate-limit` with `rate-limit-redis` and Upstash Redis
 
 ```txt
 backend/
-|-- .env.example
+|-- .env.production
 |-- index.js
 |-- package.json
 |-- scripts/
@@ -44,14 +44,14 @@ Keep these values only in server-side environment variables. Do not prefix them 
 | `POST /api/auth/reset-password` | `5/min` burst and `15/15m` |
 | `GET /api/auth/me` | `400/15m` |
 
-All limits are configurable through `.env.example`.
+All limits are configurable through `.env.production`.
 
 ## Verify Redis
 
 ```bash
 npm run check:redis
-curl http://localhost:5043/api/health/redis
-curl http://localhost:5043/api/health/services
+curl https://pornsitebackend.onrender.com/api/health/redis
+curl https://pornsitebackend.onrender.com/api/health/services
 ```
 
 A healthy Redis response has `"configured": true` and `"connected": true`.
@@ -68,7 +68,7 @@ Restart the backend, then run:
 
 ```bash
 for i in 1 2 3; do
-  curl -i -X POST http://localhost:5043/api/auth/login \
+  curl -i -X POST https://pornsitebackend.onrender.com/api/auth/login \
     -H "Content-Type: application/json" \
     -d '{"email":"test@example.com","password":"wrong-password"}'
 done
@@ -86,3 +86,5 @@ The request over the limit should return `429` with `RateLimit-*` headers.
 6. Alert on sustained `429` spikes and on Redis health returning `connected: false`.
 
 The previous TCP Redis URL startup warning has been removed because this app now uses Upstash REST credentials instead of a TCP Redis URL.
+
+

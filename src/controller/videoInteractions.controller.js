@@ -5,6 +5,15 @@
  */
 import { supabase } from '../config/supabase.js';
 import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoIdValidation.js';
+import { fetchVideoComments, insertVideoComment } from '../utils/videoCommentsQuery.js';
+import { enqueueSearchIndex } from '../services/searchIndex.service.js';
+import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
+
+function invalidateCreatorLeaderboard() {
+  try {
+    invalidateTopCreatorsCache();
+  } catch (_) {}
+}
 
 export async function getLikeStatus(req, res) {
   try {
@@ -51,6 +60,8 @@ export async function likeVideo(req, res) {
       p_user_id:  uid,
     });
     if (error) throw error;
+    enqueueSearchIndex(videoId, 'upsert').catch(() => {});
+    invalidateCreatorLeaderboard();
     return res.json({ liked: true, totalLikes: result?.total_likes ?? 0 });
   } catch (err) {
     console.error('videoInteractions.likeVideo', err?.message || err);
@@ -71,6 +82,8 @@ export async function unlikeVideo(req, res) {
       p_user_id:  uid,
     });
     if (error) throw error;
+    enqueueSearchIndex(videoId, 'upsert').catch(() => {});
+    invalidateCreatorLeaderboard();
     return res.json({ liked: false, totalLikes: result?.total_likes ?? 0 });
   } catch (err) {
     console.error('videoInteractions.unlikeVideo', err?.message || err);
@@ -84,24 +97,11 @@ export async function getComments(req, res) {
     if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: [] });
     if (!supabase)             return res.json({ data: [] });
 
-    const { data, error } = await supabase
-      .from('tiktok_video_comments')
-      .select('id, user_id, author_name, comment, created_at')
-      .eq('video_id', videoId)
-      .order('created_at', { ascending: true });
-
-    if (error) throw error;
-    const list = (data || []).map((c) => ({
-      commentId:   c.id,
-      userId:      c.user_id,
-      authorName:  c.author_name || 'Member',
-      text:        c.comment,
-      createdAt:   new Date(c.created_at).getTime(),
-    }));
+    const list = await fetchVideoComments(videoId);
     return res.json({ data: list });
   } catch (err) {
     console.error('videoInteractions.getComments', err?.message || err);
-    return res.status(500).json({ data: [] });
+    return res.json({ data: [] });
   }
 }
 
@@ -117,12 +117,7 @@ export async function addComment(req, res) {
 
     const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
 
-    const { data: inserted, error: insErr } = await supabase
-      .from('tiktok_video_comments')
-      .insert([{ video_id: videoId, user_id: uid, author_name: authorName, comment: text }])
-      .select('id, created_at')
-      .single();
-    if (insErr) throw insErr;
+    const inserted = await insertVideoComment({ videoId, userId: uid, text, authorName });
 
     const { data: video } = await supabase
       .from('tiktok_videos')
@@ -134,6 +129,8 @@ export async function addComment(req, res) {
       .from('tiktok_videos')
       .update({ comments_count: newTotal })
       .eq('video_id', videoId);
+    enqueueSearchIndex(videoId, 'upsert').catch(() => {});
+    invalidateCreatorLeaderboard();
 
     return res.status(201).json({
       comment: {
@@ -172,6 +169,10 @@ export async function recordPublicVideoView(req, res) {
       p_session_id: uid ? null : sessionId.slice(0, 128),
     });
     if (error) throw error;
+    if (result?.duplicate !== true) {
+      enqueueSearchIndex(videoId, 'upsert').catch(() => {});
+      invalidateCreatorLeaderboard();
+    }
 
     return res.json({
       success:   result?.success ?? true,

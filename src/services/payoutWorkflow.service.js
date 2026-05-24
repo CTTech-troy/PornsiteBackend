@@ -14,6 +14,7 @@ import { createPayoutReceipt, getReceiptForPayout } from './receiptService.js';
 import { sendPayoutReceiptEmail, receiptEmailSubject } from './payoutEmailService.js';
 import {
   emitFinancePayoutEvent,
+  writeFinanceActivityEvent,
   writeFinancePayoutLog,
 } from './financePayoutEvents.service.js';
 import { getCreatorWalletBalance, invalidateRevenueCache } from './revenueCalculation.service.js';
@@ -313,9 +314,10 @@ export async function runPayoutNotification({ type, payoutId, payload = {} }) {
       if (!receipt?.html_body) receipt = await createPayoutReceipt(payout, 'paid');
       const htmlBody = receipt?.html_body || receipt?.htmlBody;
       if (htmlBody) {
+        const receiptNumber = receipt.receiptNumber || receipt.receipt_number;
         await sendPayoutReceiptEmail({
           to: payout.creator_email,
-          subject: receiptEmailSubject('paid', receipt.receiptNumber, payout.amount_usd),
+          subject: receiptEmailSubject('paid', receiptNumber, payout.amount_usd),
           htmlBody,
           payoutId: payout.id,
           receiptId: receipt?.id,
@@ -328,9 +330,10 @@ export async function runPayoutNotification({ type, payoutId, payload = {} }) {
       if (!receipt?.html_body) receipt = await createPayoutReceipt(payout, 'rejected');
       const htmlBody = receipt?.html_body || receipt?.htmlBody;
       if (htmlBody) {
+        const receiptNumber = receipt.receiptNumber || receipt.receipt_number;
         await sendPayoutReceiptEmail({
           to: payout.creator_email,
-          subject: receiptEmailSubject('rejected', receipt.receiptNumber, payout.amount_usd),
+          subject: receiptEmailSubject('rejected', receiptNumber, payout.amount_usd),
           htmlBody,
           payoutId: payout.id,
           receiptId: receipt?.id,
@@ -506,6 +509,17 @@ export async function createCreatorWithdrawalRequest({
   });
   await invalidatePayoutCache();
   await writeFinancePayoutLog(payout, 'pending', { metadata: { source: 'creator_studio', riskScore, riskFlags } });
+  await writeFinanceActivityEvent({
+    eventType: 'payout_requested',
+    actorType: 'creator',
+    actorId: creatorId,
+    creatorId,
+    amountUsd,
+    provider: 'bank_transfer',
+    reference: referenceId,
+    status: 'pending',
+    metadata: { amountNgn, bankName: bankName.trim(), riskScore, riskFlags },
+  }, { io });
   emitPayoutRealtime(io, 'finance:payout-created', payout, { status: 'pending' });
   await enqueuePayoutNotification('submitted', payout);
   if (riskFlags.length) await enqueuePayoutWorkflow('/audit', { type: 'payout.high_risk', payoutId: payout.id, riskFlags, riskScore });
@@ -604,6 +618,17 @@ export async function approvePayoutRequest({ id, admin, notes = '', financeAssig
   const nextPayout = updated || { ...payout, ...update };
 
   await writeFinancePayoutLog(nextPayout, 'approved', { metadata: { action: 'approved', adminId: admin?.id || null, notes } });
+  await writeFinanceActivityEvent({
+    eventType: 'payout_approved',
+    actorType: 'admin',
+    actorId: admin?.id || null,
+    creatorId: nextPayout.creator_id,
+    amountUsd: nextPayout.amount_usd,
+    provider: nextPayout.payment_provider || 'bank_transfer',
+    reference: nextPayout.reference_id,
+    status: 'approved',
+    metadata: { notes, financeAssigneeId },
+  }, { io });
   await logAdminAction(req || { admin }, {
     admin,
     action: 'Approved creator payout',
@@ -653,6 +678,17 @@ export async function rejectPayoutRequest({ id, admin, reason, req = null, io = 
     console.warn('[payout] rejection receipt failed:', err.message);
   }
   await writeFinancePayoutLog(payout, 'rejected', { errorMessage: reason, metadata: { adminId: admin?.id || null } });
+  await writeFinanceActivityEvent({
+    eventType: 'payout_rejected',
+    actorType: 'admin',
+    actorId: admin?.id || null,
+    creatorId: payout.creator_id,
+    amountUsd: payout.amount_usd,
+    provider: payout.payment_provider || 'bank_transfer',
+    reference: payout.reference_id,
+    status: 'rejected',
+    metadata: { reason },
+  }, { io });
   await logAdminAction(req || { admin }, {
     admin,
     action: 'Rejected creator payout',
@@ -706,6 +742,17 @@ export async function markPayoutCompleted({ id, admin, transactionReference = nu
   }
   await insertPayoutTransaction({ payout, status: 'completed', provider, reference: transactionReference, proofUrl, actorId: admin?.id || null, metadata: { notes } });
   await writeFinancePayoutLog(payout, 'completed', { provider, transactionReference, paymentDate: new Date().toISOString(), metadata: { action: 'completed', adminId: admin?.id || null } });
+  await writeFinanceActivityEvent({
+    eventType: 'payout_completed',
+    actorType: admin?.id ? 'admin' : 'system',
+    actorId: admin?.id || null,
+    creatorId: payout.creator_id,
+    amountUsd: payout.amount_usd,
+    provider,
+    reference: transactionReference || ref,
+    status: 'completed',
+    metadata: { proofUrl, receiptId: receipt?.id || null },
+  }, { io });
   await logAdminAction(req || { admin }, {
     admin,
     action: 'Completed creator payout',
@@ -730,6 +777,17 @@ export async function markPayoutFailed({ id, admin, reason, req = null, io = nul
   });
   await insertPayoutTransaction({ payout, status: 'failed', errorMessage: reason, actorId: admin?.id || null });
   await writeFinancePayoutLog(payout, 'failed', { errorMessage: reason, metadata: { adminId: admin?.id || null } });
+  await writeFinanceActivityEvent({
+    eventType: 'payout_failed',
+    actorType: admin?.id ? 'admin' : 'system',
+    actorId: admin?.id || null,
+    creatorId: payout.creator_id,
+    amountUsd: payout.amount_usd,
+    provider: payout.payment_provider || 'bank_transfer',
+    reference: payout.transaction_reference || payout.reference_id,
+    status: 'failed',
+    metadata: { reason },
+  }, { io });
   emitPayoutRealtime(io, 'finance:payout-updated', payout, { status: 'failed' });
   await enqueuePayoutNotification('failed', payout);
   return publicPayout(payout);

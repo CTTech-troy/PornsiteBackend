@@ -17,9 +17,17 @@ import {
   countryFromRequest,
   normalizeCountryCode,
   resolveCheckoutCountry,
-  resolvePaymentProvider,
 } from './paymentRegion.service.js';
+import {
+  resolveCheckoutProviders,
+  userFacingPaymentError,
+} from './paymentOrchestrator.service.js';
 import { logPaymentEvent } from './paymentLogger.service.js';
+import {
+  sendPaymentFailureEmail,
+  sendPaymentSuccessEmail,
+} from './emailService.js';
+import { writeFinanceActivityEvent } from './financePayoutEvents.service.js';
 
 const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
 const INTENT_TTL_MINUTES = Number(process.env.PAYMENT_INTENT_TTL_MINUTES || 30);
@@ -116,6 +124,51 @@ async function officialProduct({ productType, productId, countryCode }) {
   };
 }
 
+function amountToUsd(amount, currency) {
+  return String(currency || 'USD').toUpperCase() === 'NGN'
+    ? money(Number(amount || 0) / NGN_PER_USD)
+    : money(amount);
+}
+
+async function fetchPaymentUser(userId) {
+  if (!supabase || !userId) return null;
+  const { data } = await supabase
+    .from('users')
+    .select('email, username, display_name, coin_balance')
+    .eq('id', userId)
+    .maybeSingle();
+  return data || null;
+}
+
+async function sendPaymentReceiptEmail({ intent, status, provider, reference, amount, currency, reason }) {
+  try {
+    const user = await fetchPaymentUser(intent?.user_id);
+    if (!user?.email) return;
+    const product = intent?.product_snapshot || {};
+    const productName = product.name || product.productName || `${intent.product_type}: ${intent.product_id}`;
+    const payload = {
+      to: user.email,
+      name: user.display_name || user.username || user.email.split('@')[0],
+      productName,
+      amountUsd: amountToUsd(amount ?? intent?.amount, currency || intent?.currency),
+      transactionId: reference || intent?.provider_reference || intent?.intent_key,
+      provider: provider || intent?.provider,
+      walletBalance: user.coin_balance,
+    };
+    if (status === 'success') {
+      await sendPaymentSuccessEmail({ ...payload, paidAt: new Date().toISOString() });
+    } else {
+      await sendPaymentFailureEmail({
+        ...payload,
+        failedAt: new Date().toISOString(),
+        reason: reason || 'The payment could not be completed.',
+      });
+    }
+  } catch (err) {
+    console.warn('[payments] email receipt failed:', err?.message || err);
+  }
+}
+
 async function detectRisk({ userId, ipHash }) {
   const flags = [];
   let score = 0;
@@ -181,12 +234,11 @@ export async function createSecurePaymentSession({
     billingCountry,
     ipCountry,
   });
-  const resolvedProvider = resolvePaymentProvider({
-    countryCode: checkoutCountry,
-    billingCountry,
-    ipCountry,
-    explicitProvider: provider,
-  });
+  const gatewayPlan = await resolveCheckoutProviders({ explicitProvider: provider });
+
+  if (!gatewayPlan.primary) {
+    throw new Error('Payments are temporarily unavailable.');
+  }
 
   const product = await officialProduct({ productType, productId, countryCode: checkoutCountry });
   const intentKey = `pi_${Date.now()}_${randomUUID()}`;
@@ -221,7 +273,9 @@ export async function createSecurePaymentSession({
           countryCode: checkoutCountry,
           billingCountry: normalizeCountryCode(billingCountry) || checkoutCountry,
           ipCountry,
-          provider: resolvedProvider,
+          provider: gatewayPlan.primary,
+          fallbackProvider: gatewayPlan.fallback,
+          gatewayPlan,
         },
       })
       .select('id')
@@ -260,35 +314,71 @@ export async function createSecurePaymentSession({
     userId,
     productType: product.productType,
     productId: product.productId,
-    provider: resolvedProvider,
+    provider: gatewayPlan.primary,
+    fallbackProvider: gatewayPlan.fallback,
     country: checkoutCountry,
     amount: product.amount,
     currency: product.currency,
   });
 
-  const checkout = await createCheckout({
-    orderId: intentKey,
-    userId,
-    planId: product.productId,
-    productType: product.productType,
-    productId: product.productId,
-    provider: resolvedProvider,
-    countryCode: checkoutCountry,
-    currency: product.currency,
-    amount: product.amount,
-    productName: product.productName,
-    customerEmail,
-    customerName,
-    customerPhone,
-    inlineCheckout: resolvedProvider === 'flutterwave' && inlineCheckout,
-    metadata: {
-      paymentIntentId: intentId,
-      intentKey,
-      idempotencyKey,
-      officialAmount: product.amount,
-      officialUnits: product.officialUnits,
-    },
-  });
+  let checkout;
+  try {
+    checkout = await createCheckout({
+      orderId: intentKey,
+      userId,
+      planId: product.productId,
+      productType: product.productType,
+      productId: product.productId,
+      provider: gatewayPlan.primary,
+      primaryProvider: gatewayPlan.primary,
+      fallbackProvider: gatewayPlan.fallback,
+      allowFallback: gatewayPlan.allowFallback,
+      flutterwaveEnabled: gatewayPlan.flutterwaveEnabled,
+      paystackEnabled: gatewayPlan.paystackEnabled,
+      maxRetries: gatewayPlan.maxRetries,
+      retryDelayMs: gatewayPlan.retryDelayMs,
+      timeoutMs: gatewayPlan.timeoutMs,
+      countryCode: checkoutCountry,
+      currency: product.currency,
+      amount: product.amount,
+      productName: product.productName,
+      customerEmail,
+      customerName,
+      customerPhone,
+      inlineCheckout: gatewayPlan.primary === 'flutterwave' && inlineCheckout,
+      metadata: {
+        paymentIntentId: intentId,
+        intentKey,
+        idempotencyKey,
+        officialAmount: product.amount,
+        officialUnits: product.officialUnits,
+      },
+    });
+  } catch (err) {
+    logPaymentEvent('error', 'checkout.create_failed', {
+      userId,
+      productId: product.productId,
+      primary: gatewayPlan.primary,
+      fallback: gatewayPlan.fallback,
+      error: err?.message,
+    });
+    if (intentId && supabase) {
+      await supabase
+        .from('payment_intents')
+        .update({
+          status: 'failed',
+          metadata: {
+            countryCode: checkoutCountry,
+            gatewayPlan,
+            failure: err?.message,
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', intentId)
+        .catch(() => {});
+    }
+    throw new Error(userFacingPaymentError(err));
+  }
 
   if (supabase && intentId) {
     await supabase
@@ -298,6 +388,17 @@ export async function createSecurePaymentSession({
         provider_reference: checkout.reference,
         checkout_url: checkout.checkoutUrl,
         status: 'checkout_created',
+        metadata: {
+          countryCode: checkoutCountry,
+          billingCountry: normalizeCountryCode(billingCountry) || checkoutCountry,
+          ipCountry,
+          provider: checkout.provider,
+          gatewayPlan,
+          fallbackUsed: checkout.fallbackUsed === true,
+          retryCount: checkout.retryCount || 0,
+          attemptedProviders: checkout.attemptedProviders || [],
+          gatewayLog: checkout.gatewayLog || null,
+        },
         updated_at: new Date().toISOString(),
       })
       .eq('id', intentId);
@@ -382,10 +483,53 @@ export async function processProviderWebhook(provider, req) {
       return { accepted: true, pending: true, eventType: normalized.eventType };
     }
     if (normalized.failed) {
-      await markIntentByReference(normalized.reference, {
-        status: 'failed',
-        metadata: { failureEvent: normalized.raw },
+      const failedIntent = await findPaymentIntent({
+        provider,
+        providerReference: normalized.reference,
+        orderKey: normalized.orderKey,
       });
+      if (failedIntent?.id && supabase) {
+        await supabase
+          .from('payment_intents')
+          .update({
+            status: 'failed',
+            metadata: { ...(failedIntent.metadata || {}), failureEvent: normalized.raw },
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', failedIntent.id)
+          .then(() => null, () => null);
+      } else {
+        await markIntentByReference(normalized.reference, {
+          status: 'failed',
+          metadata: { failureEvent: normalized.raw },
+        });
+      }
+      if (failedIntent) {
+        await sendPaymentReceiptEmail({
+          intent: failedIntent,
+          status: 'failure',
+          provider,
+          reference: normalized.reference,
+          amount: normalized.amount,
+          currency: normalized.currency,
+          reason: normalized.failureReason || normalized.message || 'Payment provider reported a failed payment.',
+        });
+        await writeFinanceActivityEvent({
+          eventType: 'payment_failed',
+          userId: failedIntent.user_id,
+          productType: failedIntent.product_type,
+          productId: failedIntent.product_id,
+          amountUsd: amountToUsd(normalized.amount ?? failedIntent.amount, normalized.currency || failedIntent.currency),
+          provider,
+          reference: normalized.reference,
+          status: 'failed',
+          metadata: {
+            paymentIntentId: failedIntent.id,
+            eventType: normalized.eventType,
+            reason: normalized.failureReason || normalized.message || 'Payment provider reported a failed payment.',
+          },
+        });
+      }
       logPaymentEvent('warn', 'webhook.failed', {
         provider,
         reference: normalized.reference,
@@ -400,7 +544,7 @@ export async function processProviderWebhook(provider, req) {
   try {
     verified = await verifyProviderTransaction(provider, {
       ...normalized,
-      orderKey: normalized.orderKey || intent?.intent_key || null,
+      orderKey: normalized.orderKey || null,
     });
   } catch (error) {
     await writeFraudLog({
@@ -415,23 +559,49 @@ export async function processProviderWebhook(provider, req) {
     return { accepted: true, verified: false, error: error.message };
   }
 
+  const fulfillment = await fulfillVerifiedProviderPayment({
+    provider,
+    normalized,
+    verified,
+    source: 'webhook',
+  });
+
+  if (fulfillment.suspicious) {
+    await markWebhookProcessed(eventRecord.id, 'rejected', fulfillment.reason || 'Suspicious payment');
+    return { accepted: true, fulfilled: false, suspicious: true };
+  }
+  if (fulfillment.error) {
+    await markWebhookProcessed(eventRecord.id, 'failed', fulfillment.error);
+    return { accepted: true, fulfilled: false, error: fulfillment.error };
+  }
+
+  await markWebhookProcessed(eventRecord.id, 'processed');
+  return {
+    accepted: true,
+    fulfilled: true,
+    duplicate: fulfillment.duplicate,
+    result: fulfillment.result,
+  };
+}
+
+async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verified, source = 'manual' }) {
+  const reference = verified.reference || normalized.reference;
   const intent = await findPaymentIntent({
     provider,
-    providerReference: verified.reference || normalized.reference,
+    providerReference: reference,
     orderKey: verified.orderKey || normalized.orderKey,
   });
 
   if (!intent) {
     await writeFraudLog({
       provider,
-      providerReference: verified.reference || normalized.reference,
+      providerReference: reference,
       reason: 'Verified provider payment did not match any server-created payment intent',
       riskScore: 95,
       riskFlags: ['unknown_payment_intent'],
-      metadata: { verified },
+      metadata: { verified, source },
     });
-    await markWebhookProcessed(eventRecord.id, 'rejected', 'Unknown payment intent');
-    return { accepted: true, fulfilled: false, suspicious: true };
+    return { fulfilled: false, suspicious: true, reason: 'Unknown payment intent' };
   }
 
   const metadataMismatch = [
@@ -441,27 +611,89 @@ export async function processProviderWebhook(provider, req) {
   ].some(Boolean);
 
   if (metadataMismatch) {
-    await markIntentSuspicious(intent, 'provider_metadata_mismatch', { verified, normalized });
-    await markWebhookProcessed(eventRecord.id, 'rejected', 'Provider metadata mismatch');
-    return { accepted: true, fulfilled: false, suspicious: true };
+    await markIntentSuspicious(intent, 'provider_metadata_mismatch', { verified, normalized, source });
+    return { fulfilled: false, suspicious: true, reason: 'Provider metadata mismatch', intent };
   }
 
   try {
     const result = await fulfillVerifiedIntent({
       intent,
       provider,
-      reference: verified.reference || normalized.reference,
+      reference,
       amount: verified.amount,
       currency: verified.currency,
       verification: verified,
-      event: normalized,
+      event: {
+        ...normalized,
+        eventType: normalized.eventType || `payment.${source}.verified`,
+      },
     });
-    await markWebhookProcessed(eventRecord.id, 'processed');
-    return { accepted: true, fulfilled: true, result };
+    if (result?.duplicate !== true) {
+      await sendPaymentReceiptEmail({
+        intent,
+        status: 'success',
+        provider,
+        reference,
+        amount: verified.amount,
+        currency: verified.currency,
+      });
+      await writeAudit({
+        intentId: intent.id,
+        userId: intent.user_id,
+        eventType: `payment.fulfilled.${source}`,
+        message: 'Verified provider payment fulfilled product entitlement',
+        metadata: { provider, reference, productType: intent.product_type, productId: intent.product_id },
+      });
+      await writeFinanceActivityEvent({
+        eventType: normalizeProductType(intent.product_type, intent.product_id) === 'coins'
+          ? 'coins_purchased'
+          : 'membership_purchased',
+        userId: intent.user_id,
+        productType: intent.product_type,
+        productId: intent.product_id,
+        amountUsd: amountToUsd(verified.amount, verified.currency),
+        amountTokens: normalizeProductType(intent.product_type, intent.product_id) === 'coins'
+          ? intent.official_units
+          : null,
+        provider,
+        reference,
+        status: 'fulfilled',
+        metadata: {
+          paymentIntentId: intent.id,
+          currency: verified.currency,
+          providerAmount: verified.amount,
+          result,
+        },
+      });
+    }
+    return { fulfilled: true, result, duplicate: result?.duplicate === true, intent };
   } catch (error) {
-    await markIntentSuspicious(intent, error.code || 'fulfillment_failed', { message: error.message, verified });
-    await markWebhookProcessed(eventRecord.id, 'failed', error.message);
-    return { accepted: true, fulfilled: false, error: error.message };
+    await markIntentSuspicious(intent, error.code || 'fulfillment_failed', { message: error.message, verified, source });
+    await sendPaymentReceiptEmail({
+      intent,
+      status: 'failure',
+      provider,
+      reference,
+      amount: verified.amount,
+      currency: verified.currency,
+      reason: error.message,
+    });
+    await writeFinanceActivityEvent({
+      eventType: 'payment_failed',
+      userId: intent.user_id,
+      productType: intent.product_type,
+      productId: intent.product_id,
+      amountUsd: amountToUsd(verified.amount, verified.currency),
+      provider,
+      reference,
+      status: 'failed',
+      metadata: {
+        paymentIntentId: intent.id,
+        reason: error.message,
+        currency: verified.currency,
+      },
+    });
+    return { fulfilled: false, error: error.message, intent };
   }
 }
 
@@ -840,6 +1072,66 @@ export async function getPaymentAuditTrail(intentId) {
   return { intent, auditLogs: audit || [], transactions: tx || [] };
 }
 
+export async function getGatewayAnalytics({ hours = 24 } = {}) {
+  if (!supabase) throw new Error('Supabase not configured');
+  const since = new Date(Date.now() - Math.max(1, Number(hours) || 24) * 60 * 60 * 1000).toISOString();
+
+  const [intentsRes, txRes, webhooksRes] = await Promise.all([
+    supabase.from('payment_intents').select('provider,status,metadata').gte('created_at', since),
+    supabase.from('payment_transactions').select('provider,status,amount,currency').gte('created_at', since),
+    supabase.from('webhook_events').select('provider,status').gte('received_at', since),
+  ]);
+
+  if (intentsRes.error) throw intentsRes.error;
+  if (txRes.error) throw txRes.error;
+  if (webhooksRes.error) throw webhooksRes.error;
+
+  const byProvider = {};
+  const ensure = (provider) => {
+    const key = String(provider || 'unknown').toLowerCase();
+    if (!byProvider[key]) {
+      byProvider[key] = {
+        provider: key,
+        attempts: 0,
+        fulfilled: 0,
+        failed: 0,
+        fallbackUsed: 0,
+        retries: 0,
+        revenue: 0,
+      };
+    }
+    return byProvider[key];
+  };
+
+  for (const row of intentsRes.data || []) {
+    const bucket = ensure(row.provider);
+    bucket.attempts += 1;
+    if (row.status === 'fulfilled') bucket.fulfilled += 1;
+    if (row.status === 'failed') bucket.failed += 1;
+    const meta = row.metadata || {};
+    if (meta.fallbackUsed) bucket.fallbackUsed += 1;
+    bucket.retries += Number(meta.retryCount || 0);
+  }
+
+  for (const row of txRes.data || []) {
+    const bucket = ensure(row.provider);
+    if (row.status === 'verified' || row.status === 'completed') {
+      bucket.revenue += Number(row.amount || 0);
+    }
+  }
+
+  const webhookFailures = (webhooksRes.data || []).filter((row) => row.status === 'failed');
+
+  return {
+    since,
+    providers: Object.values(byProvider),
+    webhookFailures: webhookFailures.length,
+    verificationFailures: webhookFailures.length,
+    totalAttempts: (intentsRes.data || []).length,
+    totalTransactions: (txRes.data || []).length,
+  };
+}
+
 export async function getPaymentReconciliationReport({ hours = 24 } = {}) {
   if (!supabase) throw new Error('Supabase not configured');
   const since = new Date(Date.now() - Math.max(1, Number(hours) || 24) * 60 * 60 * 1000).toISOString();
@@ -874,6 +1166,88 @@ export async function getPaymentReconciliationReport({ hours = 24 } = {}) {
   };
 }
 
+export async function refreshAndFulfillPaymentIntent({ reference, orderKey = null, userId = null } = {}) {
+  const current = await getPaymentIntentStatus({ reference, orderKey, userId });
+  if (!current) return null;
+
+  if (current.status === 'fulfilled') {
+    return {
+      verified: true,
+      fulfilled: true,
+      duplicate: true,
+      payment: current,
+      providerStatus: { status: 'fulfilled' },
+    };
+  }
+
+  if (!current.provider) {
+    return {
+      verified: false,
+      fulfilled: false,
+      payment: current,
+      providerStatus: { error: 'Payment provider is not attached to this intent yet.' },
+    };
+  }
+
+  let verified;
+  try {
+    verified = await verifyProviderTransaction(current.provider, {
+      reference: current.reference || reference,
+      orderKey: current.orderKey || orderKey || reference,
+    });
+  } catch (error) {
+    logPaymentEvent('warn', 'payment.refresh_verification_pending', {
+      provider: current.provider,
+      reference: current.reference || reference,
+      orderKey: current.orderKey || orderKey || null,
+      error: error?.message,
+    });
+    return {
+      verified: false,
+      fulfilled: false,
+      payment: current,
+      providerStatus: {
+        status: 'pending_or_failed',
+        error: error?.message || 'Provider verification is not complete yet.',
+      },
+    };
+  }
+
+  const fulfillment = await fulfillVerifiedProviderPayment({
+    provider: current.provider,
+    verified,
+    normalized: {
+      reference: current.reference || reference,
+      orderKey: current.orderKey || orderKey || verified.orderKey || null,
+      eventType: 'payment.callback_refresh',
+      raw: { source: 'payment_verify_refresh', reference, orderKey },
+    },
+    source: 'callback_refresh',
+  });
+
+  const latest = await getPaymentIntentStatus({
+    reference: current.orderKey || current.reference || reference,
+    userId,
+  });
+
+  return {
+    verified: latest?.status === 'fulfilled',
+    fulfilled: fulfillment.fulfilled === true,
+    duplicate: fulfillment.duplicate === true,
+    suspicious: fulfillment.suspicious === true,
+    error: fulfillment.error || null,
+    payment: latest || current,
+    providerStatus: {
+      status: verified.status,
+      amount: verified.amount,
+      currency: verified.currency,
+      reference: verified.reference,
+      orderKey: verified.orderKey,
+    },
+    result: fulfillment.result || null,
+  };
+}
+
 export async function getPaymentIntentStatus({ reference, orderKey, userId } = {}) {
   if (!supabase) throw new Error('Supabase not configured');
   if (!reference && !orderKey) throw new Error('reference or orderKey is required');
@@ -881,19 +1255,23 @@ export async function getPaymentIntentStatus({ reference, orderKey, userId } = {
   try {
     const selectColumns = 'id,intent_key,provider,provider_reference,product_type,product_id,amount,currency,status,expires_at,fulfilled_at,created_at,updated_at';
     let row = null;
-    for (const field of reference ? ['provider_reference', 'intent_key'] : ['intent_key']) {
-      let query = supabase
-        .from('payment_intents')
-        .select(selectColumns)
-        .eq(field, reference || orderKey)
-        .limit(1);
-      if (userId) query = query.eq('user_id', userId);
-      const { data, error } = await query;
-      if (error) {
-        if (isMissingDbFeature(error)) return null;
-        throw error;
+    const candidates = [reference, orderKey].filter(Boolean);
+    for (const candidate of [...new Set(candidates)]) {
+      for (const field of ['provider_reference', 'intent_key']) {
+        let query = supabase
+          .from('payment_intents')
+          .select(selectColumns)
+          .eq(field, candidate)
+          .limit(1);
+        if (userId) query = query.eq('user_id', userId);
+        const { data, error } = await query;
+        if (error) {
+          if (isMissingDbFeature(error)) return null;
+          throw error;
+        }
+        row = data?.[0] || null;
+        if (row) break;
       }
-      row = data?.[0] || null;
       if (row) break;
     }
 

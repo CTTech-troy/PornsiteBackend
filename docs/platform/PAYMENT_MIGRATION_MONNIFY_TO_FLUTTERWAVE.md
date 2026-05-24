@@ -44,8 +44,8 @@ Same Flutterwave + Paystack keys as above. Set `PAYMENT_AFRICA_PROVIDER=flutterw
 ### Frontend (`frontend/.env`)
 
 ```env
-VITE_API_URL=http://localhost:5043
-VITE_FRONTEND_URL=http://localhost:5173
+VITE_API_URL=https://pornsitebackend.onrender.com
+VITE_FRONTEND_URL=https://xstreamvideos.site
 VITE_FLUTTERWAVE_PUBLIC_KEY=FLWPUBK_TEST-...
 ```
 
@@ -101,3 +101,4 @@ Test cards: use Flutterwave/Paystack sandbox docs. Confirm webhook delivery with
 4. Deploy **frontend** with `VITE_FLUTTERWAVE_PUBLIC_KEY`  
 5. Update provider webhook URLs  
 6. Smoke-test: NG checkout (Flutterwave), US checkout (Paystack)
+

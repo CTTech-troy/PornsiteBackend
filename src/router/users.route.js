@@ -1,6 +1,7 @@
 import express from 'express';
 import { getPublicProfile, incrementFollow } from '../config/dbFallback.js';
 import { requireAuth } from '../middleware/authFirebase.js';
+import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
 
 const router = express.Router();
 
@@ -22,6 +23,7 @@ router.post('/:id/follow', requireAuth, async (req, res) => {
   const { id: creatorId } = req.params;
   try {
     const result = await incrementFollow(creatorId);
+    invalidateTopCreatorsCache();
     res.json({ ok: true, followers: result.followers });
   } catch (err) {
     console.error('users.follow error', err && err.message ? err.message : err);

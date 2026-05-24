@@ -20,6 +20,6 @@ export async function sendPayoutReceiptEmail({ to, subject, htmlBody, payoutId, 
 
 export function receiptEmailSubject(type, receiptNumber, amountUsd) {
   const usd = `$${Number(amountUsd || 0).toFixed(2)}`;
-  if (type === 'paid') return `Payout receipt ${receiptNumber} — ${usd} paid`;
-  return `Withdrawal declined ${receiptNumber} — ${usd}`;
+  if (type === 'paid') return `Payout receipt ${receiptNumber || 'pending'} - ${usd} paid`;
+  return `Withdrawal declined ${receiptNumber || 'pending'} - ${usd}`;
 }

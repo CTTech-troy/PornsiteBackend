@@ -33,6 +33,7 @@ import adminContentRouter from './src/router/adminContent.route.js';
 import adminModerationRouter from './src/router/adminModeration.route.js';
 import adminSystemRouter from './src/router/adminSystem.route.js';
 import adminCoinsRouter from './src/router/adminCoins.route.js';
+import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
 import { getPublicSettings } from './src/controller/adminSystem.controller.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
@@ -40,6 +41,8 @@ import * as giftCtrl from './src/controller/gift.controller.js';
 import * as walletsystem from './src/controller/walletsystem.controller.js';
 import * as chatQueue from './src/controller/chatQueue.controller.js';
 import * as randomChatBilling from './src/services/randomChatBilling.service.js';
+import { sendCreatorGift } from './src/services/coinWallet.service.js';
+import { bindChatRoomRegistry } from './src/services/chatRoomRegistry.service.js';
 import { supabase, ensureBuckets } from './src/config/supabase.js';
 import { syncCacheToSupabase } from './src/config/live-cache.js';
 import { syncRtdbToSupabase } from './src/config/dbFallback.js';
@@ -48,9 +51,16 @@ import { pingServices } from './src/utils/servicePing.js';
 import { pingPaymentService, STARTUP_HEALTH_TIMEOUT_MS } from './src/services/paymentServiceClient.js';
 import { resolveUidFromBearerToken } from './src/utils/sessionToken.js';
 import { getAuthMetricsSnapshot } from './src/utils/authMetrics.js';
-import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
+import adProvidersRouter from './src/router/adProviders.route.js';
+import partnerRouter from './src/router/partner.route.js';
+import publisherRouter from './src/router/publisher.route.js';
+import adminPartnersRouter from './src/router/adminPartners.route.js';
+import publisherWorkflowRouter from './src/router/publisherWorkflow.route.js';
+import videoImportWorkflowRouter from './src/router/videoImportWorkflow.route.js';
+import { startHealthScanScheduler } from './src/services/adHealthScanner.service.js';
 import { renderVideoSharePreview } from './src/controller/sharePreview.controller.js';
 import { preloadExternalFeedConfig } from './src/services/externalFeedConfig.service.js';
+import { startSearchSyncScheduler } from './src/services/searchIndex.service.js';
 import { generalApiRateLimiter } from './src/middleware/apiRateLimit.js';
 import { apiMonitoringMiddleware } from './src/middleware/apiMonitoring.js';
 import { getRedisHealth, pingRedis } from './src/config/redis.js';
@@ -67,12 +77,60 @@ import {
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
  
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      connectSrc: [
+        "'self'",
+        'https://pornsitebackend.onrender.com',
+        'https://payments.xstreamvideos.site',
+        'https://xstreamvideos.site',
+        'https://admin.xstreamvideos.site',
+        'https://*.supabase.co',
+        'wss://*.livekit.cloud',
+      ],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+      mediaSrc: ["'self'", 'blob:', 'https:'],
+      scriptSrc: [
+        "'self'",
+        "'unsafe-inline'",
+        'https://imasdk.googleapis.com',
+        'https://s.magsrv.com',
+        'https://*.magsrv.com',
+        'https://poweredby.jads.co',
+        'https://*.jads.co',
+        'https://quge5.com',
+        'https://monetag.com',
+        'https://*.monetag.com',
+        'https://*.highperformanceformat.com',
+        'https://*.profitablecpmrate.com',
+        'https://*.profitablecpmgate.com',
+        'https://*.alwingulla.com',
+        'https://securepubads.g.doubleclick.net',
+        'https://*.googlesyndication.com',
+      ],
+      childSrc: ["'self'", 'https:'],
+      frameSrc: ["'self'", 'https:'],
+      upgradeInsecureRequests: [],
+    },
+  },
+}));
 app.use(compression());
 
+app.use((req, res, next) => {
+  const requestId = req.headers['x-request-id'] || randomUUID();
+  req.requestId = String(requestId);
+  res.setHeader('X-Request-Id', req.requestId);
+  next();
+});
+
 const DEFAULT_ALLOWED_ORIGINS = [
-  'http://localhost:5173', 'http://localhost:5174', 'http://localhost:5176', 'http://localhost:3000',
-  'https://xstreamvideos.netlify.app', 'https://pornsite-two.vercel.app', 'https://xstreamvideos.site', 'https://adminxstramvideos.netlify.app'
+  'https://xstreamvideos.site',
+  'https://www.xstreamvideos.site',
+  'https://admin.xstreamvideos.site',
 ];
 
 function parseAllowedOrigins(rawOrigins) {
@@ -101,6 +159,7 @@ app.use('/api/internal/qstash/monitoring', express.raw({ type: '*/*', limit: '64
 app.use('/api/internal/qstash/payouts', express.raw({ type: '*/*', limit: '64kb' }));
 app.use('/api/internal/qstash/ai-moderation', express.raw({ type: '*/*', limit: '128kb' }));
 app.use('/api/internal/qstash/monetization', express.raw({ type: '*/*', limit: '64kb' }));
+app.use('/api/internal/qstash/publisher', express.raw({ type: '*/*', limit: '64kb' }));
 app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
 app.use(apiMonitoringMiddleware);
 
@@ -191,6 +250,8 @@ app.use('/api/internal/qstash/monitoring', apiMonitoringWorkflowRouter);
 app.use('/api/internal/qstash/payouts', payoutWorkflowRouter);
 app.use('/api/internal/qstash/ai-moderation', aiModerationWorkflowRouter);
 app.use('/api/internal/qstash/monetization', monetizationWorkflowRouter);
+app.use('/api/internal/qstash/publisher', publisherWorkflowRouter);
+app.use('/api/internal/qstash/video-import', videoImportWorkflowRouter);
 
 // Shared Upstash Redis-backed limit for all API routes. Auth routes below add
 // stricter endpoint-specific limits on top of this baseline.
@@ -223,6 +284,18 @@ app.use('/api/messages', messagesRouter);
 app.use('/api/earnings', earningsRouter);
 app.use('/api/studio', creatorStudioRouter);
 app.use('/api/ads', adsRouter);
+console.info('[startup] Mounting ad provider routes at /api/ad-providers', {
+  routes: [
+    'GET /api/ad-providers/config',
+    'GET /api/ad-providers/safe-policy',
+    'GET /api/ad-providers/slots/config',
+    'POST /api/ad-providers/monitoring/events',
+  ],
+});
+app.use('/api/ad-providers', adProvidersRouter);
+app.use('/api/partner', partnerRouter);
+app.use('/api/publisher', publisherRouter);
+app.use('/api/admin/partners', adminPartnersRouter);
 app.use('/api/memberships', publicMembershipsRouter);
 app.use('/api/admin/memberships', adminMembershipsRouter);
 // Creators Main Application
@@ -232,6 +305,27 @@ app.use('/api', (req, res) => {
   res.status(404).json({
     success: false,
     message: `API route not found: ${req.method} ${req.originalUrl}`,
+    requestId: req.requestId,
+  });
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = Number(err?.status || err?.statusCode || 500);
+  const safeStatus = status >= 400 && status < 600 ? status : 500;
+  const isProduction = process.env.NODE_ENV === 'production';
+  console.error('[request:error]', {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.originalUrl,
+    status: safeStatus,
+    message: err?.message || String(err),
+    stack: isProduction ? undefined : err?.stack,
+  });
+  res.status(safeStatus).json({
+    success: false,
+    message: isProduction && safeStatus >= 500 ? 'Internal server error' : (err?.message || 'Request failed'),
+    requestId: req.requestId,
   });
 });
 
@@ -706,6 +800,34 @@ function endChatRoom(roomId, endedBy, { notifySelf = true, reason = 'ended', sta
     }
   }
 }
+
+bindChatRoomRegistry({
+  getActiveRooms() {
+    const now = Date.now();
+    return Array.from(chatRooms.values()).map((room) => {
+      let coinsSpent = 0;
+      for (const billing of room.billingByUser?.values() || []) {
+        coinsSpent += Number(billing.coinsSpent || 0);
+      }
+      return {
+        id: room.roomId,
+        user1_id: room.a.userId,
+        user2_id: room.b.userId,
+        status: 'active',
+        created_at: new Date(room.createdAt).toISOString(),
+        connected_at: room.connectedAt ? new Date(room.connectedAt).toISOString() : null,
+        duration_seconds: Math.max(0, Math.floor((now - room.createdAt) / 1000)),
+        coins_spent: coinsSpent,
+      };
+    });
+  },
+  forceEndRoom(roomId) {
+    const id = String(roomId || '').trim();
+    if (!id || !chatRooms.has(id)) return false;
+    endChatRoom(id, null, { notifySelf: true, reason: 'admin-force-end' });
+    return true;
+  },
+});
 
 function cleanupInMemoryChatQueue() {
   const cutoff = Date.now() - 45_000;
@@ -1279,6 +1401,69 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('chat:send-gift', async (payload = {}) => {
+    const roomId = String(payload.roomId || '').trim();
+    const giftId = String(payload.giftId || payload.gift?.id || '').trim();
+    if (!roomId || !giftId) return;
+    if (socket.isGuest) return socket.emit('chat:error', { message: 'Sign in to send gifts.' });
+    if (!checkSocketRate(socket, 'chat:gift', 30, 60_000)) {
+      return socket.emit('chat:error', { message: 'You are sending gifts too quickly.' });
+    }
+
+    const room = getRoomForSocket(socket, roomId);
+    if (!room) return socket.emit('chat:error', { message: 'Chat session is no longer active.' });
+
+    const senderName = cleanLiveText(payload.senderName || 'Viewer', 80) || 'Viewer';
+    const giftName = cleanLiveText(payload.giftName || payload.gift?.name || giftId, 80) || giftId;
+    const amount = Number(payload.amount ?? payload.gift?.price ?? payload.gift?.coinCost ?? 0);
+    const emoji = cleanLiveText(payload.emoji || payload.gift?.emoji || '', 20);
+
+    if (payload.tokenPaid === true) {
+      io.to(room.roomId).emit('chat:gift', {
+        id: randomUUID(),
+        roomId: room.roomId,
+        senderId: socket.uid,
+        senderName,
+        giftId,
+        giftName,
+        emoji,
+        imageUrl: payload.imageUrl || payload.gift?.imageUrl || null,
+        amount,
+        createdAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const peerId = chatPeerUserId(room, socket.uid);
+    try {
+      const result = await sendCreatorGift({
+        userId: socket.uid,
+        senderName,
+        creatorId: peerId,
+        streamId: roomId,
+        giftId,
+        gift: payload.gift,
+      });
+
+      io.to(room.roomId).emit('chat:gift', {
+        id: randomUUID(),
+        roomId: room.roomId,
+        senderId: socket.uid,
+        senderName,
+        giftId,
+        giftName: result.gift?.name || giftName,
+        emoji: result.gift?.emoji || emoji,
+        imageUrl: result.gift?.imageUrl || null,
+        amount: Number(result.gift?.coinCost || amount),
+        createdAt: new Date().toISOString(),
+      });
+
+      socket.emit('chat:gift-sent', { newBalance: result.newBalance, giftId: result.giftId });
+    } catch (err) {
+      socket.emit('chat:error', { message: err?.message || 'Gift failed.' });
+    }
+  });
+
   socket.on('chat:message', ({ roomId, text } = {}) => {
     if (!checkSocketRate(socket, 'chat:message', 60, 60_000)) return;
     const trimmed = String(text || '').trim().slice(0, 500);
@@ -1370,6 +1555,39 @@ server.listen(PORT, async () => {
   preloadExternalFeedConfig().catch((err) => {
     console.warn('[externalFeed] config preload failed:', err?.message || err);
   });
+  startHealthScanScheduler();
+  startSearchSyncScheduler();
   syncCacheToSupabase().catch(() => {});
   syncRtdbToSupabase().catch(() => {});
+});
+
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] ${signal} received; closing realtime and HTTP listeners.`);
+  io.close(() => {
+    server.close((err) => {
+      if (err) {
+        console.error('[server] Shutdown failed:', err);
+        process.exit(1);
+      }
+      console.log('[server] Shutdown complete.');
+      process.exit(0);
+    });
+  });
+  setTimeout(() => {
+    console.error('[server] Forced shutdown after timeout.');
+    process.exit(1);
+  }, 15_000).unref?.();
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[process] Uncaught exception:', err);
+  gracefulShutdown('uncaughtException');
 });

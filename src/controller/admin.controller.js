@@ -5,6 +5,26 @@ import { supabase } from '../config/supabase.js';
 import { sendAdminInviteEmail } from '../services/emailService.js';
 import { sendVerificationEmail } from '../services/emailService.js';
 import { logAdminAction } from '../services/adminAudit.service.js';
+import { buildAdminInviteUrl, resolvePublicFrontendUrl } from '../utils/appUrls.js';
+
+const INVITE_EXPIRY_HOURS = Math.min(168, Math.max(1, Number(process.env.ADMIN_INVITE_EXPIRY_HOURS) || 72));
+
+async function sendInviteEmailWithRetry(payload, attempts = 2) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await sendAdminInviteEmail(payload);
+      return;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[admin-invite] Email attempt ${attempt}/${attempts} failed:`, err?.message || err);
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    }
+  }
+  throw lastError;
+}
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
@@ -67,10 +87,9 @@ export async function signupAdmin(req, res) {
     });
     if (codeErr) return res.status(500).json({ message: codeErr.message });
 
-    const mainUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-    // Link includes domain + uid + numeric code
+    const mainUrl = resolvePublicFrontendUrl();
     const confirmationUrl = `${mainUrl}/admin-activate?uid=${encodeURIComponent(uid)}&code=${encodeURIComponent(code)}`;
-    console.log('[admin-signup] confirmation link:', confirmationUrl);
+    console.log('[admin-signup] confirmation link host:', new URL(confirmationUrl).origin);
 
     // Send link to main site for confirmation (requested)
     try {
@@ -214,7 +233,12 @@ export async function logoutAdmin(req, res) {
 }
 
 export async function inviteAdmin(req, res) {
+  let inviteRowId = null;
   try {
+    if (!req.admin?.is_super_admin) {
+      return res.status(403).json({ message: 'Only Super Admins can send invites' });
+    }
+
     const email = normalizeEmail(req.body?.email);
     const name = req.body?.name ? String(req.body.name).trim() : null;
     const permissions = req.body?.permissions;
@@ -233,34 +257,57 @@ export async function inviteAdmin(req, res) {
     if (existsErr) return res.status(500).json({ message: existsErr.message });
     if (existing?.id) return res.status(409).json({ message: 'Admin user already exists' });
 
+    await supabase
+      .from('admin_invites')
+      .delete()
+      .eq('email', email)
+      .is('used_at', null);
+
     const token = crypto.randomBytes(32).toString('hex');
     const token_hash = crypto.createHash('sha256').update(token).digest('hex');
-    const expires_at = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const expires_at = new Date(Date.now() + INVITE_EXPIRY_HOURS * 60 * 60 * 1000).toISOString();
 
-    const { error: insertErr } = await supabase.from('admin_invites').insert({
-      email,
-      name,
-      permissions,
-      token_hash,
-      expires_at,
-      created_by: req.admin?.id ?? null,
-    });
+    const { data: inserted, error: insertErr } = await supabase
+      .from('admin_invites')
+      .insert({
+        email,
+        name,
+        permissions,
+        token_hash,
+        expires_at,
+        created_by: req.admin?.id ?? null,
+      })
+      .select('id')
+      .single();
 
     if (insertErr) return res.status(500).json({ message: insertErr.message });
+    inviteRowId = inserted?.id;
 
-    const inviteUrl = `${process.env.ADMIN_FRONTEND_URL || 'http://localhost:5174'}/invite/complete?token=${token}`;
-    await sendAdminInviteEmail({ to: email, name, inviteUrl, permissions });
+    const inviteUrl = buildAdminInviteUrl(token);
+    console.log('[admin-invite] Created invite', {
+      email,
+      inviteId: inviteRowId,
+      expiresAt: expires_at,
+      urlOrigin: new URL(inviteUrl).origin,
+    });
+
+    await sendInviteEmailWithRetry({ to: email, name, inviteUrl, permissions });
 
     await logAdminAction(req, {
       action: 'Admin invited',
       targetType: 'admin_user',
       targetId: email,
-      details: { email, name, permissions },
+      details: { email, name, permissions, expires_at },
     });
 
-    return res.json({ message: 'Invite sent successfully' });
+    return res.json({ message: 'Invite sent successfully', expiresAt: expires_at });
   } catch (err) {
-    return res.status(500).json({ message: err?.message || String(err) });
+    if (inviteRowId) {
+      await supabase.from('admin_invites').delete().eq('id', inviteRowId).catch(() => {});
+    }
+    console.error('[admin-invite] Failed:', err?.message || err);
+    const status = String(err?.message || '').includes('Email service') ? 502 : 500;
+    return res.status(status).json({ message: err?.message || 'Failed to send invite' });
   }
 }
 
@@ -277,7 +324,10 @@ export async function verifyInviteToken(req, res) {
       .maybeSingle();
 
     if (error) return res.status(500).json({ message: error.message });
-    if (!invite) return res.status(404).json({ error: 'invalid_token', message: 'Invitation not found' });
+    if (!invite) {
+      console.warn('[admin-invite] verify failed: invalid token');
+      return res.status(404).json({ error: 'invalid_token', message: 'Invitation not found' });
+    }
     if (invite.used_at) return res.status(410).json({ error: 'used_token', message: 'This invitation has already been used' });
 
     const expiresAtMs = new Date(invite.expires_at).getTime();

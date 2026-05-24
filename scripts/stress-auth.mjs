@@ -1,8 +1,8 @@
 /**
  * Quick concurrency probe for auth endpoints (no real credentials).
- * Usage: BASE_URL=http://localhost:5000 node scripts/stress-auth.mjs [concurrency] [requests]
+ * Usage: BASE_URL=https://pornsitebackend.onrender.com node scripts/stress-auth.mjs [concurrency] [requests]
  */
-const base = (process.env.BASE_URL || 'http://localhost:5000').replace(/\/$/, '');
+const base = (process.env.BASE_URL || 'https://pornsitebackend.onrender.com').replace(/\/$/, '');
 const concurrent = Math.max(1, parseInt(process.argv[2] || '50', 10));
 const total = Math.max(concurrent, parseInt(process.argv[3] || '200', 10));
 

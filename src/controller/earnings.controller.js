@@ -7,6 +7,7 @@ import {
 } from '../config/supabase.js';
 import { getNgnToUsdRate, ngnToUsd } from '../utils/exchangeRate.js';
 import { getCreatorPayoutBalances } from '../services/payoutWorkflow.service.js';
+import { dedupeEarningRows, groupEarningRowsBySource, sumEarningRowsUsd } from '../services/revenueCalculation.service.js';
 
 const CREATOR_SHARE = 0.70;
 const VIEW_MILESTONE = 1000;
@@ -105,16 +106,17 @@ export async function getEarnings(req, res) {
 
     const { data, error } = await supabase
       .from('creator_earnings')
-      .select('amount_usd, source, created_at')
+      .select('amount_usd, source, created_at, reference_id')
       .eq('creator_id', uid)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
 
-    const rows = data || [];
-    const totalUsd = rows.reduce((sum, r) => sum + (Number(r.amount_usd) || 0), 0);
-    const liveUsd  = rows.filter(r => r.source === 'live_gifts').reduce((s, r) => s + (Number(r.amount_usd) || 0), 0);
-    const viewsUsd = rows.filter(r => r.source === 'video_views').reduce((s, r) => s + (Number(r.amount_usd) || 0), 0);
+    const rows = dedupeEarningRows(data || []);
+    const totalUsd = sumEarningRowsUsd(rows);
+    const bySource = groupEarningRowsBySource(rows);
+    const liveUsd  = bySource.live_gifts || 0;
+    const viewsUsd = bySource.video_views || 0;
 
     let balances = {
       total: roundMoney(totalUsd),

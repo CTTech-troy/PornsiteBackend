@@ -9,6 +9,8 @@ import {
   invalidatePlatformSettingsCache,
 } from '../services/platformSettings.service.js';
 import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
+import { listPlatformActivityEvents } from '../services/platformActivity.service.js';
+import { isMeilisearchConfigured, getMeilisearchClient } from '../config/meilisearch.js';
 
 function isMissingTable(err) {
   return err?.code === '42P01' || err?.code === 'PGRST200' ||
@@ -397,9 +399,34 @@ export async function getApiHealth(req, res) {
         if (!r.ok && r.status !== 401 && r.status !== 403) throw new Error(`HTTP ${r.status}`);
       } finally { clearTimeout(t); }
     }),
+    ping('Meilisearch', async () => {
+      if (!isMeilisearchConfigured()) throw new Error('Not configured');
+      const client = getMeilisearchClient();
+      const health = await client.health();
+      if (!health?.status || health.status === 'error') throw new Error('Unhealthy');
+    }),
+    ping('Import queue', async () => {
+      const { count, error } = await supabase
+        .from('video_import_jobs')
+        .select('*', { count: 'exact', head: true })
+        .in('status', ['queued', 'extracting', 'processing']);
+      if (error && !isMissingTable(error)) throw error;
+      return count;
+    }),
   ]);
 
   return res.json({ apis: checks, totalMs: Date.now() - t0, timestamp: new Date().toISOString() });
+}
+
+export async function getPlatformActivity(req, res) {
+  try {
+    const limit = Math.min(100, parseInt(req.query.limit, 10) || 50);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const data = await listPlatformActivityEvents({ limit, offset });
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, data: [], message: err?.message || 'Failed' });
+  }
 }
 
 // ── GET /api/admin/system/route-latency ──────────────────────────────────────
@@ -429,6 +456,7 @@ const MONITORED_ROUTES = [
   { group: 'Admin · System',     path: '/api/admin/system/health',            adminAuth: true },
   { group: 'Admin · System',     path: '/api/admin/system/settings',          adminAuth: true },
   { group: 'Admin · System',     path: '/api/admin/system/env',               adminAuth: true },
+  { group: 'Admin · System',     path: '/api/admin/system/email-templates',   adminAuth: true },
   // ── Admin — content ───────────────────────────────────────────────────────
   { group: 'Admin · Content',    path: '/api/admin/content/videos',           adminAuth: true },
   { group: 'Admin · Content',    path: '/api/admin/content/lives',            adminAuth: true },
@@ -451,8 +479,12 @@ const MONITORED_ROUTES = [
 ];
 
 export async function getRouteLatency(req, res) {
-  const port = process.env.PORT || 5043;
-  const base = `http://127.0.0.1:${port}`;
+  const base = String(
+    process.env.BACKEND_PUBLIC_URL ||
+    process.env.API_PUBLIC_URL ||
+    process.env.BACKEND_URL ||
+    'https://pornsitebackend.onrender.com',
+  ).replace(/\/$/, '');
   const adminToken = req.headers.authorization || '';
 
   async function pingRoute(route) {

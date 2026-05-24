@@ -7,7 +7,7 @@ This implementation replaces synthetic latency bars with request-derived telemet
 ```txt
 backend/
   index.js
-  .env.example
+  .env.production
   scripts/
     create-qstash-monitoring-workflows.mjs
   src/
@@ -119,16 +119,16 @@ These endpoints require `Upstash-Signature` verification and raw request bodies.
 Generate traffic:
 
 ```bash
-curl http://localhost:5043/api/health/services
-curl http://localhost:5043/api/config/public
-curl http://localhost:5043/api/not-real
+curl https://pornsitebackend.onrender.com/api/health/services
+curl https://pornsitebackend.onrender.com/api/config/public
+curl https://pornsitebackend.onrender.com/api/not-real
 ```
 
 Verify admin observability APIs:
 
 ```bash
 curl -H "Authorization: Bearer <ADMIN_TOKEN>" \
-  http://localhost:5043/api/admin/system/observability/overview
+  https://pornsitebackend.onrender.com/api/admin/system/observability/overview
 ```
 
 Run aggregation manually from the admin API:
@@ -138,13 +138,13 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <ADMIN_TOKEN>" \
   -d '{"rangeMinutes":10,"bucketMinutes":1}' \
-  http://localhost:5043/api/admin/system/observability/aggregate
+  https://pornsitebackend.onrender.com/api/admin/system/observability/aggregate
 ```
 
 Verify QStash protection:
 
 ```bash
-curl -i -X POST http://localhost:5043/api/internal/qstash/monitoring/aggregate
+curl -i -X POST https://pornsitebackend.onrender.com/api/internal/qstash/monitoring/aggregate
 ```
 
 Expected result: `401 Missing QStash signature`.
@@ -209,3 +209,5 @@ socket.emit('admin:api-monitoring:subscribe', {
 - Upstash QStash retries: https://upstash.com/docs/qstash/features/retry
 - Upstash QStash callbacks and failure callbacks: https://upstash.com/docs/qstash/features/callbacks
 - Upstash signature verification: https://upstash.mintlify.dev/docs/qstash/howto/signature
+
+

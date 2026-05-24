@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { supabase, isConfigured } from '../config/supabase.js';
 import { createCheckout } from './paymentServiceClient.js';
+import { sendGiftNotificationEmail } from './emailService.js';
 
 export const STATIC_COIN_PACKAGES = [
   { id: 'tokens_30', coins: 30, bonusCoins: 0, priceUsd: 0.99, priceNgn: 1499, name: '30 Coins', description: 'Starter coin package', isActive: true, sortOrder: 10 },
@@ -565,7 +566,7 @@ export async function getGiftCatalog() {
 
   const { data, error } = await supabase
     .from('gift_catalog')
-    .select('id,name,coin_cost,emoji,tone,sort_order')
+    .select('id,name,coin_cost,emoji,tone,sort_order,metadata,image_url')
     .eq('is_active', true)
     .order('sort_order', { ascending: true });
 
@@ -581,16 +582,24 @@ export async function getGiftCatalog() {
 
 function normalizeGiftCatalogRow(row) {
   if (!row) return null;
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const imageUrl = row.image_url
+    || metadata.imageUrl
+    || metadata.image_url
+    || metadata.iconUrl
+    || metadata.icon_url
+    || null;
   return {
     id: row.id,
     name: row.name,
     coinCost: Number(row.coin_cost || 0),
     price: Number(row.coin_cost || 0),
-    emoji: row.emoji || null,
+    emoji: row.emoji || metadata.emoji || null,
     tone: row.tone || null,
+    imageUrl: typeof imageUrl === 'string' && imageUrl.trim() ? imageUrl.trim() : null,
     sortOrder: Number(row.sort_order || 0),
     isActive: row.is_active !== false,
-    metadata: row.metadata || {},
+    metadata,
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
   };
@@ -744,6 +753,26 @@ export async function sendCreatorGift({ userId, senderName, creatorId, streamId,
       official_coin_cost: amount,
     },
   });
+
+  try {
+    const [{ data: creator }, { data: stream }] = await Promise.all([
+      supabase.from('users').select('email, username, display_name').eq('id', creatorId).maybeSingle(),
+      supabase.from('lives').select('title').eq('id', streamId).maybeSingle(),
+    ]);
+    if (creator?.email) {
+      await sendGiftNotificationEmail({
+        to: creator.email,
+        creatorName: creator.display_name || creator.username || 'Creator',
+        senderName: senderName || 'A viewer',
+        giftName: catalogGift.name || resolvedId,
+        coinAmount: amount,
+        streamTitle: stream?.title || 'Live session',
+        receivedAt: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.warn('[gifts] notification email failed:', err?.message || err);
+  }
 
   return { newBalance: result.senderBalance, giftId: result.transferId, gift: catalogGift };
 }

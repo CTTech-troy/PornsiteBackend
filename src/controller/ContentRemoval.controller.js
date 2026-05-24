@@ -10,6 +10,7 @@ import {
   subscribeContentRemovalEvents,
 } from '../services/contentRemovalEvents.service.js';
 import { logAdminAction } from '../services/adminAudit.service.js';
+import { normalizeAdminMessage } from '../services/emailRenderer.js';
 
 export { subscribeContentRemovalEvents };
 
@@ -421,7 +422,7 @@ export async function updateContentRemovalStatus(req, res) {
   try {
     const id = cleanString(req.params.id, 120);
     const status = cleanString(req.body.status, 40);
-    const message = cleanLongText(req.body.message || req.body.feedback || '', 4000);
+    const message = normalizeAdminMessage(req.body.message || req.body.feedback || '', 4000);
     if (!STATUS_VALUES.has(status)) return res.status(400).json({ success: false, message: 'Invalid request status.' });
 
     const { data: existing, error: fetchError } = await findContentRemoval(id);
@@ -471,8 +472,8 @@ export async function updateContentRemovalStatus(req, res) {
 export async function sendContentRemovalFeedback(req, res) {
   try {
     const id = cleanString(req.params.id, 120);
-    const message = cleanLongText(req.body.message || '', 4000);
-    if (!message) return res.status(400).json({ success: false, message: 'Feedback message is required.' });
+    const message = normalizeAdminMessage(req.body.message || '', 4000);
+    if (!message.trim()) return res.status(400).json({ success: false, message: 'Feedback message is required.' });
 
     const { data: existing, error: fetchError } = await findContentRemoval(id);
     if (fetchError) return res.status(500).json({ success: false, message: fetchError.message });

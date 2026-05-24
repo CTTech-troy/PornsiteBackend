@@ -11,6 +11,9 @@ import * as trending from '../controller/trending.controller.js';
 import * as homeFeed from '../controller/homeFeed.controller.js';
 import * as todaysSelection from '../controller/todaysSelection.controller.js';
 import * as streamCtrl from '../controller/stream.controller.js';
+import * as vastAdCtrl from '../controller/vastAd.controller.js';
+import * as playbackAnalytics from '../controller/playbackAnalytics.controller.js';
+import * as watchHistory from '../controller/watchHistory.controller.js';
 import { listPosts } from '../controller/videos.controller.js';
 import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail.js';
@@ -48,16 +51,26 @@ function attachPublishFiles(req, res, next) {
 
 router.get('/stream/:id', optionalAuth, streamCtrl.getStreamUrl);
 
+router.post('/playback-events', optionalAuth, playbackAnalytics.recordPlaybackEvent);
+
+router.post('/:id/ad-session', optionalAuth, vastAdCtrl.postAdSession);
+router.post('/:id/ad-events', optionalAuth, vastAdCtrl.postAdEventHandler);
+router.get('/:id/ad-status', optionalAuth, vastAdCtrl.getAdStatus);
+
 // Public feed. Auth is optional so logged-in viewers can still get personalized flags later.
 router.get('/', optionalAuth, async (req, res) => {
   const page = req.query.page || 1;
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const limit = Math.min(30, Math.max(1, parseInt(req.query.limit, 10) || 10));
   try {
-    const result = await getVideosPaginated(page, limit, { viewerUid: req.uid || null });
+    const result = await getVideosPaginated(page, limit, {
+      viewerUid: req.uid || null,
+      cursor: req.query.cursor || null,
+    });
+    res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=20, stale-while-revalidate=60');
     res.json(result);
   } catch (err) {
     console.error('videos feed error', err?.message || err);
-    res.status(500).json({ data: [], total: 0, page: 1, totalPages: 0, hasMore: false });
+    res.status(500).json({ data: [], total: 0, page: 1, totalPages: 0, hasMore: false, nextCursor: null });
   }
 });
 
@@ -91,9 +104,17 @@ router.get('/public/:videoId/purchase-status', requireAuth, videoPublish.getVide
 router.get('/purchases/library', requireAuth, videoPublish.getPurchasedVideosLibrary);
 router.get('/purchases/receipt/:purchaseId', requireAuth, videoPublish.getPurchaseReceipt);
 router.patch('/purchases/progress/:videoId', requireAuth, videoPublish.updateWatchProgress);
+router.patch('/:id/watch-progress', requireAuth, watchHistory.updateWatchProgress);
+router.get('/watch/continue', requireAuth, watchHistory.getContinueWatching);
+router.get('/:id/related', optionalAuth, watchHistory.getRelatedVideosHandler);
 
 // External discovery routes are public.
 router.get('/search/pornstar', search.searchPornstars);
+router.get('/search/autocomplete', search.searchAutocomplete);
+router.get('/search/global', search.globalSearch);
+router.get('/search/config', search.searchConfig);
+router.get('/search/suggest', search.searchSuggest);
+router.get('/search/trending-queries', search.searchTrendingQueries);
 router.get('/search', search.searchVideos);
 router.get('/trending', trending.getTrending);
 router.get('/home-feed', optionalAuth, homeFeed.getHomeFeed);

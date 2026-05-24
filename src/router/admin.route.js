@@ -6,8 +6,11 @@ import { createFounderAdmin } from '../controller/adminFounder.controller.js';
 import { attachAdminFromBearerToken, requireAdminAuth } from '../middleware/adminAuth.js';
 import { adminDeleteUserLimiter } from '../middleware/adminRateLimit.js';
 import adminContentRouter from './adminContent.route.js';
+import adminVideoImportRouter from './adminVideoImport.route.js';
 import adminModerationRouter from './adminModeration.route.js';
 import contentRemovalRouter from './ContentRemoval.route.js';
+import adminSearchRouter from './adminSearch.route.js';
+import adminCreatorLeaderboardRouter from './adminCreatorLeaderboard.route.js';
 
 const router = express.Router();
 
@@ -71,7 +74,10 @@ router.get('/system/latency', adminSystem.getRouteLatency);
 
 // --- Sub-routers ---
 router.use('/content', adminContentRouter);
+router.use('/content/imports', adminVideoImportRouter);
 router.use('/content-removal', contentRemovalRouter);
 router.use('/moderation', adminModerationRouter);
+router.use('/search', adminSearchRouter);
+router.use('/creator-leaderboard', adminCreatorLeaderboardRouter);
 
 export default router;

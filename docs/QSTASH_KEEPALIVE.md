@@ -6,7 +6,7 @@ This backend uses an Upstash QStash schedule to send a signed `POST` request to 
 
 ```txt
 backend/
-|-- .env.example
+|-- .env.production
 |-- index.js
 |-- package.json
 |-- scripts/
@@ -131,3 +131,4 @@ Then check Upstash QStash logs and Render logs after the next 10-minute interval
 - A route-specific rate limiter blocks noisy abuse before expensive processing.
 - Secrets are read only from environment variables.
 - Failure callback logs are summarized to avoid dumping full payloads.
+

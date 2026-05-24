@@ -1,6 +1,6 @@
 /**
  * Public paginated video feed.
- * GET /api/videos?page=1&limit=20 -> { data, total, page, totalPages, hasMore }
+ * GET /api/videos?page=1&limit=10 -> { data, total, page, totalPages, hasMore, nextCursor }
  */
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { lookupHomeFeedRow, ingestHomeFeedVideos } from '../config/homeFeedCache.js';
@@ -14,7 +14,9 @@ import { annotatePlayableVideo, isListableInHomeFeed, isPlayableVideo } from '..
 
 const CACHE_MAX_ITEMS = 500;
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const PER_PAGE_HINT = 18;
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 30;
+const PER_PAGE_HINT = 10;
 
 let cache = { items: [], ts: 0 };
 
@@ -89,10 +91,27 @@ function mapCachedHomeFeedRow(hf) {
   };
 }
 
-export async function getVideosPaginated(page = 1, limit = 20, options = {}) {
-  const { viewerUid = null } = options;
+export function encodeFeedCursor(page) {
   const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
-  const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
+  return Buffer.from(JSON.stringify({ page: pageNum }), 'utf8').toString('base64url');
+}
+
+export function decodeFeedCursor(cursor) {
+  if (!cursor || typeof cursor !== 'string') return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const pageNum = Math.max(1, parseInt(String(parsed?.page), 10) || 1);
+    return { page: pageNum };
+  } catch {
+    return null;
+  }
+}
+
+export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, options = {}) {
+  const { viewerUid = null, cursor = null } = options;
+  const cursorPage = decodeFeedCursor(cursor)?.page;
+  const pageNum = cursorPage || Math.max(1, parseInt(String(page), 10) || 1);
+  const limitNum = Math.min(MAX_LIMIT, Math.max(1, parseInt(String(limit), 10) || DEFAULT_LIMIT));
   const pagesForDb = Math.min(5, Math.max(1, Math.ceil(limitNum / 20)));
   const data = [];
   const seen = new Set();
@@ -132,7 +151,16 @@ export async function getVideosPaginated(page = 1, limit = 20, options = {}) {
   mergeCache(sliced);
 
   if (sliced.length === 0) {
-    return { data: [], total: 0, page: pageNum, totalPages: 0, hasMore: false };
+    return {
+      data: [],
+      total: 0,
+      page: pageNum,
+      totalPages: 0,
+      hasMore: false,
+      nextCursor: null,
+      limit: limitNum,
+      batchSize: 0,
+    };
   }
 
   const hasMore = sliced.length >= limitNum || sliced.length >= PER_PAGE_HINT;
@@ -142,6 +170,9 @@ export async function getVideosPaginated(page = 1, limit = 20, options = {}) {
     page: pageNum,
     totalPages: hasMore ? pageNum + 1 : pageNum,
     hasMore,
+    nextCursor: hasMore ? encodeFeedCursor(pageNum + 1) : null,
+    limit: limitNum,
+    batchSize: sliced.length,
   });
 }
 

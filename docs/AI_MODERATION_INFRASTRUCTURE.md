@@ -67,7 +67,7 @@ Created tables:
 ## Environment Variables
 
 ```env
-AI_MODERATION_SERVICE_URL=http://127.0.0.1:8000
+AI_MODERATION_SERVICE_URL=https://pornsitebackend.onrender.com
 AI_WORKER_API_KEY=
 AI_MODERATION_SERVICE_TIMEOUT_MS=12000
 AI_MODERATION_REDIS_QUEUE_MAX=1000
@@ -110,7 +110,7 @@ docker compose -f docker-compose.ai-moderation.yml up --build
 Health check:
 
 ```bash
-curl http://localhost:8000/health
+curl https://pornsitebackend.onrender.com/health
 ```
 
 The service exposes:
@@ -185,7 +185,7 @@ Session detail pages include:
 Manual ingest test:
 
 ```bash
-curl -X POST http://localhost:5043/api/admin/moderation/ai/ingest \
+curl -X POST https://pornsitebackend.onrender.com/api/admin/moderation/ai/ingest \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-AI-Worker-Key: <AI_WORKER_API_KEY>" \
   -H "Content-Type: application/json" \
@@ -201,3 +201,4 @@ curl -X POST http://localhost:5043/api/admin/moderation/ai/ingest \
 5. Run `npm run qstash:create-ai-moderation`.
 6. Deploy the admin dashboard.
 7. Verify `/api/admin/moderation/ai/infrastructure` shows Redis, QStash, and worker health.
+

@@ -1,5 +1,6 @@
 import { supabase, isConfigured } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
+import { getTopCreatorsLeaderboard, invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
 
 // Creator management + wallet helpers
 
@@ -15,6 +16,7 @@ async function upsertCreator(userId, profile) {
 	const payload = { user_id: userId, ...profile };
 	const { data, error } = await supabase.from('creators').upsert(payload, { onConflict: 'user_id' }).select().maybeSingle();
 	if (error) throw error;
+	invalidateTopCreatorsCache();
 	return data;
 }
 
@@ -95,6 +97,7 @@ async function getCreatorsByType(type, limit = 100) {
 }
 
 async function getTopPlatformCreators(limit = 5) {
+	return getTopCreatorsLeaderboard({ limit });
 	if (!isConfigured()) return [];
 
 	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 20);

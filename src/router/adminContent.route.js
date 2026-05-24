@@ -4,11 +4,15 @@ import {
   getVideos,
   getVideoById,
   updateVideoStatus,
+  updateVideoPremium,
+  bulkUpdateVideoPremium,
   deleteVideo,
   getLiveSessions,
   getLiveSessionById,
   updateLiveStatus,
   getRandomSessions,
+  getRandomSessionById,
+  forceDisconnectRandomSession,
   getPremiumVideos,
   revalidateVideos,
 } from '../controller/adminContent.controller.js';
@@ -18,6 +22,9 @@ router.use(requireAdminAuth);
 
 router.get('/videos', getVideos);
 router.post('/videos/revalidate', revalidateVideos);
+router.post('/videos/bulk-premium', bulkUpdateVideoPremium);
+router.put('/videos/:id/premium', updateVideoPremium);
+router.patch('/videos/:id/premium', updateVideoPremium);
 router.get('/videos/:id', getVideoById);
 router.put('/videos/:id/status', updateVideoStatus);
 router.delete('/videos/:id', deleteVideo);
@@ -27,6 +34,8 @@ router.get('/lives/:id', getLiveSessionById);
 router.put('/lives/:id/status', updateLiveStatus);
 
 router.get('/random-sessions', getRandomSessions);
+router.get('/random-sessions/:id', getRandomSessionById);
+router.post('/random-sessions/:id/disconnect', forceDisconnectRandomSession);
 router.get('/premium-videos', getPremiumVideos);
 
 export default router;

@@ -28,15 +28,16 @@ docker compose -f backend/docker-compose.yml up -d
 
 ## Local URLs
 
-- Frontend: `http://localhost:8080`
-- Admin: `http://localhost:8081`
-- Backend: `http://localhost:5043`
-- AI Gateway: `http://localhost:8000`
-- Payment Service: `http://localhost:10000`
-- Nginx aggregate proxy: `http://localhost`
+- Frontend: `https://xstreamvideos.site`
+- Admin: `https://admin.xstreamvideos.site`
+- Backend: `https://pornsitebackend.onrender.com`
+- AI Gateway: `https://pornsitebackend.onrender.com`
+- Payment Service: `https://payments.xstreamvideos.site`
+- Nginx aggregate proxy: `https://xstreamvideos.site`
 
 ## Notes
 
 - Compose expects `backend/.env` and `ai/.env` for local secrets.
 - Upstash Redis and QStash are external managed services.
 - AI model cache is mounted as the `ai-model-cache` Docker volume.
+

@@ -9,8 +9,7 @@ import crypto from 'crypto';
  *
  * Environment variable:
  *   PAYMENT_SERVICE_URL  — base URL of the payment service
- *     Local:      http://localhost:5001
- *     Production: https://your-payment-service.onrender.com
+ *     Production: https://payments.xstreamvideos.site
  *
  * The backend and payment service are fully independent:
  *   - The backend calls this client only for checkout creation.
@@ -18,11 +17,12 @@ import crypto from 'crypto';
  *   - Either service can be down without crashing the other.
  */
 
+const PRODUCTION_PAYMENT_SERVICE_URL = 'https://payments.xstreamvideos.site';
 const _rawUrl = process.env.PAYMENT_SERVICE_URL;
 
-// Warn loudly in production if the env var is missing — a silent localhost
-// fallback in production produces confusing "fetch failed" errors.
-if (!_rawUrl && process.env.NODE_ENV === 'production') {
+// Warn loudly in production if the env var is missing.
+
+if (!_rawUrl && process.env.NODE_ENV === 'production' && process.env.PAYMENT_SERVICE_STRICT_URL === 'true') {
   console.error(
     '[paymentService] ❌ PAYMENT_SERVICE_URL is not set.\n' +
     '   All checkout requests will fail.\n' +
@@ -30,7 +30,18 @@ if (!_rawUrl && process.env.NODE_ENV === 'production') {
   );
 }
 
-const PAYMENT_SERVICE_URL = (_rawUrl || 'http://localhost:5001').replace(/\/$/, '');
+if (!_rawUrl && process.env.NODE_ENV === 'production') {
+  console.error(
+    '[paymentService] PAYMENT_SERVICE_URL is not set.\n' +
+    `   Falling back to ${PRODUCTION_PAYMENT_SERVICE_URL}.\n` +
+    '   Set PAYMENT_SERVICE_URL explicitly in the Render env vars.'
+  );
+}
+
+const PAYMENT_SERVICE_URL = (
+  _rawUrl ||
+  PRODUCTION_PAYMENT_SERVICE_URL
+).replace(/\/$/, '');
 const PAYMENT_SERVICE_SHARED_SECRET = (process.env.PAYMENT_SERVICE_SHARED_SECRET || '').trim();
 
 const CHECKOUT_TIMEOUT_MS       = 20_000;
@@ -95,13 +106,21 @@ function signedCheckoutHeaders(payload) {
  */
 export async function createCheckout(params) {
   const url = `${PAYMENT_SERVICE_URL}/api/payments/create`;
+  const timeoutMs = Math.max(5000, Number(params.timeoutMs || CHECKOUT_TIMEOUT_MS));
   const payload = {
     orderId:       params.orderId       ?? '',
     userId:        params.userId        ?? '',
     planId:        params.planId        ?? '',
     productType:   params.productType   ?? 'membership',
     productId:     params.productId     ?? params.planId ?? '',
-    provider:      params.provider      ?? process.env.PAYMENT_PROVIDER ?? process.env.PAYMENT_DEFAULT_PROVIDER ?? '',
+    provider:      params.provider      ?? '',
+    primaryProvider: params.primaryProvider ?? params.provider ?? '',
+    fallbackProvider: params.fallbackProvider ?? '',
+    allowFallback: params.allowFallback !== false,
+    flutterwaveEnabled: params.flutterwaveEnabled !== false,
+    paystackEnabled: params.paystackEnabled !== false,
+    maxRetries: Number(params.maxRetries || 0),
+    retryDelayMs: Number(params.retryDelayMs || 0),
     countryCode:   params.countryCode   ?? '',
     currency:      params.currency      ?? 'USD',
     amount:        params.amount        ?? 0,
@@ -121,7 +140,7 @@ export async function createCheckout(params) {
       method:  'POST',
       headers,
       body: requestBody,
-      signal: AbortSignal.timeout(CHECKOUT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     if (err.name === 'TimeoutError' || err.name === 'AbortError') {
@@ -142,11 +161,10 @@ export async function createCheckout(params) {
   }
 
   if (!response.ok) {
-    // ASP.NET problem details: { title, detail, message }
     const msg =
+      responseBody?.detail ??
       responseBody?.message ??
-      responseBody?.detail  ??
-      responseBody?.title   ??
+      responseBody?.title ??
       `Payment service error (HTTP ${response.status}).`;
     throw new Error(msg);
   }
@@ -165,6 +183,10 @@ export async function createCheckout(params) {
     checkoutUrl: responseBody.checkoutUrl || null,
     reference:   responseBody.reference,
     flutterwave: responseBody.flutterwave || null,
+    fallbackUsed: responseBody.fallbackUsed === true,
+    retryCount: Number(responseBody.retryCount || 0),
+    attemptedProviders: Array.isArray(responseBody.attemptedProviders) ? responseBody.attemptedProviders : [],
+    gatewayLog: responseBody.gatewayLog || null,
   };
 }
 
@@ -188,6 +210,26 @@ export async function pingPaymentService({ timeoutMs = HEALTH_TIMEOUT_MS } = {})
     return { ok: false, detail: `HTTP ${res.status} from ${PAYMENT_SERVICE_URL}` };
   } catch (err) {
     return { ok: false, detail: `${err.message} (${PAYMENT_SERVICE_URL})` };
+  }
+}
+
+export async function getGatewayHealth({ timeoutMs = HEALTH_TIMEOUT_MS } = {}) {
+  const url = `${PAYMENT_SERVICE_URL}/api/payments/health`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, status: 'degraded', providers: [], detail: body?.detail || `HTTP ${res.status}` };
+    }
+    return {
+      ok: body?.status === 'ok',
+      status: body?.status || 'unknown',
+      primary: body?.primary || 'flutterwave',
+      fallback: body?.fallback || 'paystack',
+      providers: body?.providers || [],
+    };
+  } catch (err) {
+    return { ok: false, status: 'unreachable', providers: [], detail: err.message };
   }
 }
 

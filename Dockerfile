@@ -17,6 +17,6 @@ USER nodeapp
 EXPOSE 5043
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:${PORT}/api/health/services" || exit 1
+  CMD wget -qO- "http://0.0.0.0:${PORT}/api/health/services" || exit 1
 
 CMD ["node", "index.js"]

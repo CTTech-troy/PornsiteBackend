@@ -17,6 +17,14 @@ import {
 } from '../services/userDirectoryService.js';
 import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
 import { setCoinBalance } from '../services/coinWallet.service.js';
+import { enqueueSearchDocument } from '../services/searchIndex.service.js';
+import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
+
+function invalidateCreatorLeaderboard() {
+  try {
+    invalidateTopCreatorsCache();
+  } catch (_) {}
+}
 
 function detectMissingFields(appData) {
   const missing = [];
@@ -143,6 +151,8 @@ async function deactivateCreatorProfile(userId, status = 'removed') {
   const payload = { active: false, status, updated_at: new Date().toISOString() };
   const { error } = await supabase.from('creators').update(payload).eq('user_id', userId);
   if (error && !isIgnorableCleanupError(error) && !isColumnMissingError(error)) throw error;
+  enqueueSearchDocument('creator', userId, status === 'removed' ? 'delete' : 'upsert').catch(() => {});
+  invalidateCreatorLeaderboard();
 }
 
 async function setCreatorApplicationBan(userId, ban) {
@@ -235,6 +245,7 @@ async function syncCreatorLifecycle(userId, { status, appData = {}, applicationI
   } else if (status === 'rejected' || status === 'banned') {
     await deactivateCreatorProfile(userId, status === 'banned' ? 'banned' : 'removed');
   }
+  invalidateCreatorLeaderboard();
 
   return { supabaseUpdated, creatorStatus, role };
 }
@@ -563,6 +574,13 @@ export async function updateUserStatus(req, res) {
     if (!['active', 'suspended', 'banned'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status.' });
     }
+    const { row: existingUser } = await fetchUserRowForAdminById(id).catch(() => ({ row: null }));
+    if (
+      status !== 'active' &&
+      (existingUser?.protected_account === true || existingUser?.is_system_account === true || existingUser?.official_company === true)
+    ) {
+      return res.status(409).json({ message: 'Protected system accounts cannot be suspended or banned.' });
+    }
 
     // users table has no status column — use banned/suspended booleans
     const update = {
@@ -579,6 +597,8 @@ export async function updateUserStatus(req, res) {
       }
       return res.status(500).json({ message: error.message });
     }
+    enqueueSearchDocument('user', id, 'upsert').catch(() => {});
+    invalidateCreatorLeaderboard();
 
     // Also update Firebase RTDB so both sources stay in sync
     try {
@@ -704,6 +724,9 @@ export async function deleteUser(req, res) {
     }
 
     const user = rowToAdminUserDto(mergedRow);
+    if (mergedRow.protected_account === true || mergedRow.is_system_account === true || mergedRow.official_company === true) {
+      return res.status(409).json({ message: 'Protected system accounts cannot be deleted.' });
+    }
     const deletionIds = uniqueValues([
       id,
       mergedRow.id,
@@ -829,6 +852,13 @@ export async function updateCreatorStatus(req, res) {
     if (fetchErr) return res.status(500).json({ message: fetchErr.message });
 
     const userId = creator?.user_id || id;
+    const { row: existingCreatorUser } = await fetchUserRowForAdminById(userId).catch(() => ({ row: null }));
+    if (
+      status !== 'active' &&
+      (existingCreatorUser?.protected_account === true || existingCreatorUser?.is_system_account === true || existingCreatorUser?.official_company === true)
+    ) {
+      return res.status(409).json({ message: 'Protected system accounts cannot be suspended or banned.' });
+    }
     if (userId) {
       await supabase.from('users').update({
         banned: status === 'banned',
@@ -843,6 +873,9 @@ export async function updateCreatorStatus(req, res) {
       if (creatorUpdate.error && !isColumnMissingError(creatorUpdate.error) && !isMissingTable(creatorUpdate.error)) {
         return res.status(500).json({ message: creatorUpdate.error.message });
       }
+      enqueueSearchDocument('user', userId, 'upsert').catch(() => {});
+      enqueueSearchDocument('creator', userId, status === 'active' ? 'upsert' : 'delete').catch(() => {});
+      invalidateCreatorLeaderboard();
 
       const firestoreDb = getFirebaseDb();
       if (firestoreDb) {

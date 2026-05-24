@@ -11,8 +11,9 @@ import {
   createSecurePaymentSession,
   getPaymentIntentStatus,
   processProviderWebhook,
+  refreshAndFulfillPaymentIntent,
 } from '../services/securePayments.service.js';
-import { verifyProviderTransaction, verifyWebhookSignature } from '../services/paymentGateway.service.js';
+import { verifyWebhookSignature } from '../services/paymentGateway.service.js';
 import {
   countryFromRequest,
   isAfricanCountry,
@@ -28,6 +29,7 @@ import {
   markPayoutCompleted,
   markPayoutFailed,
 } from '../services/payoutWorkflow.service.js';
+import { handleFlutterwaveTransferWebhook } from '../services/flutterwaveTransfer.service.js';
 
 const router = express.Router();
 
@@ -137,25 +139,40 @@ router.get('/verify/:reference', requireAuth, async (req, res) => {
   const reference = String(req.params.reference || '').trim();
   if (!reference) return res.status(400).json({ ok: false, error: 'reference is required' });
   try {
-    const status = await getPaymentIntentStatus({ reference, userId: req.uid });
+    const orderKey = String(req.query.orderKey || req.query.tx_ref || '').trim() || null;
+    const status = await getPaymentIntentStatus({ reference, orderKey, userId: req.uid });
     if (!status) {
       return res.status(404).json({ ok: false, verified: false, error: 'Payment session not found.' });
     }
 
     const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
-    let providerStatus = null;
-    if (refresh && status.provider && status.reference) {
-      // This route is read-only. Webhooks remain the only fulfillment path.
-      providerStatus = await verifyProviderTransaction(status.provider, { reference: status.reference })
-        .then((result) => ({ status: result.status, amount: result.amount, currency: result.currency }))
-        .catch((error) => ({ error: error.message }));
+    if (refresh && status.status !== 'fulfilled') {
+      const refreshed = await refreshAndFulfillPaymentIntent({
+        reference,
+        orderKey,
+        userId: req.uid,
+      });
+      if (refreshed) {
+        return res.json({
+          ok: true,
+          verified: refreshed.verified,
+          payment: refreshed.payment,
+          providerStatus: refreshed.providerStatus,
+          fulfillment: {
+            fulfilled: refreshed.fulfilled,
+            duplicate: refreshed.duplicate,
+            suspicious: refreshed.suspicious,
+            error: refreshed.error,
+          },
+        });
+      }
     }
 
     return res.json({
       ok: true,
       verified: status.status === 'fulfilled',
       payment: status,
-      providerStatus,
+      providerStatus: null,
     });
   } catch (err) {
     console.error('[payment] verify failed:', err.message);
@@ -197,6 +214,22 @@ router.post('/webhooks/stripe', webhookLimiter, async (req, res) => {
 });
 
 router.post('/webhooks/flutterwave', webhookLimiter, async (req, res) => {
+  const event = String(req.body?.event || req.body?.['event.type'] || '').toLowerCase();
+  const data = req.body?.data || req.body || {};
+  const looksLikeTransfer = event.startsWith('transfer.')
+    || data.transfer_code
+    || data.account_number
+    || data.bank_code
+    || String(data.reference || '').startsWith('XFLW-PAYOUT-');
+
+  if (looksLikeTransfer) {
+    const signature = verifyWebhookSignature('flutterwave', req);
+    if (signature.skipped) return res.status(503).json({ error: 'Webhook verification is not configured.' });
+    if (!signature.valid) return res.status(401).json({ error: 'Invalid signature' });
+    const result = await handleFlutterwaveTransferWebhook(data, { io: req.app?.get('io') });
+    return res.status(200).json({ received: true, transfer: true, ...result });
+  }
+
   const result = await safeProcessWebhook('flutterwave', req);
   return res.status(result.status || 200).json({ received: true, ...result });
 });

@@ -1,10 +1,10 @@
 import { supabase, isConfigured } from '../config/supabase.js';
-import { verifyProviderTransaction } from './paymentGateway.service.js';
 import {
   expireStalePaymentIntents,
   getFraudAlerts,
   getPaymentReconciliationReport,
   getPaymentMonitoring,
+  refreshAndFulfillPaymentIntent,
 } from './securePayments.service.js';
 import { getCoinAnalytics } from './coinWallet.service.js';
 
@@ -54,20 +54,16 @@ export async function runFailedPaymentRetry({ limit = 50, olderThanMinutes = 15 
       continue;
     }
     try {
-      const verified = await verifyProviderTransaction(intent.provider, {
-        reference: intent.provider_reference,
+      const refreshed = await refreshAndFulfillPaymentIntent({
+        reference: intent.provider_reference || intent.intent_key,
         orderKey: intent.intent_key,
+        userId: null,
       });
-      const nextStatus = verified.successful ? 'processing' : 'failed';
-      await supabase
-        .from('payment_intents')
-        .update({ status: nextStatus, updated_at: new Date().toISOString() })
-        .eq('id', intent.id);
       results.push({
         intentId: intent.id,
-        action: 'provider_polled',
-        providerStatus: verified.status,
-        note: 'Fulfillment remains webhook-only; no balance credited from retry job',
+        action: refreshed?.fulfilled ? 'provider_polled_and_fulfilled' : 'provider_polled',
+        providerStatus: refreshed?.providerStatus?.status || refreshed?.providerStatus?.error || null,
+        fulfilled: refreshed?.fulfilled === true,
       });
     } catch (pollError) {
       results.push({ intentId: intent.id, action: 'poll_failed', error: pollError.message });

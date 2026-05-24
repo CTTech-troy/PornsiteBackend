@@ -64,6 +64,87 @@ export function emitFinancePayoutEvent(io, eventName, payout, extra = {}) {
   } catch (_) {}
 }
 
+export function emitFinanceActivityEvent(io, eventName, activity, extra = {}) {
+  const event = eventName || 'finance:activity-created';
+  const payload = {
+    event,
+    activity,
+    ...extra,
+    ts: Date.now(),
+  };
+
+  for (const client of Array.from(clients)) {
+    try {
+      client.res.write(`event: ${event}\ndata: ${safeJson(payload)}\n\n`);
+    } catch {
+      clients.delete(client);
+    }
+  }
+
+  try {
+    io?.emit?.(event, payload);
+  } catch (_) {}
+}
+
+export async function writeFinanceActivityEvent(activity = {}, { io = null } = {}) {
+  if (!supabase || !activity.eventType) return null;
+
+  const row = {
+    event_type: activity.eventType,
+    actor_type: activity.actorType || 'system',
+    actor_id: activity.actorId || null,
+    user_id: activity.userId || null,
+    creator_id: activity.creatorId || null,
+    product_type: activity.productType || null,
+    product_id: activity.productId || null,
+    amount_usd: activity.amountUsd == null ? null : Number(activity.amountUsd || 0),
+    amount_tokens: activity.amountTokens == null ? null : Number(activity.amountTokens || 0),
+    provider: activity.provider || null,
+    reference: activity.reference || null,
+    status: activity.status || null,
+    metadata: activity.metadata || {},
+  };
+
+  const { data, error } = await supabase
+    .from('finance_activity_events')
+    .insert(row)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    if (!isMissingTableOrColumn(error)) {
+      console.warn('[finance] activity event insert failed:', error.message || error);
+    }
+    return null;
+  }
+
+  emitFinanceActivityEvent(io, 'finance:activity-created', data);
+  return data;
+}
+
+export async function listFinanceActivityEvents({ page = 1, limit = 30, eventType = '' } = {}) {
+  if (!supabase) return { events: [], total: 0, page, limit };
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 30));
+  const from = (safePage - 1) * safeLimit;
+  const to = from + safeLimit - 1;
+
+  let query = supabase
+    .from('finance_activity_events')
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(from, to);
+  if (eventType) query = query.eq('event_type', eventType);
+
+  const { data, error, count } = await query;
+  if (error) {
+    if (isMissingTableOrColumn(error)) return { events: [], total: 0, page: safePage, limit: safeLimit };
+    throw error;
+  }
+
+  return { events: data || [], total: count || 0, page: safePage, limit: safeLimit };
+}
+
 export async function writeFinancePayoutLog(payout, status, extra = {}) {
   if (!supabase || !payout) return null;
 

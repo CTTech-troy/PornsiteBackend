@@ -23,6 +23,16 @@ import {
 } from '../services/payoutWorkflow.service.js';
 import { getReceiptForPayout, streamReceiptPdf } from '../services/receiptService.js';
 import { normalizeCreatorApplicationKyc } from '../services/payoutKyc.service.js';
+import {
+  dedupeEarningRows,
+  groupEarningRowsBySource,
+  sumEarningRowsUsd,
+} from '../services/revenueCalculation.service.js';
+import { enqueueSearchDocument } from '../services/searchIndex.service.js';
+import {
+  listFlutterwaveBanks,
+  resolveFlutterwaveBankAccount,
+} from '../services/flutterwaveTransfer.service.js';
 
 function isMissingColumn(err) {
   const msg = String(err?.message || '');
@@ -144,7 +154,13 @@ const NIGERIAN_BANKS = [
 // ── GET /api/studio/banks ─────────────────────────────────────────────────────
 
 export async function getBanks(req, res) {
-  // Try Paystack first; fall back to hardcoded list
+  try {
+    if (process.env.FLUTTERWAVE_SECRET_KEY) {
+      const banks = await listFlutterwaveBanks('NG');
+      if (banks.length) return res.json({ banks, provider: 'flutterwave' });
+    }
+  } catch (_) { /* fall through to Paystack / hardcoded */ }
+
   try {
     const paystackKey = process.env.PAYSTACK_SECRET_KEY;
     if (paystackKey) {
@@ -156,12 +172,12 @@ export async function getBanks(req, res) {
         const json = await r.json();
         if (json.status && Array.isArray(json.data)) {
           const banks = json.data.map(b => ({ name: b.name, code: b.code }));
-          return res.json({ banks });
+          return res.json({ banks, provider: 'paystack' });
         }
       }
     }
   } catch (_) { /* fall through to hardcoded */ }
-  return res.json({ banks: NIGERIAN_BANKS });
+  return res.json({ banks: NIGERIAN_BANKS, provider: 'static' });
 }
 
 // ── POST /api/studio/banks/verify ─────────────────────────────────────────────
@@ -172,9 +188,24 @@ export async function verifyBankAccount(req, res) {
     if (!accountNumber || !bankCode) {
       return res.status(400).json({ success: false, message: 'accountNumber and bankCode are required' });
     }
+
+    if (process.env.FLUTTERWAVE_SECRET_KEY) {
+      try {
+        const account = await resolveFlutterwaveBankAccount({ accountNumber, bankCode });
+        return res.json({
+          success: true,
+          accountName: account.accountName,
+          accountNumber: account.accountNumber || accountNumber,
+          provider: 'flutterwave',
+        });
+      } catch (_) {
+        // Fall back to Paystack when Flutterwave account resolution is unavailable.
+      }
+    }
+
     const paystackKey = process.env.PAYSTACK_SECRET_KEY;
     if (!paystackKey) {
-      return res.status(503).json({ success: false, message: 'Bank verification unavailable — no Paystack key configured.' });
+      return res.status(503).json({ success: false, message: 'Bank verification unavailable. Configure Flutterwave or Paystack credentials.' });
     }
     const r = await fetch(
       `https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
@@ -184,7 +215,7 @@ export async function verifyBankAccount(req, res) {
     if (!r.ok || !json.status) {
       return res.status(400).json({ success: false, message: json.message || 'Account verification failed.' });
     }
-    return res.json({ success: true, accountName: json.data.account_name });
+    return res.json({ success: true, accountName: json.data.account_name, provider: 'paystack' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -278,7 +309,7 @@ function groupEarningsByDay(rows, days) {
     d.setDate(d.getDate() - i);
     map[d.toISOString().slice(0, 10)] = 0;
   }
-  for (const row of rows) {
+  for (const row of dedupeEarningRows(rows)) {
     const key = String(row.created_at || '').slice(0, 10);
     if (key in map) map[key] += Number(row.amount_usd) || 0;
   }
@@ -304,7 +335,7 @@ export async function getOverview(req, res) {
       ),
       safeStudioQuery(
         'studio overview earnings',
-        () => supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid),
+        () => supabase.from('creator_earnings').select('amount_usd, source, created_at, reference_id').eq('creator_id', uid),
         { data: [] }
       ),
     ]);
@@ -315,17 +346,15 @@ export async function getOverview(req, res) {
 
     const totalViews  = videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views) || 0), 0);
     const totalLikes  = videos.reduce((s, v) => s + (Number(v.totalLikes) || 0), 0);
-    const totalUsd    = earnings.reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
     const premiumVids = videos.filter(v => v.isPremiumContent);
 
     const thirtyAgo = new Date();
     thirtyAgo.setDate(thirtyAgo.getDate() - 30);
-    const monthlyEarnings = earnings
-      .filter(e => new Date(e.created_at) >= thirtyAgo)
-      .reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
+    const monthlyEarnings = sumEarningRowsUsd(earnings, { since: thirtyAgo });
 
     let payoutBalances = {
-      available: parseFloat(totalUsd.toFixed(2)),
+      total: 0,
+      available: 0,
       pending: 0,
       processing: 0,
       withdrawn: 0,
@@ -334,7 +363,11 @@ export async function getOverview(req, res) {
       payoutBalances = await getCreatorPayoutBalances(uid);
     } catch (balanceErr) {
       console.warn('[studio] overview payout balance fallback:', balanceErr?.message || balanceErr);
+      payoutBalances.total = sumEarningRowsUsd(earnings);
+      payoutBalances.available = payoutBalances.total;
     }
+
+    const totalEarnings = Number(payoutBalances.total || 0);
 
     const level    = computeLevel(followers, totalViews);
     const lvlIdx   = CREATOR_LEVELS.indexOf(level);
@@ -363,7 +396,7 @@ export async function getOverview(req, res) {
         totalLikes,
         totalUploads:    videos.length,
         premiumUploads:  premiumVids.length,
-        totalEarnings:   parseFloat(totalUsd.toFixed(2)),
+        totalEarnings:   parseFloat(totalEarnings.toFixed(2)),
         availableEarnings: parseFloat(Number(payoutBalances.available || 0).toFixed(2)),
         pendingEarnings: parseFloat(Number(payoutBalances.pending || 0).toFixed(2)),
         processingEarnings: parseFloat(Number(payoutBalances.processing || 0).toFixed(2)),
@@ -403,25 +436,21 @@ export async function getAnalytics(req, res) {
       ),
       safeStudioQuery(
         'studio analytics earnings',
-        () => supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid).gte('created_at', since.toISOString()).order('created_at', { ascending: true }),
+        () => supabase.from('creator_earnings').select('amount_usd, source, created_at, reference_id').eq('creator_id', uid).gte('created_at', since.toISOString()).order('created_at', { ascending: true }),
         { data: [] }
       ),
     ]);
 
-    const earningsRows = earningsRes?.data || [];
+    const earningsRows = dedupeEarningRows(earningsRes?.data || []);
     const followers    = Number(userRes?.data?.followers) || 0;
     const totalViews   = videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views) || 0), 0);
     const totalLikes   = videos.reduce((s, v) => s + (Number(v.totalLikes) || 0), 0);
 
     const earningsTrend  = groupEarningsByDay(earningsRows, days);
 
-    const sourceMap = {};
-    for (const e of earningsRows) {
-      const src = (e.source || 'other').replace(/_/g, ' ');
-      sourceMap[src] = (sourceMap[src] || 0) + (Number(e.amount_usd) || 0);
-    }
+    const sourceMap = groupEarningRowsBySource(earningsRows);
     const earningsBySource = Object.entries(sourceMap).map(([name, value]) => ({
-      name:  name.charAt(0).toUpperCase() + name.slice(1),
+      name:  name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
       value: parseFloat(value.toFixed(2)),
     }));
 
@@ -435,7 +464,7 @@ export async function getAnalytics(req, res) {
         likes: Number(v.totalLikes) || 0,
       }));
 
-    const periodEarnings = earningsRows.reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
+    const periodEarnings = sumEarningRowsUsd(earningsRows);
     const level   = computeLevel(followers, totalViews);
     const lvlIdx  = CREATOR_LEVELS.indexOf(level);
     const nextLvl = lvlIdx < CREATOR_LEVELS.length - 1 ? CREATOR_LEVELS[lvlIdx + 1] : null;
@@ -525,12 +554,12 @@ export async function getEarnings(req, res) {
       throw earningsRes.error;
     }
 
-    const earnings = earningsRes?.data || [];
+    const earnings = dedupeEarningRows(earningsRes?.data || []);
     const pending  = pendingRes?.error && (isMissingTable(pendingRes.error) || isMissingColumn(pendingRes.error))
       ? []
       : (pendingRes?.data || []);
 
-    const total          = earnings.reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
+    const total          = sumEarningRowsUsd(earnings);
     const pendingAmount  = pending.filter(w => w.status === 'pending').reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
     const processingAmount = pending.filter(w => ['approved', 'processing'].includes(w.status)).reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
     const withdrawnAmount = pending.filter(w => ['paid', 'completed'].includes(w.status)).reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);
@@ -546,11 +575,7 @@ export async function getEarnings(req, res) {
     } catch (_) {}
     const available = balances.available;
 
-    const grouped = {};
-    for (const e of earnings) {
-      const src = e.source || 'other';
-      grouped[src] = (grouped[src] || 0) + (Number(e.amount_usd) || 0);
-    }
+    const grouped = groupEarningRowsBySource(earnings);
 
     let ngnRate = 1600;
     try { ngnRate = await getNgnToUsdRate(); } catch (_) {}
@@ -760,6 +785,7 @@ export async function updateSettings(req, res) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const { error } = await supabase.from('creators').upsert(payload, { onConflict: 'user_id' });
       if (!error) {
+        enqueueSearchDocument('creator', uid, 'upsert').catch(() => {});
         const skipped = [];
         if (socialLinks && !('social_links' in payload)) skipped.push('social_links');
         if (notificationPrefs && !('notification_prefs' in payload)) skipped.push('notification_prefs');
@@ -972,7 +998,7 @@ export async function getRevenueReport(req, res) {
     const [earningsRes, withdrawalsRes] = await Promise.all([
       safeStudioQuery(
         'studio revenue earnings',
-        () => supabase.from('creator_earnings').select('amount_usd, source, created_at').eq('creator_id', uid).gte('created_at', since.toISOString()),
+        () => supabase.from('creator_earnings').select('amount_usd, source, created_at, reference_id').eq('creator_id', uid).gte('created_at', since.toISOString()),
         { data: [] },
       ),
       safeStudioQuery(
@@ -982,7 +1008,7 @@ export async function getRevenueReport(req, res) {
       ),
     ]);
 
-    const earnings = earningsRes?.data || [];
+    const earnings = dedupeEarningRows(earningsRes?.data || []);
     const withdrawals = withdrawalsRes?.data || [];
     const monthlyMap = {};
 
@@ -996,7 +1022,7 @@ export async function getRevenueReport(req, res) {
       else monthlyMap[key].net += amt;
     }
 
-    const totalEarnings = earnings.reduce((s, e) => s + (Number(e.amount_usd) || 0), 0);
+    const totalEarnings = sumEarningRowsUsd(earnings);
     const totalWithdrawn = withdrawals
       .filter((w) => ['paid', 'completed'].includes(w.status))
       .reduce((s, w) => s + (Number(w.amount_usd) || 0), 0);

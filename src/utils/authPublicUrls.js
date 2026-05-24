@@ -1,71 +1,32 @@
-function parseUrlCandidates(raw) {
-  return String(raw || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
+import { expandUrlCandidates, isLocalUrl, resolvePublicApiUrl, resolvePublicFrontendUrl } from './appUrls.js';
 
-function isValidAbsoluteUrl(value) {
-  try {
-    const u = new URL(value);
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function isLocalHostUrl(value) {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * FRONTEND_URL / FRONTEND_PUBLIC_URL are often comma-separated lists in .env.
- * Firebase action links require a single absolute continue URL.
- */
-function resolvePublicUrl(envKeys, fallback) {
-  const preferLocal = process.env.NODE_ENV !== 'production';
-  const lists = envKeys.map((key) => parseUrlCandidates(process.env[key]));
-  const ordered = preferLocal ? lists.reverse().flat() : lists.flat();
-  const valid = ordered.filter(isValidAbsoluteUrl);
-
-  if (preferLocal) {
-    const local = valid.find(isLocalHostUrl);
-    if (local) return local.replace(/\/$/, '');
-  }
-
-  const remoteHttps = valid.find((u) => u.startsWith('https://') && !isLocalHostUrl(u));
-  if (remoteHttps) return remoteHttps.replace(/\/$/, '');
-
-  if (valid[0]) return valid[0].replace(/\/$/, '');
-  return fallback;
+function preferUrl(envKeys, fallbackResolver) {
+  const production = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  const candidates = envKeys.flatMap((key) => expandUrlCandidates(process.env[key]));
+  const remote = candidates.find((url) => url.startsWith('https://') && !isLocalUrl(url));
+  if (remote) return remote.replace(/\/$/, '');
+  const safe = candidates.find((url) => !production || !isLocalUrl(url));
+  if (safe) return safe.replace(/\/$/, '');
+  return fallbackResolver().replace(/\/$/, '');
 }
 
 export function publicFrontendUrl() {
-  return resolvePublicUrl(['FRONTEND_URL', 'FRONTEND_PUBLIC_URL'], 'http://localhost:5173');
+  return preferUrl(['FRONTEND_URL', 'FRONTEND_PUBLIC_URL'], resolvePublicFrontendUrl);
 }
 
 export function publicApiUrl() {
-  const resolved = resolvePublicUrl(
-    ['API_PUBLIC_URL', 'BACKEND_PUBLIC_URL', 'BACKEND_URL'],
-    ''
-  );
-  return resolved || '';
+  return preferUrl(['API_PUBLIC_URL', 'BACKEND_PUBLIC_URL', 'BACKEND_URL'], resolvePublicApiUrl);
 }
 
 export function isLocalDevUrlsConfigured() {
-  const front = `${process.env.FRONTEND_URL || ''},${process.env.FRONTEND_PUBLIC_URL || ''}`.toLowerCase();
-  const api = `${process.env.API_PUBLIC_URL || ''},${process.env.BACKEND_PUBLIC_URL || ''},${process.env.BACKEND_URL || ''}`.toLowerCase();
-  return (
-    front.includes('localhost') ||
-    front.includes('127.0.0.1') ||
-    api.includes('localhost') ||
-    api.includes('127.0.0.1')
-  );
+  const values = [
+    process.env.FRONTEND_URL,
+    process.env.FRONTEND_PUBLIC_URL,
+    process.env.API_PUBLIC_URL,
+    process.env.BACKEND_PUBLIC_URL,
+    process.env.BACKEND_URL,
+  ];
+  return values.flatMap((value) => expandUrlCandidates(value)).some(isLocalUrl);
 }
 
 export function buildAppVerificationUrl(rawToken) {

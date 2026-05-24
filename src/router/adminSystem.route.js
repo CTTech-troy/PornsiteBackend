@@ -11,7 +11,16 @@ import {
   getStats,
   getApiHealth,
   getRouteLatency,
+  getPlatformActivity,
 } from '../controller/adminSystem.controller.js';
+import {
+  getAdminEmailTemplate,
+  listAdminEmailTemplates,
+  previewAdminEmailTemplate,
+  previewAdminMessageEmail,
+  saveAdminEmailTemplate,
+  sendAdminEmailTemplateTest,
+} from '../controller/adminEmailTemplates.controller.js';
 import {
   getExternalFeedConfig,
   updateExternalFeedConfig,
@@ -34,6 +43,7 @@ const router = Router();
 router.use(requireAdminAuth);
 
 router.get('/stats', getStats);
+router.get('/platform-activity', getPlatformActivity);
 router.get('/settings', getSettings);
 router.put('/settings', updateSettings);
 router.put('/settings/:key', updateSetting);
@@ -42,6 +52,13 @@ router.get('/health', getSystemHealth);
 router.get('/api-health', getApiHealth);
 router.get('/route-latency', getRouteLatency);
 router.get('/env', getEnvOverview);
+
+router.get('/email-templates', listAdminEmailTemplates);
+router.get('/email-templates/:key', getAdminEmailTemplate);
+router.post('/email-templates/:key/preview', previewAdminEmailTemplate);
+router.post('/email-templates/preview-message', previewAdminMessageEmail);
+router.post('/email-templates/:key/test-send', sendAdminEmailTemplateTest);
+router.put('/email-templates/:key', saveAdminEmailTemplate);
 
 router.get('/observability/overview', getObservabilityOverview);
 router.get('/observability/apis', getObservedApis);

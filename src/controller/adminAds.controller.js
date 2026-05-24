@@ -2,10 +2,16 @@ import { randomUUID } from 'crypto';
 import sanitizeHtml from 'sanitize-html';
 import { supabase, isConfigured } from '../config/supabase.js';
 import { isAdsSchemaMissing, adsSchemaMissingPayload } from '../utils/supabaseAdsErrors.js';
+import { validateAdForRender } from '../services/safeAdPolicy.service.js';
 
 function fmt(v) { return Number(v) || 0; }
 
 const ALLOWED_STATUS = new Set(['pending', 'active', 'paused', 'rejected', 'expired']);
+const SAFE_CAMPAIGN_PLACEMENTS = {
+  homepage_banner: { width: 970, height: 120, format: 'banner' },
+  sidebar: { width: 300, height: 250, format: 'banner' },
+  feed: { width: 728, height: 90, format: 'native' },
+};
 
 function normalizeStatusFromBody(body) {
   if (body.status != null && ALLOWED_STATUS.has(String(body.status))) return String(body.status);
@@ -30,7 +36,6 @@ function sanitizeEmbed(rawHtml) {
       'a', 'div', 'span', 'p', 'br',
       'img',
       'iframe',
-      'script',
       'ins',
     ],
     allowedAttributes: {
@@ -38,8 +43,7 @@ function sanitizeEmbed(rawHtml) {
       div: ['class', 'id', 'data-*', 'style'],
       span: ['class', 'id', 'data-*', 'style'],
       img: ['src', 'alt', 'width', 'height', 'loading', 'referrerpolicy'],
-      iframe: ['src', 'width', 'height', 'frameborder', 'scrolling', 'allow', 'allowfullscreen', 'loading', 'referrerpolicy', 'sandbox'],
-      script: ['src', 'async', 'defer', 'type', 'data-*'],
+      iframe: ['src', 'width', 'height', 'frameborder', 'scrolling', 'loading', 'referrerpolicy', 'sandbox'],
       ins: ['class', 'style', 'data-*'],
       p: ['class', 'style'],
     },
@@ -48,7 +52,13 @@ function sanitizeEmbed(rawHtml) {
     disallowedTagsMode: 'discard',
     enforceHtmlBoundary: true,
     transformTags: {
-      a: sanitizeHtml.simpleTransform('a', { rel: 'noopener noreferrer', target: '_blank' }),
+      a: sanitizeHtml.simpleTransform('a', { rel: 'noopener noreferrer', target: '_self' }),
+      iframe: sanitizeHtml.simpleTransform('iframe', {
+        sandbox: 'allow-scripts',
+        loading: 'lazy',
+        referrerpolicy: 'no-referrer',
+        scrolling: 'no',
+      }),
     },
     exclusiveFilter(frame) {
       const attrs = frame.attribs || {};
@@ -73,6 +83,28 @@ function sanitizeEmbed(rawHtml) {
     fingerprint = null;
   }
   return { sanitized, fingerprint };
+}
+
+function normalizePlacement(placement) {
+  const key = String(placement || 'homepage_banner');
+  return SAFE_CAMPAIGN_PLACEMENTS[key] ? key : 'homepage_banner';
+}
+
+async function validateCampaignPayload({ placement, embedHtml, width, height, creativeType }) {
+  const spec = SAFE_CAMPAIGN_PLACEMENTS[placement] || SAFE_CAMPAIGN_PLACEMENTS.homepage_banner;
+  const result = await validateAdForRender({
+    placement,
+    width: Number(width) || spec.width,
+    height: Number(height) || spec.height,
+    providerSlug: 'custom',
+    format: String(creativeType || spec.format).toLowerCase().includes('native') ? 'native' : spec.format,
+    embedHtml,
+  });
+  if (!result.ok) {
+    const err = new Error(`Unsafe ad rejected: ${result.reason}`);
+    err.status = 400;
+    throw err;
+  }
 }
 
 export async function listCampaigns(req, res) {
@@ -109,7 +141,7 @@ export async function listCampaigns(req, res) {
       },
     });
   } catch (err) {
-    return res.status(500).json({ message: err?.message || String(err) });
+    return res.status(err?.status || 500).json({ message: err?.message || String(err) });
   }
 }
 
@@ -124,6 +156,15 @@ export async function createCampaign(req, res) {
 
     const embedHtml = typeof body.embed_html === 'string' ? body.embed_html : (typeof body.embedHtml === 'string' ? body.embedHtml : '');
     const { sanitized, fingerprint } = sanitizeEmbed(embedHtml);
+    const placement = normalizePlacement(body.placement);
+    const creativeType = body.creativeType || body.creative_type || (embedHtml ? 'embed' : (body.type || 'image'));
+    await validateCampaignPayload({
+      placement,
+      embedHtml: sanitized || embedHtml,
+      width: body.image_width || body.imageWidth,
+      height: body.image_height || body.imageHeight,
+      creativeType,
+    });
 
     const status = normalizeStatusFromBody(body);
     const payload = {
@@ -132,7 +173,7 @@ export async function createCampaign(req, res) {
       name: String(body.name || '').trim(),
       title: body.title != null ? String(body.title).trim() : null,
       description: body.description != null ? String(body.description) : null,
-      placement: body.placement || 'homepage_banner',
+      placement,
       status,
       device: body.device || 'desktop',
       priority: Number(body.priority) || 1,
@@ -140,7 +181,7 @@ export async function createCampaign(req, res) {
       expiry_date: body.expiryDate || body.expiry_date || body.endDate || body.end_date || null,
       end_date: body.endDate || body.end_date || body.expiryDate || body.expiry_date || null,
       type: body.type || 'image',
-      creative_type: body.creativeType || body.creative_type || (embedHtml ? 'embed' : (body.type || 'image')),
+      creative_type: creativeType,
       embed_html: embedHtml || null,
       embed_sanitized_html: sanitized || null,
       script_fingerprint: fingerprint,
@@ -187,7 +228,7 @@ export async function updateCampaign(req, res) {
     if (Object.prototype.hasOwnProperty.call(body, 'name')) set('name', String(body.name || '').trim());
     if (Object.prototype.hasOwnProperty.call(body, 'title')) set('title', body.title != null ? String(body.title).trim() : null);
     if (Object.prototype.hasOwnProperty.call(body, 'description')) set('description', body.description != null ? String(body.description) : null);
-    if (Object.prototype.hasOwnProperty.call(body, 'placement')) set('placement', body.placement || 'homepage_banner');
+    if (Object.prototype.hasOwnProperty.call(body, 'placement')) set('placement', normalizePlacement(body.placement));
     if (Object.prototype.hasOwnProperty.call(body, 'device')) set('device', body.device || 'desktop');
     if (Object.prototype.hasOwnProperty.call(body, 'priority')) set('priority', Number(body.priority) || 1);
     if (Object.prototype.hasOwnProperty.call(body, 'status')) {
@@ -233,6 +274,26 @@ export async function updateCampaign(req, res) {
       if (!updates.creative_type) set('creative_type', raw ? 'embed' : 'image');
     }
 
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'placement') ||
+      Object.prototype.hasOwnProperty.call(body, 'embed_html') ||
+      Object.prototype.hasOwnProperty.call(body, 'embedHtml') ||
+      Object.prototype.hasOwnProperty.call(body, 'creativeType') ||
+      Object.prototype.hasOwnProperty.call(body, 'creative_type') ||
+      Object.prototype.hasOwnProperty.call(body, 'image_width') ||
+      Object.prototype.hasOwnProperty.call(body, 'imageWidth') ||
+      Object.prototype.hasOwnProperty.call(body, 'image_height') ||
+      Object.prototype.hasOwnProperty.call(body, 'imageHeight')
+    ) {
+      await validateCampaignPayload({
+        placement: updates.placement || normalizePlacement(body.placement),
+        embedHtml: updates.embed_sanitized_html || updates.embed_html || '',
+        width: body.image_width || body.imageWidth,
+        height: body.image_height || body.imageHeight,
+        creativeType: updates.creative_type || body.creativeType || body.creative_type,
+      });
+    }
+
     const { data, error } = await supabase.from('ad_campaigns').update(updates).eq('id', id).select().single();
     if (error) {
       if (isAdsSchemaMissing(error)) return res.status(503).json(adsSchemaMissingPayload());
@@ -241,7 +302,7 @@ export async function updateCampaign(req, res) {
     if (!data) return res.status(404).json({ message: 'Not found' });
     return res.json({ campaign: data });
   } catch (err) {
-    return res.status(500).json({ message: err?.message || String(err) });
+    return res.status(err?.status || 500).json({ message: err?.message || String(err) });
   }
 }
 

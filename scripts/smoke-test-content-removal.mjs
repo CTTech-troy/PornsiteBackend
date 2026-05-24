@@ -11,7 +11,7 @@ dotenv.config({ path: path.join(__dirname, '..', '.env'), quiet: true });
 const API_BASE = (
   process.env.BACKEND_URL ||
   process.env.BACKEND_PUBLIC_URL ||
-  'http://localhost:5043'
+  'https://pornsitebackend.onrender.com'
 ).replace(/\/$/, '');
 
 async function verifySchema() {

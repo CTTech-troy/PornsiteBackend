@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node scripts/test-video-playback-validation.mjs",
     "test:payments": "node --test tests/payments/security.test.mjs",
+    "test:import": "node --test tests/import/csvParser.test.mjs",
     "migrate:content-removal": "node scripts/apply-content-removal-migration.mjs",
     "revalidate-videos": "node scripts/revalidate-videos.mjs",
     "start": "node index.js",
@@ -32,6 +33,7 @@
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
+    "csv-parse": "^5.6.0",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
@@ -41,6 +43,7 @@
     "hpp": "^0.2.3",
     "jsonwebtoken": "^9.0.3",
     "livekit-server-sdk": "^2.15.1",
+    "meilisearch": "^0.49.0",
     "morgan": "^1.10.1",
     "multer": "^1.4.5-lts.1",
     "node-fetch": "^2.7.0",
@@ -50,6 +53,7 @@
     "resend": "^6.12.2",
     "sanitize-html": "^2.17.3",
     "socket.io": "^4.8.3",
+    "unzipper": "^0.12.3",
     "uuid": "^11.1.0"
   },
   "devDependencies": {

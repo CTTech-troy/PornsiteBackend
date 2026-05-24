@@ -11,6 +11,7 @@ import {
   getUserEarningsSummary,
 } from './revenueCalculation.service.js';
 import { getPayoutMetrics } from './payoutMetricsService.js';
+import { getAdRewardAnalytics } from './creatorAdReward.service.js';
 
 const COMPLETED_PAYOUT = ['paid', 'completed'];
 const ACTIVE_MEMBERSHIP = ['active', 'completed'];
@@ -258,6 +259,14 @@ export async function getCompanyRevenueMetrics(query = {}) {
     creator: money(d.amount * (rates.creatorPercent / 100)),
   }));
 
+  const adReward = await getAdRewardAnalytics({ from, to }).catch(() => ({
+    validViews: 0,
+    impressions: 0,
+    creatorRewardsUsd: 0,
+    platformGrossUsd: 0,
+    netProfitUsd: 0,
+  }));
+
   return {
     range: query.range || '30d',
     from: from.toISOString(),
@@ -297,7 +306,9 @@ export async function getCompanyRevenueMetrics(query = {}) {
       { name: 'Video purchases', value: money(videoPurchaseRevenue) },
       { name: 'Tips & gifts', value: money(tipRevenue) },
       { name: 'Platform fees', value: totalPlatformRevenue },
+      { name: 'Ad gross (est.)', value: money(adReward.platformGrossUsd) },
     ].filter((b) => b.value > 0),
+    adRewardAnalytics: adReward,
     payoutMetrics,
   };
 }

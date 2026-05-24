@@ -10,6 +10,17 @@ import {
 } from './revenueCalculation.service.js';
 import { sendPremiumVideoPurchaseEmails } from './emailService.js';
 import { userHasPremiumAccess } from './playbackAccess.service.js';
+import { creditCoins, spendCoins } from './coinWallet.service.js';
+import { writeFinanceActivityEvent } from './financePayoutEvents.service.js';
+import { writePlatformActivityEvent } from './platformActivity.service.js';
+
+function isMissingPremiumPurchaseRpc(error) {
+  const message = String(error?.message || '');
+  return isMissingDbFeature(error)
+    || error?.code === '42883'
+    || error?.code === 'PGRST202'
+    || /secure_purchase_premium_video|function .* does not exist|could not find/i.test(message);
+}
 
 function deviceInfoFromRequest(req) {
   const forwarded = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
@@ -52,16 +63,22 @@ async function notifyCreatorInApp({ creatorId, buyerUsername, videoTitle, creato
   }
 }
 
-async function resolveBuyerDisplayName(userId) {
-  if (!supabase || !userId) return 'A user';
+async function resolveUserProfile(userId) {
+  if (!supabase || !userId) return { name: 'A user', email: null };
   const { data } = await supabase.from('users').select('username, display_name, email').eq('id', userId).maybeSingle();
-  return data?.display_name || data?.username || data?.email?.split('@')[0] || 'A user';
+  return {
+    name: data?.display_name || data?.username || data?.email?.split('@')[0] || 'A user',
+    email: data?.email || null,
+  };
 }
 
-async function resolveCreatorEmail(creatorId) {
-  if (!supabase || !creatorId) return null;
+async function resolveCreatorProfile(creatorId) {
+  if (!supabase || !creatorId) return { name: 'Creator', email: null };
   const { data } = await supabase.from('users').select('email, display_name, username').eq('id', creatorId).maybeSingle();
-  return data?.email || null;
+  return {
+    name: data?.display_name || data?.username || 'Creator',
+    email: data?.email || null,
+  };
 }
 
 export async function tokensToUsd(tokenAmount) {
@@ -88,6 +105,7 @@ export async function completePremiumVideoPurchase({
   tokenPrice,
   paymentReference,
   req = null,
+  debitWallet = false,
 }) {
   const videoId = video.publicVideoId;
   const creatorId = video.userId || null;
@@ -101,9 +119,73 @@ export async function completePremiumVideoPurchase({
   const split = splitGrossAmount(purchaseAmountUsd, rates.platformPercent);
   const idempotencyKey = `pvp:${userId}:${videoId}`;
   const purchaseId = randomUUID();
+  let newBalance = null;
+  let walletTransactionId = null;
+  let earningAlreadyRecorded = false;
 
   let purchaseRow = null;
-  if (supabase) {
+  if (debitWallet && supabase) {
+    const rpc = await supabase.rpc('secure_purchase_premium_video', {
+      p_user_id: userId,
+      p_creator_id: creatorId,
+      p_video_id: videoId,
+      p_tiktok_video_id: video.tiktokVideoId || null,
+      p_video_title: video.title || '',
+      p_token_price: tokenPrice,
+      p_purchase_amount_usd: purchaseAmountUsd,
+      p_creator_revenue_usd: split.creatorEarningsUsd,
+      p_platform_revenue_usd: split.platformFeeUsd,
+      p_payment_reference: paymentReference || idempotencyKey,
+      p_device_info: req ? deviceInfoFromRequest(req) : {},
+      p_session_id: req?.headers?.['x-session-id'] || null,
+      p_metadata: { videoSource: video.source || 'public' },
+    });
+
+    if (!rpc.error) {
+      const row = Array.isArray(rpc.data) ? rpc.data[0] : rpc.data;
+      if (row?.duplicate === true) {
+        const dup = await findPremiumPurchase(userId, videoId);
+        return { duplicate: true, purchase: dup, newBalance: Number(row?.new_balance || 0) };
+      }
+      newBalance = Number(row?.new_balance || 0);
+      walletTransactionId = row?.wallet_transaction_id || null;
+      purchaseRow = {
+        id: row?.purchase_id || purchaseId,
+        user_id: userId,
+        creator_id: creatorId,
+        video_id: videoId,
+        video_title: video.title || '',
+        purchase_amount_tokens: tokenPrice,
+        purchase_amount_usd: purchaseAmountUsd,
+        creator_revenue_usd: split.creatorEarningsUsd,
+        platform_revenue_usd: split.platformFeeUsd,
+        payment_reference: paymentReference || idempotencyKey,
+        payment_provider: 'coin_wallet',
+      };
+      earningAlreadyRecorded = true;
+    } else if (!isMissingPremiumPurchaseRpc(rpc.error)) {
+      throw rpc.error;
+    }
+  }
+
+  let fallbackDebit = null;
+  if (!purchaseRow && debitWallet) {
+    fallbackDebit = await spendCoins({
+      userId,
+      amount: tokenPrice,
+      type: 'spend',
+      reference: paymentReference || idempotencyKey,
+      metadata: { reason: 'premium_video_purchase', videoId, creatorId },
+      idempotencyKey: `premium_video_purchase:${userId}:${videoId}`,
+      relatedUserId: creatorId,
+      sourceType: 'premium_video',
+      sourceId: videoId,
+    });
+    newBalance = Number(fallbackDebit.balance || 0);
+    walletTransactionId = fallbackDebit.transactionId || null;
+  }
+
+  if (!purchaseRow && supabase) {
     const { data, error } = await supabase
       .from('premium_video_purchases')
       .insert({
@@ -125,24 +207,50 @@ export async function completePremiumVideoPurchase({
         device_info: req ? deviceInfoFromRequest(req) : {},
         session_id: req?.headers?.['x-session-id'] || null,
         idempotency_key: idempotencyKey,
-        metadata: { videoSource: video.source || 'public' },
+        metadata: { videoSource: video.source || 'public', walletTransactionId },
       })
       .select()
       .maybeSingle();
 
     if (error) {
       if (error.code === '23505') {
+        if (fallbackDebit) {
+          await creditCoins({
+            userId,
+            amount: tokenPrice,
+            type: 'refund',
+            reference: `${paymentReference || idempotencyKey}:duplicate_refund`,
+            idempotencyKey: `premium_video_duplicate_refund:${userId}:${videoId}`,
+            sourceType: 'premium_video_refund',
+            sourceId: videoId,
+            metadata: { reason: 'duplicate_after_wallet_debit', videoId },
+          }).catch(() => null);
+        }
         const dup = await findPremiumPurchase(userId, videoId);
         return { duplicate: true, purchase: dup };
       }
-      if (!isMissingDbFeature(error)) throw error;
+      if (!isMissingDbFeature(error)) {
+        if (fallbackDebit) {
+          await creditCoins({
+            userId,
+            amount: tokenPrice,
+            type: 'refund',
+            reference: `${paymentReference || idempotencyKey}:failed_refund`,
+            idempotencyKey: `premium_video_failed_refund:${userId}:${videoId}:${purchaseId}`,
+            sourceType: 'premium_video_refund',
+            sourceId: videoId,
+            metadata: { reason: 'purchase_record_failed', videoId, error: error.message },
+          }).catch(() => null);
+        }
+        throw error;
+      }
     } else {
       purchaseRow = data;
     }
   }
 
   const earningRef = `premium_purchase:${purchaseId}`;
-  if (creatorId && split.creatorEarningsUsd > 0) {
+  if (!earningAlreadyRecorded && creatorId && split.creatorEarningsUsd > 0) {
     await recordCreatorEarning({
       creatorId,
       grossUsd: purchaseAmountUsd,
@@ -157,7 +265,8 @@ export async function completePremiumVideoPurchase({
     });
   }
 
-  const buyerName = await resolveBuyerDisplayName(userId);
+  const buyerProfile = await resolveUserProfile(userId);
+  const buyerName = buyerProfile.name;
   await notifyCreatorInApp({
     creatorId,
     buyerUsername: buyerName,
@@ -166,16 +275,18 @@ export async function completePremiumVideoPurchase({
     purchaseId,
   });
 
-  const creatorEmail = await resolveCreatorEmail(creatorId);
+  const creatorProfile = await resolveCreatorProfile(creatorId);
   await sendPremiumVideoPurchaseEmails({
-    creatorEmail,
-    creatorName: buyerName,
+    buyerEmail: buyerProfile.email,
     buyerName,
+    creatorEmail: creatorProfile.email,
+    creatorName: creatorProfile.name,
     videoTitle: video.title || 'Premium video',
     purchaseAmountUsd,
     creatorEarningsUsd: split.creatorEarningsUsd,
     platformEarningsUsd: split.platformFeeUsd,
     purchasedAt: new Date().toISOString(),
+    transactionId: paymentReference || idempotencyKey,
   }).catch((err) => {
     console.warn('[premiumPurchase] email notify failed:', err?.message || err);
   });
@@ -188,6 +299,36 @@ export async function completePremiumVideoPurchase({
     videoId,
     payload: { tokenPrice, purchaseAmountUsd, split },
   });
+
+  await writeFinanceActivityEvent({
+    eventType: 'premium_video_purchased',
+    userId,
+    creatorId,
+    productType: 'premium_video',
+    productId: videoId,
+    amountUsd: purchaseAmountUsd,
+    amountTokens: tokenPrice,
+    provider: 'coin_wallet',
+    reference: paymentReference || idempotencyKey,
+    status: 'completed',
+    metadata: {
+      purchaseId: purchaseRow?.id || purchaseId,
+      videoTitle: video.title || '',
+      creatorRevenueUsd: split.creatorEarningsUsd,
+      platformRevenueUsd: split.platformFeeUsd,
+      walletTransactionId,
+    },
+  }).catch(() => null);
+
+  await writePlatformActivityEvent({
+    eventType: 'premium_video_purchased',
+    title: 'Premium video purchased',
+    message: `${buyer.name} purchased "${video.title || 'video'}"`,
+    actorId: userId,
+    targetType: 'video',
+    targetId: videoId,
+    payload: { purchaseId, creatorEarningsUsd: split.creatorEarningsUsd },
+  }).catch(() => null);
 
   return {
     duplicate: false,
@@ -202,6 +343,8 @@ export async function completePremiumVideoPurchase({
     },
     split,
     purchaseAmountUsd,
+    newBalance,
+    walletTransactionId,
   };
 }
 

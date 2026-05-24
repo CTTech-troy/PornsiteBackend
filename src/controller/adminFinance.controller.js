@@ -11,6 +11,8 @@ import { processCreatorPayoutTransfer } from '../services/paystackTransfer.servi
 import { getBooleanSetting } from '../services/platformSettings.service.js';
 import {
   emitFinancePayoutEvent,
+  listFinanceActivityEvents,
+  writeFinanceActivityEvent,
   subscribeFinanceEvents,
   writeFinancePayoutLog,
 } from '../services/financePayoutEvents.service.js';
@@ -29,15 +31,21 @@ import { getCompanyRevenueMetrics, getUnifiedFinanceDashboard } from '../service
 import { getUserEarningsSummary } from '../services/revenueCalculation.service.js';
 import { getRevenueSettingsAuditHistory } from '../services/platformSettingsAudit.service.js';
 import { getRevenueSettingsPayload, saveAdminSettings } from '../services/platformSettings.service.js';
+import { getAdRewardAnalytics } from '../services/creatorAdReward.service.js';
+import { resolveRange } from '../services/revenueCalculation.service.js';
+import { getStringSetting } from '../services/platformSettings.service.js';
 import { getReceiptForPayout, streamReceiptPdf } from '../services/receiptService.js';
 import { normalizeCreatorApplicationKyc } from '../services/payoutKyc.service.js';
 import {
   getFraudAlerts,
+  getGatewayAnalytics,
   getPaymentAuditTrail,
   getPaymentMonitoring,
   getPaymentReconciliationReport,
   getWebhookEvents,
 } from '../services/securePayments.service.js';
+import { getGatewayHealth } from '../services/paymentServiceClient.js';
+import { processCreatorFlutterwavePayoutTransfer } from '../services/flutterwaveTransfer.service.js';
 
 export { subscribeFinanceEvents };
 
@@ -115,6 +123,19 @@ function isRangeError(err) {
 }
 
 // ── GET /api/admin/finance/summary ───────────────────────────────────────────
+
+export async function getFinanceActivityAdmin(req, res) {
+  try {
+    const result = await listFinanceActivityEvents({
+      page: req.query.page,
+      limit: req.query.limit,
+      eventType: req.query.eventType,
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Failed to load finance activity.' });
+  }
+}
 
 export async function getFinanceSummary(req, res) {
   try {
@@ -673,64 +694,120 @@ export async function markPayoutPaid(req, res) {
     if (fetchError) return res.status(500).json({ message: fetchError.message });
     if (!payout) return res.status(404).json({ message: 'Payout not found or not payable.' });
 
+    const gatewayProvider = String(provider || 'flutterwave').toLowerCase() === 'paystack' ? 'paystack' : 'flutterwave';
     const amountNgn = await resolvePayoutNgnAmount(payout);
-    const paystackReference = `XST-PAYOUT-${String(payout.reference_id || payout.id).replace(/[^a-zA-Z0-9-]/g, '').slice(0, 40)}`;
+    const gatewayReference = `${gatewayProvider === 'paystack' ? 'XST' : 'XFLW'}-PAYOUT-${String(payout.reference_id || payout.id).replace(/[^a-zA-Z0-9-]/g, '').slice(0, 40)}`;
 
     const processingPayout = await markPayoutProcessing({
       id,
       admin: req.admin,
-      transactionReference: paystackReference,
-      notes: 'Paystack transfer started',
+      transactionReference: gatewayReference,
+      notes: `${gatewayProvider === 'paystack' ? 'Paystack' : 'Flutterwave'} transfer started`,
       req,
       io: req.app?.get('io'),
     });
 
     let transfer;
     try {
-      transfer = await processCreatorPayoutTransfer({
-        ...processingPayout,
-        amount_ngn: amountNgn,
-        paystack_reference: paystackReference,
-      });
+      transfer = gatewayProvider === 'paystack'
+        ? await processCreatorPayoutTransfer({
+            ...processingPayout,
+            amount_ngn: amountNgn,
+            paystack_reference: gatewayReference,
+          })
+        : await processCreatorFlutterwavePayoutTransfer({
+            ...processingPayout,
+            amount_ngn: amountNgn,
+            flutterwave_reference: gatewayReference,
+          });
     } catch (transferError) {
       const failedPayout = await markPayoutFailed({
         id,
         admin: req.admin,
-        reason: transferError.message || 'Paystack transfer failed.',
+        reason: transferError.message || `${gatewayProvider} transfer failed.`,
         req,
         io: req.app?.get('io'),
       });
       return res.status(502).json({
-        message: transferError.message || 'Paystack transfer failed. Payout has been marked as failed.',
+        message: transferError.message || `${gatewayProvider} transfer failed. Payout has been marked as failed.`,
         payout: failedPayout,
       });
+    }
+
+    if (gatewayProvider === 'flutterwave' && transfer.status !== 'completed') {
+      const { data: updated } = await updatePayoutStatus(id, {
+        amount_ngn: amountNgn,
+        payment_provider: 'flutterwave',
+        flutterwave_transfer_id: transfer.id,
+        flutterwave_transaction_reference: transfer.reference,
+        flutterwave_status: transfer.status,
+        transaction_reference: transfer.reference,
+        payment_metadata: {
+          flutterwaveStatus: transfer.status,
+          flutterwaveTransferId: transfer.id,
+          raw: transfer.raw,
+        },
+      }, {
+        statuses: ['processing'],
+      });
+      const pendingPayout = updated || processingPayout;
+      await writeFinancePayoutLog(pendingPayout, 'processing', {
+        provider: 'flutterwave',
+        transactionReference: transfer.reference,
+        metadata: { action: 'flutterwave_transfer_started', transferId: transfer.id, status: transfer.status },
+      });
+      await writeFinanceActivityEvent({
+        eventType: 'payout_processing',
+        creatorId: pendingPayout.creator_id,
+        amountUsd: pendingPayout.amount_usd,
+        provider: 'flutterwave',
+        reference: transfer.reference,
+        status: transfer.status,
+        metadata: { transferId: transfer.id },
+      }, { io: req.app?.get('io') });
+      return res.json({ message: 'Flutterwave payout transfer started. Awaiting provider confirmation.', payout: pendingPayout });
     }
 
     const completedPayout = await markPayoutCompleted({
       id,
       admin: req.admin,
       transactionReference: transfer.reference,
-      provider: 'paystack',
-      notes: 'Paystack transfer success',
+      provider: gatewayProvider,
+      notes: `${gatewayProvider === 'paystack' ? 'Paystack' : 'Flutterwave'} transfer success`,
       req,
       io: req.app?.get('io'),
     });
 
+    const providerPatch = gatewayProvider === 'paystack'
+      ? {
+          paystack_recipient_code: transfer.recipientCode,
+          paystack_transfer_code: transfer.transferCode,
+          paystack_transaction_reference: transfer.reference,
+          payment_metadata: {
+            paystackStatus: transfer.status,
+            transferCode: transfer.transferCode,
+          },
+        }
+      : {
+          flutterwave_transfer_id: transfer.id,
+          flutterwave_transaction_reference: transfer.reference,
+          flutterwave_status: transfer.status,
+          payment_metadata: {
+            flutterwaveStatus: transfer.status,
+            flutterwaveTransferId: transfer.id,
+            raw: transfer.raw,
+          },
+        };
+
     await updatePayoutStatus(id, {
       amount_ngn: amountNgn,
-      payment_provider: 'paystack',
-      paystack_recipient_code: transfer.recipientCode,
-      paystack_transfer_code: transfer.transferCode,
-      paystack_transaction_reference: transfer.reference,
-      payment_metadata: {
-        paystackStatus: transfer.status,
-        transferCode: transfer.transferCode,
-      },
+      payment_provider: gatewayProvider,
+      ...providerPatch,
     }, {
       statuses: ['completed'],
     });
 
-    return res.json({ message: 'Payout paid successfully through Paystack.', payout: completedPayout });
+    return res.json({ message: `Payout paid successfully through ${gatewayProvider === 'paystack' ? 'Paystack' : 'Flutterwave'}.`, payout: completedPayout });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -859,6 +936,17 @@ export async function getCompanyRevenue(req, res) {
   try {
     const company = await getCompanyRevenueMetrics(req.query);
     return res.json({ company });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getAdRewardAnalyticsAdmin(req, res) {
+  try {
+    const timezone = await getStringSetting('timezone', 'UTC');
+    const { from, to } = resolveRange(req.query, timezone);
+    const analytics = await getAdRewardAnalytics({ from, to });
+    return res.json({ analytics });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1067,7 +1155,7 @@ export async function uploadAdImage(req, res) {
 
 // ── POST /api/admin/finance/ads ───────────────────────────────────────────────
 
-const VALID_PLACEMENTS = ['homepage_banner', 'sidebar', 'video_player', 'creator_profile', 'feed'];
+const VALID_PLACEMENTS = ['homepage_banner', 'sidebar', 'feed'];
 
 export async function createAdCampaign(req, res) {
   try {
@@ -1076,6 +1164,9 @@ export async function createAdCampaign(req, res) {
       start_date, end_date,
       image_url, redirect_url, cta_text, placement,
       image_width, image_height,
+      status: requestedStatus,
+      source_type, external_platform, network_visible,
+      embed_html, embed_sanitized_html,
     } = req.body;
 
     if (!name?.trim()) return res.status(400).json({ message: 'Campaign name is required.' });
@@ -1083,6 +1174,8 @@ export async function createAdCampaign(req, res) {
       return res.status(400).json({ message: 'Redirect URL must be a valid http(s) URL.' });
     }
     const resolvedPlacement = VALID_PLACEMENTS.includes(placement) ? placement : 'homepage_banner';
+    const allowedStatuses = new Set(['active', 'paused', 'ended', 'pending']);
+    const initialStatus = allowedStatuses.has(requestedStatus) ? requestedStatus : 'active';
 
     const { data, error } = await supabase
       .from('ad_campaigns')
@@ -1095,8 +1188,8 @@ export async function createAdCampaign(req, res) {
         impressions:  0,
         clicks:       0,
         revenue_usd:  0,
-        status:       'active',
-        is_active:    true,
+        status:       initialStatus,
+        is_active:    initialStatus === 'active',
         start_date:   start_date || null,
         end_date:     end_date   || null,
         image_url:    image_url  || null,
@@ -1105,13 +1198,21 @@ export async function createAdCampaign(req, res) {
         placement:    resolvedPlacement,
         image_width:  parseInt(image_width)  || null,
         image_height: parseInt(image_height) || null,
+        source_type:  ['image', 'external_link', 'embed'].includes(source_type) ? source_type : 'image',
+        external_platform: external_platform?.trim() || null,
+        network_visible: Boolean(network_visible),
+        ownership: 'platform',
+        payment_status: initialStatus === 'active' ? 'waived' : 'pending',
+        embed_html: embed_html || null,
+        embed_sanitized_html: embed_sanitized_html || embed_html || null,
+        creative_type: source_type === 'embed' ? 'embed' : 'image',
         created_by:   req.admin?.id || null,
       })
       .select()
       .single();
 
     if (isMissingTable(error)) {
-      return res.status(503).json({ message: 'Ad campaigns table not found. Run migration 011_ads_upgrade.sql in Supabase.' });
+      return res.status(503).json({ message: 'Ad campaigns table not found. Run migration 20260610130000_ad_campaigns.sql in Supabase.' });
     }
     if (error) return res.status(500).json({ message: error.message });
     return res.status(201).json({ campaign: data });
@@ -1219,6 +1320,19 @@ export async function getPaymentReconciliationAdmin(req, res) {
     const hours = Number(req.query.hours) || 24;
     const data = await getPaymentReconciliationReport({ hours });
     return res.json(data);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getGatewayAnalyticsAdmin(req, res) {
+  try {
+    const hours = Number(req.query.hours) || 24;
+    const [analytics, health] = await Promise.all([
+      getGatewayAnalytics({ hours }),
+      getGatewayHealth(),
+    ]);
+    return res.json({ analytics, health });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

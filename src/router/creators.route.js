@@ -10,9 +10,19 @@ router.get('/', getCreatorsList);
 // GET /api/creators/top?limit=5 — top platform creators with real avatars + video counts
 router.get('/top', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit || '5', 10) || 5, 20);
-    const data = await getTopPlatformCreators(limit);
-    return res.json({ success: true, data });
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '5', 10) || 5, 1), 100);
+    const page = Math.max(parseInt(req.query.page || '1', 10) || 1, 1);
+    const result = await getTopPlatformCreators({ limit, page });
+    return res.json({
+      success: true,
+      data: result.creators || [],
+      total: result.total || 0,
+      page: result.page || page,
+      limit: result.limit || limit,
+      cached: result.cached === true,
+      generatedAt: result.generatedAt,
+      source: result.source,
+    });
   } catch (err) {
     console.error('creators.top', err?.message || err);
     return res.status(500).json({ success: false, data: [], message: err?.message || 'Failed' });

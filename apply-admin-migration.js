@@ -88,7 +88,7 @@ try {
   console.log('');
   console.log('Next step: create your first super admin.');
   console.log('  Option A — Use the admin panel login page (/login) and click "First-time Setup"');
-  console.log(`  Option B — POST http://localhost:${process.env.PORT || 5043}/api/admin/auth/founder-create`);
+  console.log(`  Option B — POST ${(process.env.BACKEND_PUBLIC_URL || 'https://pornsitebackend.onrender.com').replace(/\/$/, '')}/api/admin/auth/founder-create`);
   console.log(`             Header: x-admin-bootstrap-secret: ${process.env.ADMIN_BOOTSTRAP_SECRET || 'xstream-bootstrap-2024'}`);
   console.log('             Body:   { "name": "Your Name", "email": "you@example.com", "password": "yourpassword" }');
 } catch (err) {
@@ -110,7 +110,7 @@ ${SQL}
 --- After running the SQL ---
 Create your first super admin by calling:
 
-  POST http://localhost:${process.env.PORT || 5043}/api/admin/auth/founder-create
+  POST ${(process.env.BACKEND_PUBLIC_URL || 'https://pornsitebackend.onrender.com').replace(/\/$/, '')}/api/admin/auth/founder-create
   Header: x-admin-bootstrap-secret: ${process.env.ADMIN_BOOTSTRAP_SECRET || 'xstream-bootstrap-2024'}
   Body:   { "name": "Your Name", "email": "you@example.com", "password": "yourpassword" }
 

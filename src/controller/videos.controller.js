@@ -60,7 +60,7 @@ export async function listPosts(req, res) {
           totalLikes: v.likes_count,
           totalComments: v.comments_count,
           createdAt: new Date(v.created_at).getTime(),
-          isLive: v.status === 'published',
+          isLive: v.is_live === true || v.status === 'published',
           isPremiumContent: v.coin_price > 0,
           tokenPrice: v.coin_price,
           source: 'supabase'

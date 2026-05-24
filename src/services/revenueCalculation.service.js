@@ -56,6 +56,13 @@ export async function getCommissionRates(options = {}) {
     if (Number.isFinite(vpCreator)) creatorPercent = vpCreator;
     if (Number.isFinite(vpPlatform)) platformPercent = vpPlatform;
     else if (Number.isFinite(vpCreator)) platformPercent = 100 - vpCreator;
+  } else if (source === 'ad_reward') {
+    creatorPercent = 100;
+    platformPercent = 0;
+  } else if (source === 'ad' || source === 'ad_impression') {
+    const adCreator = Number(map.ad_revenue_share_percent);
+    if (Number.isFinite(adCreator)) creatorPercent = adCreator;
+    platformPercent = 100 - creatorPercent;
   }
 
   const rules = parseCommissionRules(map.revenue_commission_rules);
@@ -155,7 +162,7 @@ async function fetchEarningsRows(creatorId = null) {
   if (creatorId) query = query.eq('creator_id', creatorId);
   const { data, error } = await query;
   if (error && isMissingDbFeature(error)) {
-    let fallback = supabase.from('creator_earnings').select('creator_id, amount_usd, source, created_at');
+    let fallback = supabase.from('creator_earnings').select('creator_id, amount_usd, source, created_at, reference_id');
     if (creatorId) fallback = fallback.eq('creator_id', creatorId);
     const res = await fallback;
     if (res.error && !isMissingDbFeature(res.error)) throw res.error;
@@ -165,32 +172,69 @@ async function fetchEarningsRows(creatorId = null) {
   return data || [];
 }
 
+export function dedupeEarningRows(rows = []) {
+  const seenRefs = new Set();
+  const out = [];
+  for (const row of rows) {
+    const ref = row.reference_id ? String(row.reference_id) : null;
+    if (ref) {
+      if (seenRefs.has(ref)) continue;
+      seenRefs.add(ref);
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+export function sumEarningRowsUsd(rows = [], { since, until } = {}) {
+  const deduped = dedupeEarningRows(rows);
+  let total = 0;
+  for (const row of deduped) {
+    const created = row.created_at ? new Date(row.created_at) : null;
+    if (since && created && created < since) continue;
+    if (until && created && created > until) continue;
+    total += money(row.amount_usd);
+  }
+  return money(total);
+}
+
+export function groupEarningRowsBySource(rows = []) {
+  const grouped = {};
+  for (const row of dedupeEarningRows(rows)) {
+    const src = row.source || 'other';
+    grouped[src] = money((grouped[src] || 0) + Number(row.amount_usd || 0));
+  }
+  return grouped;
+}
+
 export async function sumCreatorEarnings(creatorId, options = {}) {
+  const { since, until } = options;
   const rates = await getCommissionRates({ creatorId, ...options });
   const rows = await fetchEarningsRows(creatorId);
-  const seenRefs = new Set();
+  const deduped = dedupeEarningRows(rows);
   let lifetimeCreator = 0;
   let lifetimeGross = 0;
   let lifetimePlatform = 0;
+  let transactionCount = 0;
 
-  for (const row of rows) {
-    if (row.reference_id) {
-      if (seenRefs.has(row.reference_id)) continue;
-      seenRefs.add(row.reference_id);
-    }
+  for (const row of deduped) {
+    const created = row.created_at ? new Date(row.created_at) : null;
+    if (since && created && created < since) continue;
+    if (until && created && created > until) continue;
     const creatorAmt = money(row.amount_usd);
     const gross = row.gross_usd != null ? money(row.gross_usd) : grossFromCreatorShare(creatorAmt, rates.creatorPercent);
     const platformFee = row.platform_fee_usd != null ? money(row.platform_fee_usd) : money(gross - creatorAmt);
     lifetimeCreator += creatorAmt;
     lifetimeGross += gross;
     lifetimePlatform += platformFee;
+    transactionCount += 1;
   }
 
   return {
     lifetimeCreatorEarnings: money(lifetimeCreator),
     lifetimeGrossRevenue: money(lifetimeGross),
     lifetimePlatformFees: money(lifetimePlatform),
-    transactionCount: seenRefs.size || rows.length,
+    transactionCount,
     rates,
   };
 }
@@ -261,11 +305,12 @@ export async function recordCreatorEarning({
   const rates = await getCommissionRates({ creatorId, category, source });
   const split = splitGrossAmount(grossUsd, rates.platformPercent);
 
+  const isFlatAdReward = source === 'ad_reward';
   const row = {
     creator_id: creatorId,
-    amount_usd: split.creatorEarningsUsd,
-    gross_usd: split.grossUsd,
-    platform_fee_usd: split.platformFeeUsd,
+    amount_usd: isFlatAdReward ? money(grossUsd) : split.creatorEarningsUsd,
+    gross_usd: isFlatAdReward ? money(grossUsd) : split.grossUsd,
+    platform_fee_usd: isFlatAdReward ? 0 : split.platformFeeUsd,
     source,
     reference_id: referenceId || null,
     metadata,

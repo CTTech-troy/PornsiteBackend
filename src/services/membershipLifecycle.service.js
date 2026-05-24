@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { supabase, isConfigured } from '../config/supabase.js';
 import { createCheckout } from './paymentServiceClient.js';
 import { creditCoins, getCoinWallet } from './coinWallet.service.js';
+import { sendSubscriptionReceiptEmail } from './emailService.js';
 
 const GRACE_PERIOD_DAYS = Number(process.env.MEMBERSHIP_GRACE_PERIOD_DAYS || 3);
 const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
@@ -342,6 +343,7 @@ export async function activateMembershipFromPayment(userId, planId, {
     if (error) throw error;
     await syncUserMembershipColumns(userId, plan.id, expiresAt, graceEndsAt);
     await writeMembershipBillingLog({ userId, membership, plan, reference, provider, amountPaidUsd, currency, reason: 'renewal', metadata });
+    await sendMembershipReceipt({ userId, membership, plan, reference, provider, amountPaidUsd, currency });
     await markOrderFulfilled(existingOrder, reference, provider);
     return { membership, plan, coinsAdded: 0, expiresAt: expiresAt.toISOString(), graceEndsAt: graceEndsAt.toISOString() };
   }
@@ -404,6 +406,7 @@ export async function activateMembershipFromPayment(userId, planId, {
   }
 
   await writeMembershipBillingLog({ userId, membership, plan, reference, provider, amountPaidUsd, currency, reason: 'initial_purchase', metadata });
+  await sendMembershipReceipt({ userId, membership, plan, reference, provider, amountPaidUsd, currency });
   await writeSubscriptionEvent({ userId, membershipId: membership.id, eventType: 'activated', status: 'active', metadata: { planId: plan.id } });
   await markOrderFulfilled(existingOrder, reference, provider);
 
@@ -494,6 +497,34 @@ async function markOrderFulfilled(order, reference, provider) {
       updated_at: new Date().toISOString(),
     })
     .eq('id', order.id);
+}
+
+async function sendMembershipReceipt({ userId, membership, plan, reference, provider, amountPaidUsd, currency }) {
+  if (!supabase || !userId) return;
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('email, username, display_name')
+      .eq('id', userId)
+      .maybeSingle();
+    if (!user?.email) return;
+    const amountForTemplate = String(currency || 'USD').toUpperCase() === 'NGN'
+      ? plan.price_usd
+      : (amountPaidUsd ?? plan.price_usd);
+    await sendSubscriptionReceiptEmail({
+      to: user.email,
+      name: user.display_name || user.username || user.email.split('@')[0],
+      planName: plan.name,
+      amountUsd: amountForTemplate,
+      transactionId: reference || membership?.payment_reference || membership?.id,
+      periodStart: membership?.started_at || new Date().toISOString(),
+      periodEnd: membership?.expires_at,
+      status: membership?.status || 'active',
+      provider,
+    });
+  } catch (err) {
+    console.warn('[membership] subscription receipt email failed:', err?.message || err);
+  }
 }
 
 export async function getUserMembership(userId) {

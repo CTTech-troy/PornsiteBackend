@@ -9,12 +9,12 @@ services:
       - .env
     environment:
       NODE_ENV: production
-      PORT: 5043
+      PORT: ${BACKEND_PORT:-5043}
       PAYMENT_SERVICE_URL: http://payment-service:10000
       PAYMENT_SERVICE_SHARED_SECRET: ${PAYMENT_SERVICE_SHARED_SECRET:-}
-      AI_MODERATION_SERVICE_URL: http://ai-gateway:8000
+      AI_MODERATION_SERVICE_URL: http://ai-gateway:${AI_GATEWAY_PORT:-8000}
     ports:
-      - "5043:5043"
+      - "${BACKEND_PORT:-5043}:${BACKEND_PORT:-5043}"
     depends_on:
       payment-service:
         condition: service_started
@@ -56,8 +56,8 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         APP_DIR: frontend
-        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com.site:5043}
-        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com:5043}
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
+        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
     ports:
       - "8080:80"
     restart: unless-stopped
@@ -70,8 +70,8 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         APP_DIR: admin
-        VITE_API_URL: ${BACKEND_PUBLIC_URL:-http://admin.xstreamvideos.site:5043}
-        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-http://admin.xstreamvideos.site:5043}
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
+        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
     ports:
       - "8081:80"
     restart: unless-stopped
@@ -85,11 +85,11 @@ services:
     env_file:
       - ../ai/.env
     environment:
-      PORT: 8000
-      BACKEND_URL: https://pornsitebackend.onrender.com:5043
+      PORT: ${AI_GATEWAY_PORT:-8000}
+      BACKEND_URL: https://pornsitebackend.onrender.com
       MODEL_CACHE_DIR: /models
     ports:
-      - "8000:8000"
+      - "${AI_GATEWAY_PORT:-8000}:${AI_GATEWAY_PORT:-8000}"
     volumes:
       - ai-model-cache:/models
     restart: unless-stopped
@@ -103,7 +103,7 @@ services:
     env_file:
       - ../ai/.env
     environment:
-      BACKEND_URL: https://pornsitebackend.onrender.com:5043
+      BACKEND_URL: https://pornsitebackend.onrender.com
       MODEL_CACHE_DIR: /models
     command: ["python", "-m", "workers.worker"]
     depends_on:

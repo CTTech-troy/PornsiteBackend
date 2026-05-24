@@ -23,6 +23,7 @@ import {
   isLoginEmailVerifiedOk,
   issueFreshVerificationEmail,
 } from '../services/emailVerificationService.js';
+import { attributeReferral } from '../services/publisherRevenue.service.js';
 import {
   publicFrontendUrl,
   buildPasswordResetContinueUrl,
@@ -150,7 +151,7 @@ async function _getSupabaseProfile(uid) {
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('avatar, avatar_url, followers, following, coin_balance, email_verified, email, username, role, creator, verified, display_name, full_name, created_at, updated_at, creator_application_ban')
+      .select('avatar, avatar_url, followers, following, coin_balance, email_verified, email, username, role, creator, verified, display_name, created_at, updated_at, creator_application_ban')
       .eq('id', uid)
       .maybeSingle();
     if (error || !data) return {};
@@ -160,7 +161,7 @@ async function _getSupabaseProfile(uid) {
       username:      data.username      ?? null,
       role:          data.role          ?? null,
       displayName:   data.display_name  ?? null,
-      fullName:      data.full_name     ?? null,
+      fullName:      data.display_name  ?? null,
       avatar:        data.avatar        ?? data.avatar_url ?? null,
       avatarUrl:     data.avatar_url    ?? data.avatar ?? null,
       creator:       data.creator === true,
@@ -404,6 +405,20 @@ export async function signup(req, res) {
         success: false,
         message: 'Could not finish registration. Please try again or contact support.',
       });
+    }
+
+    const partnerRef = String(req.body?.partnerRef || req.body?.ref || '').trim();
+    if (partnerRef) {
+      try {
+        await attributeReferral({
+          partnerCode: partnerRef,
+          referralType: 'user',
+          targetUserId: uid,
+          landingPath: '/signup',
+        });
+      } catch (refErr) {
+        console.warn('Publisher referral attribution on signup:', refErr?.message || refErr);
+      }
     }
 
     const tokenResult = await createVerificationToken(uid, emailNorm);

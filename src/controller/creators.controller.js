@@ -5,8 +5,10 @@
 import { fetchPornstars } from './star.controller.js';
 import { xnxxSearch } from './xnxxSearchFallback.js';
 import { supabase, isConfigured } from '../config/supabase.js';
-import { getFirebaseRtdb } from '../config/firebase.js';
 import { fetchPublishedPublicVideos } from '../utils/platformPublicFeed.js';
+import { enqueueSearchDocument } from '../services/searchIndex.service.js';
+import { getTopCreatorsLeaderboard, invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
+import { ensureOfficialCompanyAccount, isOfficialCompanyIdentifier } from '../services/officialCompany.service.js';
 
 const SCRAPER_CACHE = new Map();
 const SCRAPER_CACHE_TTL = 10 * 60 * 1000; // 10 min
@@ -98,7 +100,17 @@ function mapPlatformVideoToCreatorVideo(v, i) {
     likes: v.totalLikes ?? v.likes ?? 0,
     comments: v.totalComments ?? v.comments ?? 0,
     isPremium: v.isPremiumContent === true,
+    isPremiumContent: v.isPremiumContent === true,
     tokenPrice: Number(v.tokenPrice || 0),
+    accessType: v.accessType || v.access_type || (v.isPremiumContent ? 'premium' : 'free'),
+    premiumVisibility: v.premiumVisibility || v.premium_visibility || null,
+    requiresMembership: v.requiresMembership === true || v.requires_membership === true,
+    subscriptionAccess: v.subscriptionAccess === true || v.subscription_access === true,
+    officialCompanyContent: v.officialCompanyContent === true || v.official_company_content === true,
+    source: v.source || 'community',
+    userId: v.userId || v.user_id || null,
+    creatorDisplayName: v.creatorDisplayName || null,
+    creatorAvatarUrl: v.creatorAvatarUrl || null,
   };
 }
 
@@ -106,6 +118,34 @@ async function getPlatformCreatorByIdentifier(identifier) {
   if (!isConfigured() || !supabase) return null;
   const raw = String(identifier || '').trim();
   if (!raw) return null;
+  if (isOfficialCompanyIdentifier(raw)) {
+    const company = await ensureOfficialCompanyAccount();
+    const allVideos = await fetchPublishedPublicVideos({ page: 1, limit: 500 }).catch(() => []);
+    const videos = (Array.isArray(allVideos) ? allVideos : [])
+      .filter((v) => String(v.userId || v.user_id || v.creatorId || v.creator_id || '') === String(company.id))
+      .map(mapPlatformVideoToCreatorVideo);
+    return {
+      id: company.id,
+      slug: company.id,
+      userId: company.id,
+      creatorId: company.id,
+      name: company.displayName,
+      displayName: company.displayName,
+      username: company.username,
+      avatar: company.avatarUrl,
+      avatar_url: company.avatarUrl,
+      bio: company.bio,
+      creatorType: 'channel',
+      verified: true,
+      officialCompany: true,
+      official_company: true,
+      followers: 0,
+      following: 0,
+      videosCount: videos.length,
+      videos,
+      _source: 'official_company',
+    };
+  }
   if (!isUuidLike(raw)) return null;
 
   let { data: creator, error } = await supabase
@@ -347,6 +387,8 @@ async function upsertCreator(userId, profile) {
 	const payload = { user_id: userId, ...profile };
 	const { data, error } = await supabase.from('creators').upsert(payload, { onConflict: 'user_id' }).select().maybeSingle();
 	if (error) throw error;
+  enqueueSearchDocument('creator', userId, 'upsert').catch(() => {});
+  invalidateTopCreatorsCache();
 	return data;
 }
 
@@ -460,55 +502,11 @@ async function getCreatorsByType(type, limit = 100) {
 	});
 }
 
-async function getTopPlatformCreators(limit = 5) {
-	if (!isConfigured()) throw new Error('Supabase not configured');
-
-	const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 20);
-
-	const { data: creators, error } = await supabase
-		.from('creators')
-		.select('user_id, display_name')
-		.limit(100);
-	if (error) throw error;
-	if (!creators || !creators.length) return [];
-
-	// Count each creator's uploaded videos
-	const withCounts = await Promise.all(
-		creators.map(async (c) => {
-			const { count } = await supabase
-				.from('media')
-				.select('id', { count: 'exact', head: true })
-				.eq('user_id', c.user_id);
-			return { ...c, videoCount: count || 0 };
-		})
-	);
-
-	const top = withCounts
-		.sort((a, b) => b.videoCount - a.videoCount)
-		.slice(0, safeLimit);
-
-	// Fetch profile pictures from Firebase RTDB
-	const rtdb = getFirebaseRtdb();
-	const result = await Promise.all(
-		top.map(async (c) => {
-			let avatar = null;
-			if (rtdb) {
-				try {
-					const snap = await rtdb.ref(`users/${c.user_id}`).once('value');
-					const val = snap.val();
-					avatar = val?.avatar || val?.photoURL || null;
-				} catch { /* no avatar; use null, frontend will fall back to dicebear */ }
-			}
-			return {
-				id: c.user_id,
-				name: c.display_name || 'Creator',
-				avatar,
-				videoCount: c.videoCount,
-			};
-		})
-	);
-
-	return result;
+async function getTopPlatformCreators(options = 5) {
+	const normalized = typeof options === 'number' || typeof options === 'string'
+		? { limit: options }
+		: options;
+	return getTopCreatorsLeaderboard(normalized);
 }
 
 export {

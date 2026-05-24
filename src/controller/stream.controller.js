@@ -7,6 +7,7 @@ import {
   assertPremiumPlaybackAccess,
   signPlaybackToken,
 } from '../services/playbackAccess.service.js';
+import { assertAdUnlockForStream } from '../services/vastAdSession.service.js';
 
 function normalizeStreamParam(raw) {
   let id = String(raw ?? '').trim().replace(/\/+$/, '');
@@ -103,6 +104,8 @@ export async function getStreamUrl(req, res) {
     const premiumMeta = await resolvePremiumMeta(id);
     const uid = req.uid || null;
     const playbackTokenQuery = req.query?.playbackToken || req.headers['x-playback-token'];
+    const adUnlockToken = req.query?.adUnlockToken || req.headers['x-ad-unlock-token'];
+    const fingerprint = req.query?.fingerprint || req.headers['x-viewer-fingerprint'] || null;
 
     if (premiumMeta.isPremium) {
       try {
@@ -116,6 +119,20 @@ export async function getStreamUrl(req, res) {
         return res.status(accessErr.statusCode || 403).json({
           error: accessErr.message,
           code: accessErr.code || 'PREMIUM_REQUIRED',
+        });
+      }
+    } else {
+      try {
+        await assertAdUnlockForStream({
+          videoId: id,
+          userId: uid,
+          fingerprint,
+          adUnlockToken,
+        });
+      } catch (accessErr) {
+        return res.status(accessErr.statusCode || 403).json({
+          error: accessErr.message,
+          code: accessErr.code || 'AD_UNLOCK_REQUIRED',
         });
       }
     }
@@ -170,6 +187,7 @@ export async function getStreamUrl(req, res) {
       payload.premium = true;
     }
 
+    res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=30');
     return res.json(payload);
   } catch (err) {
     console.error('getStreamUrl error', err?.message || err);

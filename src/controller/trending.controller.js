@@ -1,58 +1,42 @@
-/**
- * Trending / home list via RapidAPI xnxx-api GET /xn/best?page=
- * (No Pornhub / pornhub2 hosts.)
- */
-import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
-import { isXnxxApiConfigured, fetchXnxxBestPage } from '../utils/xnxxRapidApi.js';
+import { fetchXnxxBestPage, isXnxxApiConfigured } from '../utils/xnxxRapidApi.js';
+import { fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
 import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
+import { loadExternalFeedConfig } from '../services/externalFeedConfig.service.js';
+import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 
-const PER_PAGE_HINT = 18;
-
-/**
- * GET /api/videos/trending?page=1
- */
 export async function getTrending(req, res) {
-  if (!isXnxxApiConfigured()) {
-    return res.status(503).json({
-      success: false,
-      data: [],
-      hasMore: false,
-      error: 'Video feed not configured. Set RAPIDAPI_XNXX_API_KEY in backend .env',
-    });
-  }
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   try {
-    const result = await fetchXnxxBestPage(page);
-    const { ok, items, status, stale, cached } = result;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const creatorCards = await fetchPublishedHomeCards({ page, pagesCount: 1, viewerUid: req.uid || null });
+    const merged = [...creatorCards];
+    const seen = new Set(merged.map((c) => String(c.id)));
 
-    if (!ok) {
-      if (status === 429) {
-        console.warn('[trending] RapidAPI monthly quota exceeded (429). Upgrade plan or wait for reset.');
-      } else {
-        console.warn('[trending] xn/best failed', status, typeof result.raw === 'string' ? result.raw.slice(0, 200) : '');
+    const feedConfig = await loadExternalFeedConfig();
+    if (feedConfig.enabled && isXnxxApiConfigured()) {
+      const { ok, items } = await fetchXnxxBestPage(page);
+      if (ok && items?.length) {
+        for (const card of filterHomeFeedVideos(items)) {
+          const id = String(card.id);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          merged.push(card);
+        }
       }
-      return res.json({
-        success: true,
-        data: [],
-        hasMore: false,
-        _warning: status === 429 ? 'API quota exceeded' : 'Feed temporarily unavailable',
-      });
     }
 
-    const listableItems = filterHomeFeedVideos(items);
-    ingestHomeFeedVideos(listableItems);
-    const hasMore = listableItems.length >= PER_PAGE_HINT;
-    if (!cached && !stale) {
-      console.log('Video API Response: trending (xn/best)', { page, count: listableItems.length, hasMore });
-    }
-    return res.json({ success: true, data: listableItems, hasMore, page, stale: stale || undefined });
-  } catch (err) {
-    console.warn('trending.controller getTrending:', err?.message || err);
+    merged.sort((a, b) => Number(b.views || b.totalViews || 0) - Number(a.views || a.totalViews || 0));
+    const data = merged.slice(0, limit);
+    ingestHomeFeedVideos(data);
+
     return res.json({
       success: true,
-      data: [],
-      hasMore: false,
-      _warning: 'Trending upstream unavailable',
+      data,
+      hasMore: merged.length > limit,
+      page,
     });
+  } catch (err) {
+    console.error('[trending] error:', err?.message || err);
+    return res.status(200).json({ success: false, data: [], hasMore: false, error: err?.message || 'Failed' });
   }
 }

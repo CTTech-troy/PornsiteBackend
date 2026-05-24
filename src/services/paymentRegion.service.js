@@ -31,6 +31,10 @@ export function countryFromRequest(req) {
   return null;
 }
 
+/**
+ * Legacy helper — prefer resolveCheckoutProviders() from paymentOrchestrator.service.js.
+ * Defaults to Flutterwave as primary when no explicit provider is supplied.
+ */
 export function resolvePaymentProvider({
   countryCode = null,
   billingCountry = null,
@@ -42,16 +46,8 @@ export function resolvePaymentProvider({
     return requested === 'flw' ? 'flutterwave' : requested;
   }
 
-  const resolvedCountry =
-    normalizeCountryCode(billingCountry) ||
-    normalizeCountryCode(countryCode) ||
-    normalizeCountryCode(ipCountry);
-
-  if (resolvedCountry && isAfricanCountry(resolvedCountry)) {
-    return 'flutterwave';
-  }
-
-  return 'paystack';
+  // Flutterwave is the default primary gateway across regions.
+  return 'flutterwave';
 }
 
 export function resolveCheckoutCountry({

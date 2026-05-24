@@ -7,9 +7,12 @@ import { fetchXnxxBestPage, isXnxxApiConfigured } from '../utils/xnxxRapidApi.js
 import { fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
 import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
 import { loadExternalFeedConfig } from '../services/externalFeedConfig.service.js';
+import { encodeFeedCursor, decodeFeedCursor } from './videoFeed.controller.js';
 
 const MIN_PAGES = 1;
 const MAX_PAGES = 5;
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 30;
 
 function pushUnique(out, seenIds, card) {
   if (!card) return;
@@ -50,14 +53,16 @@ function interleaveCreatorCards(creatorCards, defaultCards) {
 }
 
 /**
- * GET /api/videos/home-feed?page=1&pages=3
+ * GET /api/videos/home-feed?page=1&pages=1&limit=10
  * page = starting page (1-based)
  * pages = how many /xn/best pages to merge (1-5, default 3)
  */
 export async function getHomeFeed(req, res) {
   try {
     const feedConfig = await loadExternalFeedConfig();
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const cursorPage = decodeFeedCursor(req.query.cursor || null)?.page;
+    const page = cursorPage || Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
     const pagesFromQuery = parseInt(req.query.pages, 10);
     const pagesCount = Math.min(
       MAX_PAGES,
@@ -90,28 +95,34 @@ export async function getHomeFeed(req, res) {
         ? [...creatorCards, ...defaultCards]
         : interleaveCreatorCards(creatorCards, defaultCards),
     );
-    ingestHomeFeedVideos(merged);
+    const sliced = merged.slice(0, limit);
+    ingestHomeFeedVideos(sliced);
 
-    const expectedPageSize = Math.min(200, 20 * pagesCount);
-    const hasMore = merged.length >= expectedPageSize;
+    const expectedPageSize = Math.min(200, Math.max(limit, 20 * pagesCount));
+    const hasMore = merged.length > limit || merged.length >= expectedPageSize;
     const nextPage = page + pagesCount;
+    const nextCursor = hasMore ? encodeFeedCursor(nextPage) : null;
 
     console.log('Video API Response: home-feed', {
       page,
       pagesCount,
-      count: merged.length,
+      count: sliced.length,
       hasMore,
       creatorCount: creatorCards.length,
       defaultCount: defaultCards.length,
+      limit,
       interleaved: true,
     });
 
     return res.json({
       success: true,
-      data: merged,
+      data: sliced,
       hasMore,
       nextPage,
+      nextCursor,
       page,
+      limit,
+      batchSize: sliced.length,
       q: feedConfig.enabled && defaultCards.length > 0 ? 'mixed' : 'creators',
       provider: feedConfig.activeProvider,
     });
@@ -122,6 +133,7 @@ export async function getHomeFeed(req, res) {
       data: [],
       hasMore: false,
       nextPage: Math.max(1, parseInt(req.query.page, 10) || 1) + 1,
+      nextCursor: null,
       page: Math.max(1, parseInt(req.query.page, 10) || 1),
       recoverable: true,
       error: err?.message || 'Failed to load home feed',
