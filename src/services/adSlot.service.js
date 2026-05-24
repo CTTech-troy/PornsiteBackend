@@ -1,6 +1,11 @@
 import { supabase } from '../config/supabase.js';
 import { getPlatformSettingsMap } from './platformSettings.service.js';
-import { getPublicAdConfig, invalidateConfigCache } from './adProvider.service.js';
+import {
+  EXOCLICK_DISPLAY_SCRIPT_URL,
+  EXOCLICK_DISPLAY_ZONE_ID,
+  getPublicAdConfig,
+  invalidateConfigCache,
+} from './adProvider.service.js';
 import { APPROVED_MONETAG_SCRIPT_URL, APPROVED_MONETAG_ZONE_ID } from './safeAdPolicy.service.js';
 
 const SLOT_CACHE_MS = 30_000;
@@ -73,6 +78,7 @@ function providerThirdPartyEnabled(slot, settings, globalThirdPartyEnabled) {
   if (!globalThirdPartyEnabled || slot.third_party_enabled === false) return false;
   const provider = String(slot.provider_id || 'juicyads').toLowerCase();
   if (provider === 'monetag') return isMonetagSlotAllowed(slot, settings);
+  if (provider === 'exoclick') return settings.ad_revenue_enabled !== 'false';
   if (provider === 'juicyads') return settings.juicyads_enabled !== 'false';
   if (provider === 'google_ad_manager') return settings.google_ad_manager_enabled === 'true';
   return false;
@@ -120,7 +126,7 @@ export async function upsertAdSlot(slot, admin = null) {
     height: Math.min(Number(slot.height) || 250, 600),
     size_label: `${Math.min(Number(slot.width) || 300, 336)}x${Math.min(Number(slot.height) || 250, 600)}`,
     provider_type: slot.provider_type || 'mixed',
-    provider_id: ['juicyads', 'monetag', 'google_ad_manager'].includes(String(slot.provider_id || '').toLowerCase())
+    provider_id: ['juicyads', 'monetag', 'exoclick', 'google_ad_manager'].includes(String(slot.provider_id || '').toLowerCase())
       ? String(slot.provider_id).toLowerCase()
       : (slot.provider_id || 'juicyads'),
     zone_id: slot.zone_id || null,
@@ -223,6 +229,10 @@ export async function getPublicSlotsConfig({ page = null, device = 'desktop' } =
 
   const juicyProvider = (providerConfig.providers || []).find((p) => p.slug === 'juicyads');
   const monetagProvider = (providerConfig.providers || []).find((p) => p.slug === 'monetag');
+  const exoClickProvider = (providerConfig.providers || []).find((p) => p.slug === 'exoclick');
+  const exoClickSidebarZone = exoClickProvider?.zones?.find((z) => z.placement === 'sidebar')
+    || exoClickProvider?.zones?.find((z) => z.placement === 'home_sidebar')
+    || null;
   const monetagAllowedDomains = parseJsonList(settings.monetag_allowed_domains, [
     'quge5.com',
     'monetag.com',
@@ -275,6 +285,15 @@ export async function getPublicSlotsConfig({ page = null, device = 'desktop' } =
       allowedPages: parseJsonList(settings.monetag_allowed_pages, ['home', 'video', 'creator', 'feed', 'search', 'live']).map(String),
       allowedSlots: parseJsonList(settings.monetag_allowed_slots, []).map(String),
     },
+    exoClick: {
+      enabled: settings.ad_revenue_enabled !== 'false' && thirdPartyEnabled && Boolean(exoClickProvider),
+      scriptUrl: exoClickProvider?.scriptUrl || EXOCLICK_DISPLAY_SCRIPT_URL,
+      zoneId: exoClickSidebarZone?.zoneId || EXOCLICK_DISPLAY_ZONE_ID,
+      config: exoClickProvider?.config || {},
+      zoneConfig: exoClickSidebarZone?.config || {},
+      width: exoClickSidebarZone?.width || 300,
+      height: exoClickSidebarZone?.height || 250,
+    },
     slots: active.map((s) => ({
       slotKey: s.slot_key,
       name: s.name,
@@ -287,7 +306,12 @@ export async function getPublicSlotsConfig({ page = null, device = 'desktop' } =
       providerId: s.provider_id || 'juicyads',
       zoneId: s.zone_id || (String(s.provider_id || '').toLowerCase() === 'monetag'
         ? (defaultMonetagZoneId(settings, slotKind(s)) || APPROVED_MONETAG_ZONE_ID)
-        : juicyZoneId),
+        : String(s.provider_id || '').toLowerCase() === 'exoclick'
+          ? (exoClickSidebarZone?.zoneId || EXOCLICK_DISPLAY_ZONE_ID)
+          : juicyZoneId),
+      zoneConfig: String(s.provider_id || '').toLowerCase() === 'exoclick'
+        ? { ...(exoClickSidebarZone?.config || {}), ...(s.config || {}) }
+        : (s.config || {}),
       placement: slotPlacementKey(s),
       displayMode: s.display_mode,
       customEnabled: s.custom_enabled && customEnabled,

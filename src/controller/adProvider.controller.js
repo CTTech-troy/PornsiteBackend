@@ -51,6 +51,24 @@ import {
 } from '../services/safeAdPolicy.service.js';
 
 const SAFE_JUICY_SCRIPT_URL = 'https://poweredby.jads.co/js/jads.js';
+const EXOCLICK_DISPLAY_SCRIPT_URL = 'https://a.magsrv.com/ad-provider.js';
+const EXOCLICK_DISPLAY_ZONE_ID = '5933054';
+const EXOCLICK_DISPLAY_CONFIG = {
+  insClass: 'eas6a97888e6',
+  keywords: 'keywords',
+  sub: '123450000',
+  blockAdTypes: '0',
+  exAv: 'name',
+};
+const EXOCLICK_DISPLAY_ZONES = [
+  { placement: 'leaderboard', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'homepage_banner', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'banner', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'feed', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 640, height: 360, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'native_card', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 640, height: 360, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'between_content', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'sidebar', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 300, height: 250, config: EXOCLICK_DISPLAY_CONFIG },
+];
 const SAFE_AD_DOMAINS = [
   'juicyads.com',
   'www.juicyads.com',
@@ -59,6 +77,7 @@ const SAFE_AD_DOMAINS = [
   'jads.co',
   'exoclick.com',
   'magsrv.com',
+  'a.magsrv.com',
   's.magsrv.com',
   'googleads.g.doubleclick.net',
   'securepubads.g.doubleclick.net',
@@ -72,7 +91,7 @@ const SAFE_AD_DOMAINS = [
   'alwingulla.com',
 ];
 const SAFE_AD_DOMAINS_JSON = JSON.stringify(SAFE_AD_DOMAINS);
-const SAFE_PROVIDER_PRIORITY_JSON = JSON.stringify(['monetag', 'juicyads', 'exoclick', 'google_ad_manager']);
+const SAFE_PROVIDER_PRIORITY_JSON = JSON.stringify(['exoclick', 'juicyads', 'monetag', 'google_ad_manager']);
 const BLOCKED_SCRIPT_PATTERN =
   /adserver\.juicyads\.com|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|window\.open|top\.location|betway|casino|popads|popcash|propellerads|onclickads/i;
 const QUGE5_HOST_PATTERN = /quge5\.com/i;
@@ -114,7 +133,7 @@ function defaultZoneDimensions(placement) {
 }
 
 function inferSafeFormat(providerSlug, placement) {
-  if (providerSlug === 'exoclick') return 'vast';
+  if (providerSlug === 'exoclick' && placement === 'video_preroll') return 'vast';
   if (['feed', 'native_card', 'between_content'].includes(String(placement || ''))) return 'native';
   return 'banner';
 }
@@ -258,19 +277,17 @@ function fallbackAdConfig() {
         id: 'exoclick',
         slug: 'exoclick',
         name: 'ExoClick',
-        type: 'vast',
-        allowedFormats: ['vast', 'video'],
+        type: 'display',
+        allowedFormats: ['banner', 'display', 'native'],
         blockedFormats: safePolicy.blockedFormats,
-        scriptUrl: null,
-        config: {},
+        scriptUrl: EXOCLICK_DISPLAY_SCRIPT_URL,
+        config: EXOCLICK_DISPLAY_CONFIG,
         skipAfterSeconds: 5,
         skippable: true,
         adFrequency: 3,
         timeoutMs: 8000,
         retryLimit: 2,
-        zones: [
-          { placement: 'video_preroll', zoneId: '5932212', tagUrl: 'https://s.magsrv.com/v1/vast.php?idzone=5932212', width: null, height: null },
-        ],
+        zones: EXOCLICK_DISPLAY_ZONES,
       },
     ],
     vast: {

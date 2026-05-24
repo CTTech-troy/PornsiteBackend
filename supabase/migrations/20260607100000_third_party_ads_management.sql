@@ -103,7 +103,7 @@ ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO ad_zones (provider_id, placement, zone_id, tag_url, width, height)
 VALUES
-  ('exoclick', 'video_preroll', '5932212', 'https://s.magsrv.com/v1/vast.php?idzone=5932212', NULL, NULL),
+  ('exoclick', 'video_preroll', '5933056', 'https://s.magsrv.com/v1/vast.php?idzone=5933056', NULL, NULL),
   ('juicyads', 'homepage_banner', '1117006', NULL, 468, 60),
   ('juicyads', 'leaderboard', '1117006', NULL, 728, 90),
   ('juicyads', 'sidebar', '1117006', NULL, 300, 250)

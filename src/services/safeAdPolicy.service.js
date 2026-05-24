@@ -64,6 +64,7 @@ const ALLOWED_AD_DOMAINS = [
   'jads.co',
   'exoclick.com',
   'magsrv.com',
+  'a.magsrv.com',
   's.magsrv.com',
   'googleads.g.doubleclick.net',
   'securepubads.g.doubleclick.net',
@@ -117,6 +118,7 @@ export async function getSafeAdPolicySettings() {
   const monetagAllowedDomains = parseDomainList(map.monetag_allowed_domains, MONETAG_SAFE_DOMAINS);
   const allowedDomains = uniqueList([
     ...parseDomainList(map.ad_allowed_domains, ALLOWED_AD_DOMAINS),
+    ...ALLOWED_AD_DOMAINS,
     ...monetagAllowedDomains,
   ]);
   return {
@@ -306,7 +308,7 @@ export function validateProviderFormat(providerSlug, format, settings) {
     }
     return { ok: true };
   }
-  if (slug === 'exoclick' && !['vast', 'video'].includes(fmt)) {
+  if (slug === 'exoclick' && !['banner', 'display', 'native', 'vast', 'video'].includes(fmt)) {
     return { ok: false, reason: 'provider_format_not_allowed' };
   }
   if (slug === 'juicyads' && !['banner', 'display', 'native'].includes(fmt)) {

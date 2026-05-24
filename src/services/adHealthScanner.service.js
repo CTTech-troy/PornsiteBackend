@@ -14,6 +14,7 @@ const ALLOWED_SCRIPT_HOSTS = [
   'js.juicyads.com',
   'poweredby.jads.co',
   'jads.co',
+  'a.magsrv.com',
   's.magsrv.com',
   'magsrv.com',
   'securepubads.g.doubleclick.net',
@@ -27,6 +28,8 @@ const ALLOWED_SCRIPT_HOSTS = [
 ];
 const BLOCKED_SCRIPT_PATTERN =
   /adserver\.juicyads\.com|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|window\.open|top\.location|betway|casino|popads|popcash|propellerads|onclickads/i;
+const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
+const LEGACY_EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
 
 let scanTimer = null;
 
@@ -112,13 +115,19 @@ export async function probeScriptUrl(scriptUrl, timeoutMs = 8000) {
   }
 }
 
+function normalizeExoClickVastUrl(url) {
+  const value = String(url || '').trim();
+  return value === LEGACY_EXOCLICK_VAST_TAG_URL ? EXOCLICK_VAST_TAG_URL : value;
+}
+
 export async function scanProvider(provider, checkType = 'scheduled') {
   let result;
   if (provider.provider_type === 'vast') {
     const zones = await import('./adProvider.service.js').then((m) => m.listZones(provider.id));
-    const tagUrl = zones.find((z) => z.tag_url)?.tag_url
+    const tagUrl = normalizeExoClickVastUrl(zones.find((z) => z.placement === 'video_preroll' && z.tag_url)?.tag_url
+      || zones.find((z) => /\/vast\.php|vast/i.test(String(z.tag_url || '')))?.tag_url
       || process.env.EXOCLICK_VAST_TAG_URL
-      || 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
+      || EXOCLICK_VAST_TAG_URL);
     result = await probeVastTag(tagUrl, provider.timeout_ms || 8000);
   } else if (provider.script_url) {
     result = await probeScriptUrl(provider.script_url, provider.timeout_ms || 8000);

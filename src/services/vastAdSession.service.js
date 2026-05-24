@@ -9,8 +9,15 @@ import { userHasPremiumAccess } from './playbackAccess.service.js';
 
 const SESSION_TTL_SEC = Number(process.env.VAST_AD_SESSION_TTL_SEC) || 600;
 const UNLOCK_TTL_SEC = Number(process.env.VAST_AD_UNLOCK_TTL_SEC) || 600;
+const APPROVED_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
+const LEGACY_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
 const DEFAULT_VAST_TAG = process.env.EXOCLICK_VAST_TAG_URL
-  || 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
+  || APPROVED_DEFAULT_VAST_TAG;
+
+function normalizeVastTagUrl(url) {
+  const value = String(url || '').trim();
+  return value === LEGACY_DEFAULT_VAST_TAG ? APPROVED_DEFAULT_VAST_TAG : value;
+}
 
 function unlockSecret() {
   return process.env.AD_UNLOCK_TOKEN_SECRET || process.env.PLAYBACK_TOKEN_SECRET || process.env.JWT_SECRET || 'change-ad-unlock-secret';
@@ -200,7 +207,7 @@ async function getVastSettings() {
   const cooldownSec = Math.max(0, Number(map.ad_preroll_cooldown_seconds) || 600);
   const probability = clampProbability(map.ad_preroll_probability ?? 1);
 
-  let vastTagUrl = map.exoclick_vast_tag_url || DEFAULT_VAST_TAG;
+  let vastTagUrl = normalizeVastTagUrl(map.exoclick_vast_tag_url || DEFAULT_VAST_TAG);
   let fallbackVastTags = [];
 
   try {
@@ -209,8 +216,8 @@ async function getVastSettings() {
       .flatMap((p) => (p.zones || []).map((z) => z.tag_url).filter(Boolean))
       .filter(Boolean);
     if (tags.length) {
-      vastTagUrl = tags[0];
-      fallbackVastTags = tags.slice(1);
+      vastTagUrl = normalizeVastTagUrl(tags[0]);
+      fallbackVastTags = tags.slice(1).map(normalizeVastTagUrl);
     }
   } catch {
     /* use platform default */
