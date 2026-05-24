@@ -133,13 +133,30 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://admin.xstreamvideos.site',
 ];
 
+const DEVELOPMENT_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+];
+
+function isDeveloperMode() {
+  const env = String(process.env.APP_ENV || process.env.NODE_ENV || '').toLowerCase();
+  return ['development', 'dev', 'local', 'test'].includes(env);
+}
+
 function parseAllowedOrigins(rawOrigins) {
   const envList = typeof rawOrigins === 'string' && rawOrigins.trim() ? rawOrigins.split(',').map((s) => s.trim()).filter(Boolean) : [];
-  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...envList]));
+  const devList = isDeveloperMode() ? DEVELOPMENT_ALLOWED_ORIGINS : [];
+  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...devList, ...envList]));
 }
 
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ORIGINS);
 const allowedOriginsSet = new Set(ALLOWED_ORIGINS);
+console.info('[cors] Allowed origins configured', {
+  mode: isDeveloperMode() ? 'development' : 'production',
+  origins: ALLOWED_ORIGINS,
+});
 
 app.use(cors({
   origin(origin, callback) {

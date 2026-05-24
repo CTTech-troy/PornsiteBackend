@@ -1435,7 +1435,10 @@ async function refundCoins(uid, amount, source) {
   if (!rpc.error) return;
   const { data } = await supabase.from('users').select('coin_balance').eq('id', uid).maybeSingle();
   const next = (Number(data?.coin_balance) || 0) + price;
-  await supabase.from('users').upsert({ id: uid, coin_balance: next }, { onConflict: 'id' }).catch(() => {});
+  const { error } = await supabase.from('users').upsert({ id: uid, coin_balance: next }, { onConflict: 'id' });
+  if (error && !isMissingRelationError(error)) {
+    console.warn('[premium-video] fallback coin refund failed:', error.message || error);
+  }
 }
 
 async function recordGenericPurchase(uid, video, tokenPrice) {

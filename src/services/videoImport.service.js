@@ -94,11 +94,14 @@ export async function setImportCursor(jobId, offset) {
     await upstashRedis.set(`${REDIS_CURSOR_PREFIX}${jobId}`, String(offset));
   }
   if (supabase) {
-    await supabase.from('video_import_batches').insert({
+    const { error } = await supabase.from('video_import_batches').insert({
       job_id: jobId,
       batch_no: Math.floor(offset / 500),
       cursor_offset: offset,
-    }).catch(() => {});
+    });
+    if (error && !isMissingTable(error)) {
+      console.warn('[video-import] cursor checkpoint failed:', error.message || error);
+    }
   }
 }
 

@@ -50,6 +50,24 @@ function isMissingDbFeature(error) {
   );
 }
 
+async function runOptionalPaymentQuery(query, context, fallback = null) {
+  try {
+    const result = await query;
+    if (result?.error) {
+      if (!isMissingDbFeature(result.error)) {
+        console.warn(`[payments] ${context} failed:`, result.error.message || result.error);
+      }
+      return fallback;
+    }
+    return result;
+  } catch (err) {
+    if (!isMissingDbFeature(err)) {
+      console.warn(`[payments] ${context} failed:`, err?.message || err);
+    }
+    return fallback;
+  }
+}
+
 function money(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
@@ -363,19 +381,21 @@ export async function createSecurePaymentSession({
       error: err?.message,
     });
     if (intentId && supabase) {
-      await supabase
-        .from('payment_intents')
-        .update({
-          status: 'failed',
-          metadata: {
-            countryCode: checkoutCountry,
-            gatewayPlan,
-            failure: err?.message,
-          },
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', intentId)
-        .catch(() => {});
+      await runOptionalPaymentQuery(
+        supabase
+          .from('payment_intents')
+          .update({
+            status: 'failed',
+            metadata: {
+              countryCode: checkoutCountry,
+              gatewayPlan,
+              failure: err?.message,
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', intentId),
+        'mark failed payment intent',
+      );
     }
     throw new Error(userFacingPaymentError(err));
   }
@@ -404,25 +424,27 @@ export async function createSecurePaymentSession({
       .eq('id', intentId);
 
     if (process.env.PAYMENT_ENABLE_LEGACY_ORDERS === 'true') {
-      await supabase
-        .from('monetization_orders')
-        .insert({
-          order_key: intentKey,
-          user_id: userId,
-          product_type: product.productType,
-          product_id: product.productId,
-          amount: product.amount,
-          currency: product.currency,
-          provider: checkout.provider,
-          provider_reference: checkout.reference,
-          checkout_url: checkout.checkoutUrl,
-          status: 'checkout_created',
-          idempotency_key: idempotencyKey,
-          metadata: { paymentIntentId: intentId, product },
-        })
-        .select('id')
-        .maybeSingle()
-        .catch(() => null);
+      await runOptionalPaymentQuery(
+        supabase
+          .from('monetization_orders')
+          .insert({
+            order_key: intentKey,
+            user_id: userId,
+            product_type: product.productType,
+            product_id: product.productId,
+            amount: product.amount,
+            currency: product.currency,
+            provider: checkout.provider,
+            provider_reference: checkout.reference,
+            checkout_url: checkout.checkoutUrl,
+            status: 'checkout_created',
+            idempotency_key: idempotencyKey,
+            metadata: { paymentIntentId: intentId, product },
+          })
+          .select('id')
+          .maybeSingle(),
+        'create legacy monetization order',
+      );
     }
   }
 
@@ -829,15 +851,17 @@ async function recordWebhookEvent({ provider, normalized, signatureValid, header
 
 async function markWebhookProcessed(id, status = 'processed', errorMessage = null) {
   if (!supabase || !id) return;
-  await supabase
-    .from('webhook_events')
-    .update({
-      status,
-      error_message: errorMessage,
-      processed_at: new Date().toISOString(),
-    })
-    .eq('id', id)
-    .catch(() => null);
+  await runOptionalPaymentQuery(
+    supabase
+      .from('webhook_events')
+      .update({
+        status,
+        error_message: errorMessage,
+        processed_at: new Date().toISOString(),
+      })
+      .eq('id', id),
+    'mark webhook processed',
+  );
 }
 
 async function insertPaymentTransaction({ intent, provider, reference, amount, currency, verification, event }) {
@@ -860,15 +884,17 @@ async function insertPaymentTransaction({ intent, provider, reference, amount, c
 
 async function markIntentByReference(reference, patch = {}) {
   if (!supabase || !reference) return;
-  await supabase
-    .from('payment_intents')
-    .update({
-      status: patch.status,
-      metadata: patch.metadata || {},
-      updated_at: new Date().toISOString(),
-    })
-    .eq('provider_reference', reference)
-    .catch(() => null);
+  await runOptionalPaymentQuery(
+    supabase
+      .from('payment_intents')
+      .update({
+        status: patch.status,
+        metadata: patch.metadata || {},
+        updated_at: new Date().toISOString(),
+      })
+      .eq('provider_reference', reference),
+    'mark payment intent by reference',
+  );
 }
 
 async function markIntentSuspicious(intent, reason, metadata = {}) {

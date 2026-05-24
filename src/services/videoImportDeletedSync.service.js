@@ -16,12 +16,15 @@ export async function processDeletedUrlRow(jobId, rawUrl) {
   const normalized = normalizeUrl(url);
 
   if (supabase) {
-    await supabase.from('video_import_deleted_urls').insert({
+    const { error: logError } = await supabase.from('video_import_deleted_urls').insert({
       job_id: jobId,
       url,
       normalized_url: normalized,
       processed_at: new Date().toISOString(),
-    }).catch(() => {});
+    });
+    if (logError) {
+      console.warn('[video-import] deleted-url log failed:', logError.message || logError);
+    }
 
     const { data: matches } = await supabase
       .from('tiktok_videos')

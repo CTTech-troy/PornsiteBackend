@@ -41,6 +41,19 @@ function isMissingFeature(err) {
   );
 }
 
+async function runOptionalSupabaseQuery(query, context = 'supabase query', fallback = null, mapResult = (result) => result) {
+  try {
+    const result = await query;
+    if (result?.error) throw result.error;
+    return mapResult(result);
+  } catch (err) {
+    if (!isMissingFeature(err)) {
+      console.warn(`[search-index] ${context} failed:`, err?.message || err);
+    }
+    return fallback;
+  }
+}
+
 function normalizeArray(value) {
   if (Array.isArray(value)) return value.map(String).map((v) => v.trim()).filter(Boolean);
   if (typeof value === 'string') {
@@ -445,11 +458,14 @@ export async function searchPlatformVideos(q, options = {}) {
     : await searchPostgres(q, options);
 
   if (q && supabase) {
-    supabase.from('video_search_queries').insert({
-      query: String(q).slice(0, 200),
-      result_count: result.items.length,
-      user_id: options.userId || null,
-    }).then(() => {}).catch(() => {});
+    runOptionalSupabaseQuery(
+      supabase.from('video_search_queries').insert({
+        query: String(q).slice(0, 200),
+        result_count: result.items.length,
+        user_id: options.userId || null,
+      }),
+      'record search query',
+    );
   }
 
   setCached(key, result);
@@ -566,15 +582,21 @@ export async function indexVideoRow(row) {
   if (doc.deleted || doc.playable === false) {
     await removeVideoFromIndex(doc.id);
     if (supabase) {
-      await supabase.from('tiktok_videos').update({ is_indexed: false }).eq('video_id', doc.id).catch(() => {});
+      await runOptionalSupabaseQuery(
+        supabase.from('tiktok_videos').update({ is_indexed: false }).eq('video_id', doc.id),
+        'mark deleted video unindexed',
+      );
     }
     return { postgres: false, meili: true, deleted: true };
   }
 
   if (supabase) {
-    await supabase.from('tiktok_videos').update({
-      is_indexed: true,
-    }).eq('video_id', doc.id).then(() => {}).catch(() => {});
+    await runOptionalSupabaseQuery(
+      supabase.from('tiktok_videos').update({
+        is_indexed: true,
+      }).eq('video_id', doc.id),
+      'mark video indexed',
+    );
   }
 
   const ms = getMeilisearchClient();
@@ -582,7 +604,10 @@ export async function indexVideoRow(row) {
     await addDocuments(MEILI_INDEXES.videos, [doc]);
     await updateVideoTaxonomies(doc).catch(() => {});
     if (supabase) {
-      await supabase.from('tiktok_videos').update({ meili_synced_at: new Date().toISOString() }).eq('video_id', doc.id).catch(() => {});
+      await runOptionalSupabaseQuery(
+        supabase.from('tiktok_videos').update({ meili_synced_at: new Date().toISOString() }).eq('video_id', doc.id),
+        'mark video meili synced',
+      );
     }
     return { postgres: true, meili: true };
   }
@@ -713,10 +738,13 @@ async function processQueueGroup(type, action, rows) {
     if (docs.length) {
       const indexedIds = docs.map((doc) => doc.id);
       for (let i = 0; i < indexedIds.length; i += MEILI_DOCUMENT_BATCH_SIZE) {
-        await supabase.from('tiktok_videos').update({
-          is_indexed: true,
-          meili_synced_at: new Date().toISOString(),
-        }).in('video_id', indexedIds.slice(i, i + MEILI_DOCUMENT_BATCH_SIZE)).catch(() => {});
+        await runOptionalSupabaseQuery(
+          supabase.from('tiktok_videos').update({
+            is_indexed: true,
+            meili_synced_at: new Date().toISOString(),
+          }).in('video_id', indexedIds.slice(i, i + MEILI_DOCUMENT_BATCH_SIZE)),
+          'mark queued videos indexed',
+        );
       }
     }
     for (const doc of docs) await updateVideoTaxonomies(doc).catch(() => {});
@@ -766,42 +794,53 @@ async function processQueueGroup(type, action, rows) {
 async function markQueueRowsProcessed(rows) {
   const ids = rows.map((row) => row.id).filter(Boolean);
   if (!ids.length) return;
-  await supabase.from('search_index_queue').update({
+  const result = await supabase.from('search_index_queue').update({
     status: 'completed',
     processed_at: new Date().toISOString(),
     error_message: null,
     locked_at: null,
     locked_by: null,
     updated_at: new Date().toISOString(),
-  }).in('id', ids).catch(async (err) => {
-    if (isMissingFeature(err)) {
-      await supabase.from('search_index_queue').update({ processed_at: new Date().toISOString() }).in('id', ids).catch(() => {});
-    }
-  });
+  }).in('id', ids);
+  if (!result?.error) return;
+  if (isMissingFeature(result.error)) {
+    await runOptionalSupabaseQuery(
+      supabase.from('search_index_queue').update({ processed_at: new Date().toISOString() }).in('id', ids),
+      'mark legacy queue rows processed',
+    );
+    return;
+  }
+  console.warn('[search-index] mark queue rows processed failed:', result.error.message || result.error);
 }
 
 async function deadLetterQueueRows(rows, err) {
   const message = String(err?.message || err || 'Index queue item failed').slice(0, 2000);
   for (const row of rows) {
-    await supabase.from('search_index_dead_letters').insert({
-      source: 'queue',
-      source_id: row.id,
-      target: row.object_type || 'video',
-      action: row.action || 'upsert',
-      attempts: Number(row.attempts || 0) + 1,
-      error_message: message,
-      payload: row,
-    }).catch(() => {});
+    await runOptionalSupabaseQuery(
+      supabase.from('search_index_dead_letters').insert({
+        source: 'queue',
+        source_id: row.id,
+        target: row.object_type || 'video',
+        action: row.action || 'upsert',
+        attempts: Number(row.attempts || 0) + 1,
+        error_message: message,
+        payload: row,
+      }),
+      'write queue dead letter',
+    );
   }
   const ids = rows.map((row) => row.id).filter(Boolean);
-  await supabase.from('search_index_queue').update({
-    status: 'dead',
-    dead_letter_at: new Date().toISOString(),
-    error_message: message,
-    locked_at: null,
-    locked_by: null,
-    updated_at: new Date().toISOString(),
-  }).in('id', ids).catch(() => {});
+  await runOptionalSupabaseQuery(
+    supabase.from('search_index_queue').update({
+      status: 'dead',
+      dead_letter_at: new Date().toISOString(),
+      error_message: message,
+      locked_at: null,
+      locked_by: null,
+      updated_at: new Date().toISOString(),
+    }).in('id', ids),
+    'mark queue rows dead',
+  );
 }
 
 async function markQueueRowsFailed(rows, err) {
@@ -810,16 +849,19 @@ async function markQueueRowsFailed(rows, err) {
   const retryRows = rows.filter((row) => !deadRows.includes(row));
   if (deadRows.length) await deadLetterQueueRows(deadRows, err);
   for (const row of retryRows) {
-    await supabase.from('search_index_queue').update({
-      status: 'retrying',
-      attempts: Number(row.attempts || 0) + 1,
-      error_message: message,
-      last_attempt_at: new Date().toISOString(),
-      next_attempt_at: nextRetryAt(Number(row.attempts || 0) + 1),
-      locked_at: null,
-      locked_by: null,
-      updated_at: new Date().toISOString(),
-    }).eq('id', row.id).catch(() => {});
+    await runOptionalSupabaseQuery(
+      supabase.from('search_index_queue').update({
+        status: 'retrying',
+        attempts: Number(row.attempts || 0) + 1,
+        error_message: message,
+        last_attempt_at: new Date().toISOString(),
+        next_attempt_at: nextRetryAt(Number(row.attempts || 0) + 1),
+        locked_at: null,
+        locked_by: null,
+        updated_at: new Date().toISOString(),
+      }).eq('id', row.id),
+      'mark queue row retrying',
+    );
   }
 }
 
@@ -893,18 +935,19 @@ export async function processSearchIndexQueue(batchSize = 100) {
 
 export async function enqueueSearchDocument(type, objectId, action = 'upsert') {
   if (!supabase || !objectId) return;
-  try {
-    await supabase.from('search_index_queue').insert({
-      object_type: type,
-      object_id: String(objectId),
-      video_id: type === 'video' ? String(objectId) : String(objectId),
-      action,
-    });
-  } catch (err) {
-    if (!isMissingFeature(err)) throw err;
-    if (type === 'video') {
-      await supabase.from('search_index_queue').insert({ video_id: String(objectId), action }).catch(() => {});
-    }
+  const { error } = await supabase.from('search_index_queue').insert({
+    object_type: type,
+    object_id: String(objectId),
+    video_id: type === 'video' ? String(objectId) : String(objectId),
+    action,
+  });
+  if (!error) return;
+  if (!isMissingFeature(error)) throw error;
+  if (type === 'video') {
+    await runOptionalSupabaseQuery(
+      supabase.from('search_index_queue').insert({ video_id: String(objectId), action }),
+      'enqueue legacy video search document',
+    );
   }
 }
 
@@ -1084,32 +1127,38 @@ async function markRunIfFinished(runId) {
   const unfinished = batches.filter((batch) => !['completed', 'dead'].includes(batch.status));
   if (unfinished.length) return;
   const dead = batches.filter((batch) => batch.status === 'dead');
-  await supabase.from('search_sync_runs').update({
-    status: dead.length ? 'failed' : 'completed',
-    completed_at: new Date().toISOString(),
-    stats: {
-      totalBatches: batches.length,
-      deadBatches: dead.length,
-      processed: batches.reduce((sum, batch) => sum + Number(batch.processed_count || 0), 0),
-      indexed: batches.reduce((sum, batch) => sum + Number(batch.indexed_count || 0), 0),
-      deleted: batches.reduce((sum, batch) => sum + Number(batch.deleted_count || 0), 0),
-      attempts: batches.reduce((sum, batch) => sum + Number(batch.attempts || 0), 0),
-    },
-  }).eq('id', runId).catch(() => {});
+  await runOptionalSupabaseQuery(
+    supabase.from('search_sync_runs').update({
+      status: dead.length ? 'failed' : 'completed',
+      completed_at: new Date().toISOString(),
+      stats: {
+        totalBatches: batches.length,
+        deadBatches: dead.length,
+        processed: batches.reduce((sum, batch) => sum + Number(batch.processed_count || 0), 0),
+        indexed: batches.reduce((sum, batch) => sum + Number(batch.indexed_count || 0), 0),
+        deleted: batches.reduce((sum, batch) => sum + Number(batch.deleted_count || 0), 0),
+        attempts: batches.reduce((sum, batch) => sum + Number(batch.attempts || 0), 0),
+      },
+    }).eq('id', runId),
+    'mark search sync run finished',
+  );
 }
 
 async function deadLetterBatch(batch, err) {
   const message = String(err?.message || err || 'Indexing batch failed').slice(0, 2000);
-  await supabase.from('search_index_dead_letters').insert({
-    source: 'batch',
-    source_id: batch.id,
-    run_id: batch.run_id,
-    batch_id: batch.id,
-    target: batch.target,
-    attempts: Number(batch.attempts || 0),
-    error_message: message,
-    payload: batch,
-  }).catch(() => {});
+  await runOptionalSupabaseQuery(
+    supabase.from('search_index_dead_letters').insert({
+      source: 'batch',
+      source_id: batch.id,
+      run_id: batch.run_id,
+      batch_id: batch.id,
+      target: batch.target,
+      attempts: Number(batch.attempts || 0),
+      error_message: message,
+      payload: batch,
+    }),
+    'write batch dead letter',
+  );
   await supabase.from('search_index_batches').update({
     status: 'dead',
     locked_at: null,
@@ -1125,7 +1174,10 @@ async function processSearchIndexBatch(batch) {
   if (!isMeilisearchConfigured()) throw new Error('Meilisearch is not configured');
   await ensureAllIndexes();
   if (batch.run_id) {
-    await supabase.from('search_sync_runs').update({ status: 'running' }).eq('id', batch.run_id).catch(() => {});
+    await runOptionalSupabaseQuery(
+      supabase.from('search_sync_runs').update({ status: 'running' }).eq('id', batch.run_id),
+      'mark search sync run running',
+    );
   }
 
   try {
@@ -1147,10 +1199,13 @@ async function processSearchIndexBatch(batch) {
     if (batch.target === 'videos' && rows.length) {
       const ids = rows.map((row) => row.video_id).filter(Boolean);
       for (let i = 0; i < ids.length; i += MEILI_DOCUMENT_BATCH_SIZE) {
-        await supabase.from('tiktok_videos').update({
-          is_indexed: true,
-          meili_synced_at: new Date().toISOString(),
-        }).in('video_id', ids.slice(i, i + MEILI_DOCUMENT_BATCH_SIZE)).catch(() => {});
+        await runOptionalSupabaseQuery(
+          supabase.from('tiktok_videos').update({
+            is_indexed: true,
+            meili_synced_at: new Date().toISOString(),
+          }).in('video_id', ids.slice(i, i + MEILI_DOCUMENT_BATCH_SIZE)),
+          'mark batch videos indexed',
+        );
       }
     }
 
@@ -1189,22 +1244,28 @@ async function processSearchIndexBatch(batch) {
 async function recoverStaleSearchBatches() {
   if (!supabase) return 0;
   const staleBefore = new Date(Date.now() - INDEXING_LOCK_TIMEOUT_MS).toISOString();
-  const { data } = await supabase
-    .from('search_index_batches')
-    .select('*')
-    .eq('status', 'running')
-    .lt('locked_at', staleBefore)
-    .limit(100)
-    .catch(() => ({ data: [] }));
+  const { data } = await runOptionalSupabaseQuery(
+    supabase
+      .from('search_index_batches')
+      .select('*')
+      .eq('status', 'running')
+      .lt('locked_at', staleBefore)
+      .limit(100),
+    'load stale search batches',
+    { data: [] },
+  );
   for (const batch of data || []) {
-    await supabase.from('search_index_batches').update({
-      status: 'retrying',
-      locked_at: null,
-      locked_by: null,
-      next_attempt_at: new Date().toISOString(),
-      error_message: 'Recovered stale indexing lock after worker interruption',
-      updated_at: new Date().toISOString(),
-    }).eq('id', batch.id).catch(() => {});
+    await runOptionalSupabaseQuery(
+      supabase.from('search_index_batches').update({
+        status: 'retrying',
+        locked_at: null,
+        locked_by: null,
+        next_attempt_at: new Date().toISOString(),
+        error_message: 'Recovered stale indexing lock after worker interruption',
+        updated_at: new Date().toISOString(),
+      }).eq('id', batch.id),
+      'recover stale search batch',
+    );
   }
   return (data || []).length;
 }
@@ -1349,17 +1410,50 @@ export async function getSearchAdminStats() {
   let analytics = { recentQueries: [], trending: [] };
   if (supabase) {
     const [pending, failedRows, deadRows, batchRows, runs, recentQueries, trending] = await Promise.all([
-      supabase.from('search_index_queue').select('*', { count: 'exact', head: true }).is('processed_at', null).is('dead_letter_at', null).then((r) => r.count || 0).catch(() => 0),
-      supabase.from('search_index_queue').select('*').is('processed_at', null).not('error_message', 'is', null).is('dead_letter_at', null).order('created_at', { ascending: false }).limit(20).then((r) => r.data || []).catch(() => []),
-      supabase.from('search_index_dead_letters').select('*', { count: 'exact', head: true }).is('resolved_at', null).then((r) => r.count || 0).catch(() => 0),
-      supabase.from('search_index_batches').select('*').order('created_at', { ascending: false }).limit(100).then((r) => r.data || []).catch(() => []),
-      supabase.from('search_sync_runs').select('*').order('started_at', { ascending: false }).limit(10).then((r) => r.data || []).catch(() => []),
-      supabase.from('video_search_queries').select('*').order('created_at', { ascending: false }).limit(20).then((r) => r.data || []).catch(() => []),
+      runOptionalSupabaseQuery(
+        supabase.from('search_index_queue').select('*', { count: 'exact', head: true }).is('processed_at', null).is('dead_letter_at', null),
+        'count pending search queue',
+        0,
+        (r) => r.count || 0,
+      ),
+      runOptionalSupabaseQuery(
+        supabase.from('search_index_queue').select('*').is('processed_at', null).not('error_message', 'is', null).is('dead_letter_at', null).order('created_at', { ascending: false }).limit(20),
+        'load failed search queue rows',
+        [],
+        (r) => r.data || [],
+      ),
+      runOptionalSupabaseQuery(
+        supabase.from('search_index_dead_letters').select('*', { count: 'exact', head: true }).is('resolved_at', null),
+        'count dead search rows',
+        0,
+        (r) => r.count || 0,
+      ),
+      runOptionalSupabaseQuery(
+        supabase.from('search_index_batches').select('*').order('created_at', { ascending: false }).limit(100),
+        'load recent search batches',
+        [],
+        (r) => r.data || [],
+      ),
+      runOptionalSupabaseQuery(
+        supabase.from('search_sync_runs').select('*').order('started_at', { ascending: false }).limit(10),
+        'load recent search runs',
+        [],
+        (r) => r.data || [],
+      ),
+      runOptionalSupabaseQuery(
+        supabase.from('video_search_queries').select('*').order('created_at', { ascending: false }).limit(20),
+        'load recent search queries',
+        [],
+        (r) => r.data || [],
+      ),
       getTrendingSearchQueries(12).catch(() => []),
     ]);
     const statuses = ['pending', 'running', 'retrying', 'completed', 'dead', 'failed'];
-    const statusTotals = await Promise.all(statuses.map((status) => (
-      supabase.from('search_index_batches').select('*', { count: 'exact', head: true }).eq('status', status).then((r) => [status, r.count || 0]).catch(() => [status, 0])
+    const statusTotals = await Promise.all(statuses.map((status) => runOptionalSupabaseQuery(
+      supabase.from('search_index_batches').select('*', { count: 'exact', head: true }).eq('status', status),
+      `count ${status} search batches`,
+      [status, 0],
+      (r) => [status, r.count || 0],
     )));
     const batchCounts = { pending: 0, running: 0, retrying: 0, completed: 0, dead: 0, failed: 0, recent: batchRows.slice(0, 20) };
     for (const [status, count] of statusTotals) batchCounts[status] = count;
