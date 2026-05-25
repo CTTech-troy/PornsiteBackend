@@ -5,6 +5,7 @@ import { getUserDirectoryAggregateStats, safeCount } from '../services/userDirec
 import {
   getAdminSettingsPayload,
   getPublicPlatformSettings,
+  PLATFORM_SETTINGS_CATALOG,
   saveAdminSettings,
   invalidatePlatformSettingsCache,
 } from '../services/platformSettings.service.js';
@@ -19,6 +20,14 @@ function isMissingTable(err) {
 
 async function logAction(adminId, adminName, action, targetType, targetId, details = {}) {
   await writeAuditAction(adminId, adminName, action, targetType, targetId, details);
+}
+
+function getDefaultPublicPlatformSettings() {
+  return Object.fromEntries(
+    PLATFORM_SETTINGS_CATALOG
+      .filter((def) => def.public && !def.sensitive)
+      .map((def) => [def.key, String(def.defaultValue ?? '')]),
+  );
 }
 
 // ── GET /api/admin/system/settings ────────────────────────────────────────────
@@ -37,7 +46,18 @@ export async function getPublicSettings(req, res) {
     const settings = await getPublicPlatformSettings();
     return res.json({ success: true, settings });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    console.warn('[config.public:fallback]', {
+      requestId: req.requestId,
+      message: err?.message || String(err),
+    });
+    res.set('X-API-Fallback', 'config-public');
+    return res.status(200).json({
+      success: false,
+      settings: getDefaultPublicPlatformSettings(),
+      recoverable: true,
+      requestId: req.requestId,
+      message: 'Public settings fallback loaded.',
+    });
   }
 }
 

@@ -273,13 +273,20 @@ router.post('/:id/pause', requireAuth, async (req, res) => {
 
 // GET /api/live?status=live (list active lives)
 router.get('/', async (req, res) => {
-  const status = req.query.status || 'live';
+  const allowedStatuses = new Set(['live', 'paused', 'ended']);
+  const status = allowedStatuses.has(String(req.query.status || 'live')) ? String(req.query.status || 'live') : 'live';
   try {
     const list = await liveCtrl.listLives(status);
     res.json({ ok: true, data: list });
   } catch (err) {
     console.error('live.list error', err && err.message ? err.message : err);
-    res.status(500).json({ ok: false, error: err && err.message ? err.message : String(err) });
+    res.set('X-API-Fallback', 'live-list');
+    res.status(200).json({
+      ok: true,
+      data: [],
+      recoverable: true,
+      requestId: req.requestId,
+    });
   }
 });
 

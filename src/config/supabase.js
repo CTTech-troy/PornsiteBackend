@@ -141,7 +141,8 @@ function getPublicUrl(bucket, path) {
     const { data } = supabase.storage.from(bucket).getPublicUrl(path);
     return data?.publicUrl || null;
   } catch (err) {
-    return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodeURIComponent(path)}`;
+    const publicPath = String(path || '').split('/').map(encodeURIComponent).join('/');
+    return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${publicPath}`;
   }
 }
 

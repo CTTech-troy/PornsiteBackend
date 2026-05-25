@@ -323,7 +323,7 @@ export async function completePremiumVideoPurchase({
   await writePlatformActivityEvent({
     eventType: 'premium_video_purchased',
     title: 'Premium video purchased',
-    message: `${buyer.name} purchased "${video.title || 'video'}"`,
+    message: `${buyerName} purchased "${video.title || 'video'}"`,
     actorId: userId,
     targetType: 'video',
     targetId: videoId,

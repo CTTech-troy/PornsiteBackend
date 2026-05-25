@@ -9,7 +9,6 @@ process.env.DOTENV_CONFIG_QUIET = process.env.DOTENV_CONFIG_QUIET || 'true';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const backendRoot = path.resolve(__dirname, '../..');
 const repoRoot = path.resolve(backendRoot, '..');
-const activeEnv = String(process.env.APP_ENV || process.env.NODE_ENV || 'production').toLowerCase();
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return false;
@@ -18,13 +17,12 @@ function loadEnvFile(filePath) {
 }
 
 const envFiles = [
-  path.join(backendRoot, `.env.${activeEnv}`),
-  path.join(repoRoot, `.env.${activeEnv}`),
   path.join(backendRoot, '.env'),
   path.join(repoRoot, '.env'),
 ];
 
 const loaded = envFiles.filter(loadEnvFile);
+const activeEnv = String(process.env.APP_ENV || process.env.NODE_ENV || 'development').toLowerCase();
 if (loaded.length) {
   console.info(`[env] Loaded ${loaded.length} environment file(s) for ${activeEnv}.`);
 }

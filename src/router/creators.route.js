@@ -25,7 +25,18 @@ router.get('/top', async (req, res) => {
     });
   } catch (err) {
     console.error('creators.top', err?.message || err);
-    return res.status(500).json({ success: false, data: [], message: err?.message || 'Failed' });
+    return res.status(200).json({
+      success: false,
+      data: [],
+      total: 0,
+      page: Math.max(parseInt(req.query.page || '1', 10) || 1, 1),
+      limit: Math.min(Math.max(parseInt(req.query.limit || '5', 10) || 5, 1), 100),
+      cached: false,
+      generatedAt: new Date().toISOString(),
+      source: 'fallback',
+      recoverable: true,
+      requestId: req.requestId,
+    });
   }
 });
 

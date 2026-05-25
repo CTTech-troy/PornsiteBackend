@@ -255,30 +255,56 @@ async function fetchUsersByIds(userIds = []) {
   return new Map(rows.map((row) => [String(row.id), row]));
 }
 
-function applyPublicVideoQueryFilters(query) {
-  return query
-    .is('deleted_at', null)
-    .eq('visibility', 'public')
-    .or('is_live.eq.true,status.in.(published,approved,active)');
+function applyPublicVideoQueryFilters(query, columns = []) {
+  const available = new Set(columns);
+  let next = query;
+  if (available.has('deleted_at')) next = next.is('deleted_at', null);
+  if (available.has('visibility')) next = next.eq('visibility', 'public');
+  if (available.has('status')) {
+    next = next.or('is_live.eq.true,status.in.(published,approved,active)');
+  } else if (available.has('is_live')) {
+    next = next.eq('is_live', true);
+  }
+  return next;
 }
 
 async function fetchPublicVideoRowsForUsers(userIds = []) {
   const rows = [];
   const ids = [...new Set(userIds.filter(Boolean))];
-  const select = 'video_id, user_id, status, visibility, is_live, deleted_at, views_count, likes_count, comments_count, duration_seconds, created_at';
+  const baseColumns = ['video_id', 'user_id', 'status', 'visibility', 'is_live', 'deleted_at', 'views_count', 'likes_count', 'comments_count', 'duration_seconds', 'created_at'];
 
   for (let i = 0; i < ids.length; i += FALLBACK_CHUNK_SIZE) {
     const slice = ids.slice(i, i + FALLBACK_CHUNK_SIZE);
     for (let from = 0; ; from += FALLBACK_PAGE_SIZE) {
-      let query = supabase
-        .from('tiktok_videos')
-        .select(select)
-        .in('user_id', slice)
-        .range(from, from + FALLBACK_PAGE_SIZE - 1);
-      query = applyPublicVideoQueryFilters(query);
-      const { data, error } = await query;
-      if (error) throw error;
-      rows.push(...(data || []));
+      let activeColumns = [...baseColumns];
+      let data = [];
+      let loaded = false;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        let query = supabase
+          .from('tiktok_videos')
+          .select(activeColumns.join(', '))
+          .in('user_id', slice)
+          .range(from, from + FALLBACK_PAGE_SIZE - 1);
+        query = applyPublicVideoQueryFilters(query, activeColumns);
+        const result = await query;
+        if (!result.error) {
+          data = result.data || [];
+          loaded = true;
+          break;
+        }
+        const missing = missingColumnName(result.error);
+        if (!missing || !activeColumns.includes(missing)) {
+          if (isMissingLeaderboardFeature(result.error)) {
+            data = [];
+            loaded = true;
+            break;
+          }
+          throw result.error;
+        }
+        activeColumns = activeColumns.filter((column) => column !== missing);
+      }
+      if (!loaded) data = [];
+      rows.push(...data);
       if (!data || data.length < FALLBACK_PAGE_SIZE) break;
     }
   }

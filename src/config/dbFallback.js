@@ -315,6 +315,100 @@ async function incrementFollow(userId) {
   }
 }
 
+async function getFollowStatus(subscriberUserId, creatorId) {
+  if (!creatorId) throw new Error('missing creatorId');
+  if (isConfigured()) {
+    try {
+      const { data, error } = await supabase.rpc('get_creator_subscription_status', {
+        p_subscriber_user_id: subscriberUserId || null,
+        p_creator_id: creatorId,
+      });
+      if (error) throw error;
+      return {
+        subscribed: data?.subscribed === true,
+        followers: Number(data?.followers || 0),
+        following: Number(data?.following || 0),
+      };
+    } catch (err) {
+      const msg = err?.message || String(err);
+      if (!/Could not find the function|schema cache|PGRST202|42883/i.test(msg)) {
+        console.warn('Supabase getFollowStatus failed, falling back to RTDB:', msg);
+      }
+    }
+  }
+
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) return { subscribed: false, followers: 0, following: 0 };
+  const [subSnap, followerSnap, followingSnap] = await Promise.all([
+    subscriberUserId
+      ? rtdb.ref(`creator_subscriptions/${creatorId}/${subscriberUserId}`).once('value')
+      : Promise.resolve({ exists: () => false }),
+    rtdb.ref(`users/${creatorId}/followers`).once('value'),
+    subscriberUserId
+      ? rtdb.ref(`users/${subscriberUserId}/following`).once('value')
+      : Promise.resolve({ val: () => 0 }),
+  ]);
+  return {
+    subscribed: !!subSnap.exists?.(),
+    followers: Number(followerSnap.val?.() || 0),
+    following: Number(followingSnap.val?.() || 0),
+  };
+}
+
+async function toggleFollowSubscription(subscriberUserId, creatorId) {
+  if (!subscriberUserId) throw new Error('missing subscriber user id');
+  if (!creatorId) throw new Error('missing creator id');
+  if (String(subscriberUserId) === String(creatorId)) {
+    const status = await getFollowStatus(subscriberUserId, creatorId).catch(() => ({ followers: 0, following: 0 }));
+    return { subscribed: false, followers: status.followers || 0, following: status.following || 0 };
+  }
+
+  if (isConfigured()) {
+    try {
+      const { data, error } = await supabase.rpc('toggle_creator_subscription', {
+        p_subscriber_user_id: subscriberUserId,
+        p_creator_id: creatorId,
+      });
+      if (error) throw error;
+      return {
+        subscribed: data?.subscribed === true,
+        followers: Number(data?.followers || 0),
+        following: Number(data?.following || 0),
+      };
+    } catch (err) {
+      const msg = err?.message || String(err);
+      if (!/Could not find the function|schema cache|PGRST202|42883/i.test(msg)) {
+        console.warn('Supabase toggleFollowSubscription failed, falling back to RTDB:', msg);
+      }
+    }
+  }
+
+  const rtdb = getFirebaseRtdb();
+  if (!rtdb) {
+    throw new Error('Follow update failed: Firebase Realtime Database is not available.');
+  }
+
+  const subRef = rtdb.ref(`creator_subscriptions/${creatorId}/${subscriberUserId}`);
+  const tx = await subRef.transaction((current) => {
+    if (current) return null;
+    return { subscriberUserId, creatorId, createdAt: Date.now() };
+  });
+  const subscribed = !!tx.snapshot?.exists?.();
+  const followerRef = rtdb.ref(`users/${creatorId}/followers`);
+  const followingRef = rtdb.ref(`users/${subscriberUserId}/following`);
+
+  const [followersTx, followingTx] = await Promise.all([
+    followerRef.transaction((value) => Math.max(0, (Number(value) || 0) + (subscribed ? 1 : -1))),
+    followingRef.transaction((value) => Math.max(0, (Number(value) || 0) + (subscribed ? 1 : -1))),
+  ]);
+
+  return {
+    subscribed,
+    followers: Number(followersTx.snapshot?.val?.() || 0),
+    following: Number(followingTx.snapshot?.val?.() || 0),
+  };
+}
+
 /**
  * When Supabase is back up, push all data that was written to RTDB (fallback) into Supabase.
  * Call periodically (e.g. every 2 min) from the server.
@@ -436,6 +530,8 @@ export {
   insertMedia, 
   getPublicProfile, 
   incrementFollow, 
+  getFollowStatus,
+  toggleFollowSubscription,
   syncRtdbToSupabase, 
   isSupabaseReachable,
   getMediaByUser 

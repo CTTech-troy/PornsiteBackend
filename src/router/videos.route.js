@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import os from 'os';
 import path from 'path';
@@ -17,9 +18,40 @@ import * as watchHistory from '../controller/watchHistory.controller.js';
 import { listPosts } from '../controller/videos.controller.js';
 import { requireAuth, optionalAuth } from '../middleware/authFirebase.js';
 import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail.js';
+import { createRateLimitStore } from '../middleware/rateLimitStore.js';
 import tiktokVideoRouter from './tiktokVideo.route.js';
 
 const router = express.Router();
+
+const viewLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.VIDEO_VIEW_MAX_PER_MIN || 120),
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRateLimitStore('videos:views'),
+  message: { success: false, message: 'Too many view events. Please slow down.' },
+});
+
+const likeLimiter = rateLimit({
+  windowMs: 10 * 1000,
+  max: Number(process.env.VIDEO_LIKE_MAX_PER_10S || 20),
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRateLimitStore('videos:likes'),
+  message: { success: false, message: 'Too many like actions. Please slow down.' },
+});
+
+const commentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.VIDEO_COMMENT_MAX_PER_MIN || 8),
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRateLimitStore('videos:comments'),
+  message: { success: false, message: 'Too many comments. Please slow down.' },
+});
 
 const diskStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, os.tmpdir()),
@@ -70,7 +102,17 @@ router.get('/', optionalAuth, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('videos feed error', err?.message || err);
-    res.status(500).json({ data: [], total: 0, page: 1, totalPages: 0, hasMore: false, nextCursor: null });
+    res.set('X-API-Fallback', 'videos-feed');
+    res.status(200).json({
+      data: [],
+      total: 0,
+      page: Math.max(1, parseInt(req.query.page, 10) || 1),
+      totalPages: 0,
+      hasMore: false,
+      nextCursor: null,
+      recoverable: true,
+      requestId: req.requestId,
+    });
   }
 });
 
@@ -88,17 +130,19 @@ router.get('/creator-level', requireAuth, videoPublish.getCreatorLevel);
 // Public platform feed and public video reads.
 router.get('/public', optionalAuth, videoPublish.getPublicVideos);
 router.get('/public/:videoId', optionalAuth, videoPublish.getVideoById);
-router.get('/public/:videoId/comments', videoPublish.getComments);
-router.get('/public/:videoId/like-status', optionalAuth, videoPublish.getLikeStatus);
-router.post('/public/:videoId/view', optionalAuth, videoInteractions.recordPublicVideoView);
+router.get('/public/:videoId/comments', videoInteractions.getComments);
+router.get('/public/:videoId/like-status', optionalAuth, videoInteractions.getLikeStatus);
+router.post('/public/:videoId/view', optionalAuth, viewLimiter, videoInteractions.recordPublicVideoView);
 
 // Protected platform mutations.
 router.delete('/public/:videoId', requireAuth, requireVerifiedEmail, videoPublish.deleteVideo);
 router.patch('/public/:videoId', requireAuth, requireVerifiedEmail, videoPublish.updateVideo);
 router.patch('/public/:videoId/draft', requireAuth, requireVerifiedEmail, videoPublish.setVideoDraft);
-router.post('/public/:videoId/like', requireAuth, requireVerifiedEmail, videoPublish.likeVideo);
-router.delete('/public/:videoId/like', requireAuth, requireVerifiedEmail, videoPublish.unlikeVideo);
-router.post('/public/:videoId/comments', requireAuth, requireVerifiedEmail, videoPublish.addComment);
+router.post('/public/:videoId/like', requireAuth, requireVerifiedEmail, likeLimiter, videoInteractions.likeVideo);
+router.delete('/public/:videoId/like', requireAuth, requireVerifiedEmail, likeLimiter, videoInteractions.unlikeVideo);
+router.post('/public/:videoId/comments', requireAuth, requireVerifiedEmail, commentLimiter, videoInteractions.addComment);
+router.patch('/public/:videoId/comments/:commentId', requireAuth, requireVerifiedEmail, commentLimiter, videoInteractions.editComment);
+router.delete('/public/:videoId/comments/:commentId', requireAuth, requireVerifiedEmail, commentLimiter, videoInteractions.removeComment);
 router.post('/public/:videoId/purchase', requireAuth, videoPublish.purchaseVideo);
 router.get('/public/:videoId/purchase-status', requireAuth, videoPublish.getVideoPurchaseStatus);
 router.get('/purchases/library', requireAuth, videoPublish.getPurchasedVideosLibrary);
@@ -132,9 +176,11 @@ router.get('/pornstars', async (req, res) => {
 // Public reads and protected interactions for the unified feed IDs.
 router.get('/:videoId/like-status', optionalAuth, videoInteractions.getLikeStatus);
 router.get('/:videoId/comments', videoInteractions.getComments);
-router.post('/:videoId/like', requireAuth, requireVerifiedEmail, videoInteractions.likeVideo);
-router.delete('/:videoId/like', requireAuth, requireVerifiedEmail, videoInteractions.unlikeVideo);
-router.post('/:videoId/comments', requireAuth, requireVerifiedEmail, videoInteractions.addComment);
+router.post('/:videoId/like', requireAuth, requireVerifiedEmail, likeLimiter, videoInteractions.likeVideo);
+router.delete('/:videoId/like', requireAuth, requireVerifiedEmail, likeLimiter, videoInteractions.unlikeVideo);
+router.post('/:videoId/comments', requireAuth, requireVerifiedEmail, commentLimiter, videoInteractions.addComment);
+router.patch('/:videoId/comments/:commentId', requireAuth, requireVerifiedEmail, commentLimiter, videoInteractions.editComment);
+router.delete('/:videoId/comments/:commentId', requireAuth, requireVerifiedEmail, commentLimiter, videoInteractions.removeComment);
 
 router.get('/:id', optionalAuth, async (req, res) => {
   try {

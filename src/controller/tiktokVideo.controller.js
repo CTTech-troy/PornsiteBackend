@@ -21,6 +21,26 @@ function ensureSupabase() {
   if (!isSupabaseConfigured() || !supabase) throw new Error('Supabase not configured');
 }
 
+function hashValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const salt = process.env.ENGAGEMENT_HASH_SALT || process.env.JWT_SECRET || 'xstream-engagement';
+  return crypto.createHash('sha256').update(`${salt}:${raw}`).digest('hex');
+}
+
+function getClientIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.ip || req.socket?.remoteAddress || '';
+}
+
+function cleanCommentText(value) {
+  return String(value || '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1000);
+}
+
 /**
  * Upload video to Supabase Storage and insert metadata into tiktok_videos.
  * req.uid from Firebase auth; req.file from multer; body: title, description.
@@ -236,20 +256,13 @@ export async function likeVideo(req, res) {
     const { data: video } = await supabase.from(VIDEOS_TABLE).select('likes_count').eq('video_id', videoId).single();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
 
-    const { error: likeError } = await supabase.from(LIKES_TABLE).insert({ video_id: videoId, user_id: uid });
-    if (likeError) {
-      if (likeError.code === '23505') return res.json({ success: true, liked: true, likesCount: video.likes_count });
-      throw likeError;
-    }
-
-    // BUG-04: Atomic increment via RPC
-    const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
+    const { data: result, error } = await supabase.rpc('like_video', {
       p_video_id: videoId,
-      p_stat_name: 'likes_count',
-      p_delta: 1
+      p_user_id: uid,
     });
+    if (error) throw error;
 
-    return res.json({ success: true, liked: true, likesCount: newCount || 0 });
+    return res.json({ success: true, liked: true, likesCount: result?.total_likes || 0, duplicate: result?.duplicate === true });
   } catch (err) {
     console.error('tiktokVideo.likeVideo error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });
@@ -271,20 +284,13 @@ export async function unlikeVideo(req, res) {
     const { data: video } = await supabase.from(VIDEOS_TABLE).select('likes_count').eq('video_id', videoId).single();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
 
-    const { data: deleted } = await supabase.from(LIKES_TABLE).delete().eq('video_id', videoId).eq('user_id', uid).select('video_id');
-    const didRemove = deleted && deleted.length > 0;
+    const { data: result, error } = await supabase.rpc('unlike_video', {
+      p_video_id: videoId,
+      p_user_id: uid,
+    });
+    if (error) throw error;
 
-    if (didRemove) {
-      // BUG-04: Atomic decrement via RPC
-      const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
-        p_video_id: videoId,
-        p_stat_name: 'likes_count',
-        p_delta: -1
-      });
-      return res.json({ success: true, liked: false, likesCount: newCount || 0 });
-    }
-
-    return res.json({ success: true, liked: false, likesCount: Math.max(0, video.likes_count || 0) });
+    return res.json({ success: true, liked: false, likesCount: result?.total_likes || 0, duplicate: result?.duplicate === true });
   } catch (err) {
     console.error('tiktokVideo.unlikeVideo error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });

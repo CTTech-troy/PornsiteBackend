@@ -1,48 +1,162 @@
 import { supabase } from '../config/supabase.js';
 import { incrementProviderStats } from './adProvider.service.js';
 
+const KNOWN_PROVIDER_IDS = new Set(['exoclick', 'juicyads', 'monetag', 'google_ad_manager']);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function isMissingTable(err) {
   const msg = String(err?.message || err?.code || '');
   return msg.includes('does not exist') || err?.code === '42P01' || err?.code === 'PGRST205';
 }
 
-export async function recordMonitoringEvent(event) {
-  if (!supabase) return null;
-  const row = {
-    provider_id: event.providerId || null,
-    zone_id: event.zoneId || null,
-    session_id: event.sessionId || null,
-    video_id: event.videoId || null,
-    user_id: event.userId || null,
-    fingerprint: event.fingerprint || null,
-    event_type: event.eventType,
-    placement: event.placement || null,
-    device_type: event.deviceType || null,
-    browser: event.browser || null,
-    country: event.country || null,
-    revenue_usd: Number(event.revenueUsd || 0),
-    metadata: event.metadata || {},
-  };
+function isInvalidReferenceInput(err) {
+  return err?.code === '22P02' || err?.code === '23503';
+}
 
-  const { data, error } = await supabase.from('ad_monitoring_events').insert(row).select('id').maybeSingle();
-  if (error) {
-    if (isMissingTable(error)) {
-      console.warn('[ad-monitoring] ad_monitoring_events table missing; event accepted without persistence', {
-        eventType: row.event_type,
-        providerId: row.provider_id,
-      });
+function cleanText(value, maxLength = 255) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim().slice(0, maxLength);
+}
+
+function isUuid(value) {
+  return UUID_PATTERN.test(cleanText(value));
+}
+
+function normalizeProviderId(value) {
+  const providerId = cleanText(value, 80).toLowerCase();
+  return KNOWN_PROVIDER_IDS.has(providerId) ? providerId : null;
+}
+
+function isLikelyExternalZoneId(value) {
+  return /^\d{3,}$/.test(cleanText(value, 80));
+}
+
+function normalizeMetadata(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'object' && !Array.isArray(metadata)) return { ...metadata };
+  return { value: metadata };
+}
+
+async function resolveAdZoneRecordId({ providerId, zoneId, placement }) {
+  const cleanZoneId = cleanText(zoneId, 120);
+  if (!supabase || !cleanZoneId) return null;
+  if (isUuid(cleanZoneId)) return cleanZoneId;
+
+  try {
+    let query = supabase
+      .from('ad_zones')
+      .select('id,provider_id,placement,zone_id')
+      .eq('zone_id', cleanZoneId)
+      .limit(10);
+
+    if (providerId) query = query.eq('provider_id', providerId);
+
+    const { data, error } = await query;
+    if (error) {
+      if (!isMissingTable(error)) {
+        console.warn('[ad-monitoring] ad zone lookup failed; storing event without zone relation', {
+          providerId,
+          zoneId: cleanZoneId,
+          message: error.message || String(error),
+          code: error.code,
+        });
+      }
       return null;
     }
-    throw error;
+
+    const zones = data || [];
+    const matched = zones.find((zone) => !placement || zone.placement === placement) || zones[0];
+    return isUuid(matched?.id) ? matched.id : null;
+  } catch (err) {
+    console.warn('[ad-monitoring] ad zone lookup failed; storing event without zone relation', {
+      providerId,
+      zoneId: cleanZoneId,
+      message: err?.message || String(err),
+      code: err?.code,
+    });
+    return null;
+  }
+}
+
+async function insertMonitoringRow(row) {
+  const { data, error } = await supabase.from('ad_monitoring_events').insert(row).select('id').maybeSingle();
+  if (!error) return data?.id || null;
+
+  if (isMissingTable(error)) {
+    console.warn('[ad-monitoring] ad_monitoring_events table missing; event accepted without persistence', {
+      eventType: row.event_type,
+      providerId: row.provider_id,
+    });
+    return null;
   }
 
-  const isImpression = ['impression', 'started', 'request'].includes(event.eventType);
-  const isClick = event.eventType === 'click';
-  const isFailure = ['error', 'timeout', 'empty_vast', 'blocked', 'adblock'].includes(event.eventType);
+  if (isInvalidReferenceInput(error) && (row.provider_id || row.zone_id)) {
+    const retryRow = {
+      ...row,
+      provider_id: null,
+      zone_id: null,
+      metadata: {
+        ...(row.metadata || {}),
+        droppedProviderId: row.provider_id || undefined,
+        droppedZoneRecordId: row.zone_id || undefined,
+        storageWarning: error.code === '22P02' ? 'invalid_uuid_reference' : 'missing_provider_or_zone_reference',
+      },
+    };
+    const retry = await supabase.from('ad_monitoring_events').insert(retryRow).select('id').maybeSingle();
+    if (!retry.error) return retry.data?.id || null;
+    if (isMissingTable(retry.error)) return null;
+    throw retry.error;
+  }
 
-  if (event.providerId) {
+  throw error;
+}
+
+export async function recordMonitoringEvent(event) {
+  if (!supabase) return null;
+  const metadata = normalizeMetadata(event.metadata);
+  const rawProviderId = cleanText(event.providerId, 80);
+  const providerId = normalizeProviderId(rawProviderId);
+  const rawZoneId = cleanText(event.zoneId || metadata.zoneId || metadata.zone_id || '', 120);
+  const externalZoneId = !isUuid(rawZoneId)
+    ? (rawZoneId || (isLikelyExternalZoneId(rawProviderId) ? rawProviderId : ''))
+    : cleanText(metadata.externalZoneId || metadata.external_zone_id || '', 120);
+  const placement = cleanText(event.placement, 120) || null;
+  const zoneRecordId = await resolveAdZoneRecordId({
+    providerId,
+    zoneId: rawZoneId,
+    placement,
+  });
+  const eventMetadata = {
+    ...metadata,
+    ...(externalZoneId ? { externalZoneId } : {}),
+    ...(rawZoneId ? { rawZoneId } : {}),
+    ...(rawProviderId && rawProviderId !== providerId ? { rawProviderId } : {}),
+  };
+  const row = {
+    provider_id: providerId,
+    zone_id: zoneRecordId,
+    session_id: cleanText(event.sessionId, 160) || null,
+    video_id: cleanText(event.videoId, 160) || null,
+    user_id: cleanText(event.userId, 160) || null,
+    fingerprint: cleanText(event.fingerprint, 255) || null,
+    event_type: cleanText(event.eventType, 80) || 'diagnostic',
+    placement,
+    device_type: cleanText(event.deviceType, 80) || null,
+    browser: cleanText(event.browser, 120) || null,
+    country: cleanText(event.country, 8) || null,
+    revenue_usd: Number(event.revenueUsd || 0),
+    metadata: eventMetadata,
+  };
+
+  const id = await insertMonitoringRow(row);
+
+  const isImpression = ['impression', 'started', 'request'].includes(row.event_type);
+  const isClick = row.event_type === 'click';
+  const isFailure = ['error', 'timeout', 'empty_vast', 'blocked', 'adblock'].includes(row.event_type);
+
+  if (providerId) {
     try {
-      await incrementProviderStats(event.providerId, {
+      await incrementProviderStats(providerId, {
         impressions: isImpression ? 1 : 0,
         clicks: isClick ? 1 : 0,
         failed: isFailure ? 1 : 0,
@@ -51,15 +165,15 @@ export async function recordMonitoringEvent(event) {
       });
     } catch (err) {
       console.warn('[ad-monitoring] provider stats update failed; event was accepted', {
-        providerId: event.providerId,
-        eventType: event.eventType,
+        providerId,
+        eventType: row.event_type,
         message: err?.message || String(err),
         code: err?.code,
       });
     }
   }
 
-  return data?.id || null;
+  return id;
 }
 
 export async function getMonitoringOverview(range = '24h') {

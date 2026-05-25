@@ -112,7 +112,14 @@ export async function searchTrendingQueries(req, res) {
     const data = await getTrendingSearchQueries(12);
     return res.json({ success: true, data });
   } catch (err) {
-    return res.status(500).json({ success: false, data: [] });
+    console.warn('[search] trending queries fallback:', err?.message || err);
+    res.set('X-API-Fallback', 'search-trending-queries');
+    return res.status(200).json({
+      success: false,
+      data: [],
+      recoverable: true,
+      requestId: req.requestId,
+    });
   }
 }
 

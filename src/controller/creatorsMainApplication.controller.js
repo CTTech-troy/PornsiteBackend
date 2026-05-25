@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase.js';
 import { sendApplicationDecisionEmail } from '../services/emailService.js';
+import { invalidateCreatorPublicFields } from '../utils/creatorProfile.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const MIN_CREATOR_AGE = 18;
@@ -109,6 +110,18 @@ const normalizeFiles = (files) => {
   return Object.values(files).flat();
 };
 
+function cleanString(value) {
+  return String(value || '').trim();
+}
+
+function firstUrl(...values) {
+  for (const value of values) {
+    const raw = cleanString(value);
+    if (/^https?:\/\//i.test(raw)) return raw;
+  }
+  return null;
+}
+
 const isProfilePictureField = (fieldname) => ['profilePicture', 'profile_picture'].includes(fieldname);
 const isPhotoField = (fieldname) => ['photos', 'uploaded_photos'].includes(fieldname);
 const isVideoField = (fieldname) => ['videos', 'uploaded_videos'].includes(fieldname);
@@ -120,7 +133,8 @@ async function uploadToSupabase(file, userId, type) {
   const { data, error } = await supabase.storage.from(bucket).upload(filename, file.buffer, { contentType: file.mimetype });
   if (error) throw new Error(`Upload failed: ${error.message}`);
   const baseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-  return `${baseUrl}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
+  const publicPath = String(data.path || filename).split('/').map(encodeURIComponent).join('/');
+  return `${baseUrl}/storage/v1/object/public/${bucket}/${publicPath}`;
 }
 
 // ── POST /api/creators-main-application/submit ─────────────────────────────
@@ -162,7 +176,12 @@ export async function submitApplication(req, res) {
     }
 
     // Handle uploads
-    let profilePicture = null;
+    let profilePicture = firstUrl(
+      req.body.profilePictureUrl,
+      req.body.profile_picture_url,
+      req.body.profilePicture,
+      req.body.profile_picture,
+    );
     const uploadedPhotos = [];
     const uploadedVideos = [];
 
@@ -209,6 +228,7 @@ export async function submitApplication(req, res) {
       .single();
 
     if (error) throw error;
+    invalidateCreatorPublicFields(uid);
 
     // Send email
     await sendApplicationDecisionEmail({
@@ -285,7 +305,12 @@ export async function reapplyApplication(req, res) {
     }
 
     // Handle uploads
-    let profilePicture = null;
+    let profilePicture = firstUrl(
+      req.body.profilePictureUrl,
+      req.body.profile_picture_url,
+      req.body.profilePicture,
+      req.body.profile_picture,
+    );
     const uploadedPhotos = [];
     const uploadedVideos = [];
 
@@ -332,6 +357,7 @@ export async function reapplyApplication(req, res) {
       .single();
 
     if (error) throw error;
+    invalidateCreatorPublicFields(uid);
 
     // Send email
     await sendApplicationDecisionEmail({
@@ -446,6 +472,7 @@ export async function approveApplication(req, res) {
         application_id: app.id,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'user_id' });
+    invalidateCreatorPublicFields(app.user_id);
 
     // Send email
     await sendApplicationDecisionEmail({
@@ -496,6 +523,7 @@ export async function rejectApplication(req, res) {
       .from('users')
       .update({ creator: false, verified: 'rejected', role: 'user' })
       .eq('id', app.user_id);
+    invalidateCreatorPublicFields(app.user_id);
 
     // Send email
     await sendApplicationDecisionEmail({

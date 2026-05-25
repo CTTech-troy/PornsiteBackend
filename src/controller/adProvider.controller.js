@@ -357,7 +357,7 @@ export async function postAdMonitoringEvent(req, res) {
       videoId: body.videoId,
       userId: req.user?.id || body.userId,
       fingerprint: body.fingerprint,
-      eventType: body.eventType || 'diagnostic',
+      eventType: body.eventType || body.type || body.event || 'diagnostic',
       placement: body.placement,
       deviceType: body.deviceType,
       browser: body.browser,

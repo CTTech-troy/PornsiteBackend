@@ -7,6 +7,8 @@ import {
 import { supabase } from '../config/supabase.js';
 import { validateAdForRender } from '../services/safeAdPolicy.service.js';
 
+const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
+
 const PLACEMENT_BY_SLOT = {
   home_sidebar: 'sidebar',
   video_sidebar: 'sidebar',
@@ -26,6 +28,44 @@ function safeFormatForAd(ad, placement) {
   if (placement === 'feed' || raw.includes('native')) return 'native';
   if (raw.includes('vast') || raw.includes('video_preroll')) return 'vast';
   return 'banner';
+}
+
+function sendPublicAdFallback(req, res, payload, err) {
+  console.warn('[ads:public:fallback]', {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.originalUrl,
+    message: err?.message || String(err),
+    code: err?.code,
+  });
+  res.setHeader('X-Ad-Fallback', 'true');
+  return res.status(200).json({
+    ...payload,
+    recoverable: true,
+    requestId: req.requestId,
+  });
+}
+
+export async function getNextAd(req, res) {
+  try {
+    const placement = 'video_preroll';
+    const ad = {
+      id: 'exoclick-vast-5933056',
+      type: 'vast',
+      sourceType: 'vast',
+      placement,
+      url: null,
+      vastTagUrl: EXOCLICK_VAST_TAG_URL,
+      skipAfterSeconds: 5,
+      durationSeconds: 0,
+      clickUrl: null,
+      provider: 'exoclick',
+      zoneId: '5933056',
+    };
+    return res.json({ success: true, ad });
+  } catch (err) {
+    return sendPublicAdFallback(req, res, { success: true, ad: null }, err);
+  }
 }
 
 export async function getPlacementAd(req, res) {
@@ -52,7 +92,7 @@ export async function getPlacementAd(req, res) {
     const pool = placement === 'sidebar' ? await getSidebarPoolMeta() : null;
     return res.json({ ad, pool, rejected });
   } catch (err) {
-    return res.status(500).json({ error: err.message || 'Failed to load ad' });
+    return sendPublicAdFallback(req, res, { ad: null, pool: null, rejected: null }, err);
   }
 }
 
@@ -82,7 +122,12 @@ export async function getSlotAd(req, res) {
     const pool = await getSidebarPoolMeta();
     return res.json({ plan, customAd, pool, rejected });
   } catch (err) {
-    return res.status(500).json({ error: err.message || 'Failed to resolve slot' });
+    return sendPublicAdFallback(req, res, {
+      plan: { type: 'none' },
+      customAd: null,
+      pool: null,
+      rejected: null,
+    }, err);
   }
 }
 

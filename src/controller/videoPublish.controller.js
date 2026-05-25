@@ -136,8 +136,9 @@ function extractMissingColumnName(err) {
 
 async function insertPublishedVideoRow(baseRow, durationSeconds) {
   const attempts = [
-    { ...baseRow, duration: durationSeconds },
+    { ...baseRow, duration: durationSeconds, duration_seconds: durationSeconds },
     { ...baseRow, duration_seconds: durationSeconds },
+    { ...baseRow, duration: durationSeconds },
     { ...baseRow },
   ];
 
@@ -432,9 +433,12 @@ export async function prepareUpload(req, res) {
 
     let thumbnailUploadUrl = null;
     if (thumbPath) {
-      const { data: thumbData } = await supabase.storage
+      const { data: thumbData, error: thumbError } = await supabase.storage
         .from(IMAGE_BUCKET)
         .createSignedUploadUrl(thumbPath);
+      if (thumbError) {
+        return res.status(500).json({ success: false, message: thumbError.message || 'Failed to create thumbnail upload URL' });
+      }
       if (thumbData) thumbnailUploadUrl = thumbData.signedUrl;
     }
 
@@ -473,7 +477,7 @@ export async function publishFromStoragePath(req, res) {
     const title                  = normalizeTitle(rawTitle || '');
     const description            = normalizeDescription(rawDesc || '');
     const mainOrientationCategory = normalizeMainOrientationCategory(rawCat);
-    const tags                   = normalizeTags(typeof rawTags === 'string'
+    let tags                     = normalizeTags(typeof rawTags === 'string'
       ? (() => { try { return JSON.parse(rawTags); } catch { return rawTags; } })()
       : rawTags);
     const allowPeopleToComment   = parseBodyBoolean(rawAllow, true);
@@ -483,8 +487,7 @@ export async function publishFromStoragePath(req, res) {
 
     if (!mainOrientationCategory)
       return res.status(400).json({ success: false, message: 'Main category is required' });
-    if (!Array.isArray(tags) || tags.length < 1)
-      return res.status(400).json({ success: false, message: 'At least one tag is required' });
+    if (!Array.isArray(tags) || tags.length < 1) tags = [mainOrientationCategory.toLowerCase().replace(/\s+/g, '-')];
 
     if (isPremiumContent) {
       const gate = await checkPremiumUploadGate(uid);
@@ -506,7 +509,7 @@ export async function publishFromStoragePath(req, res) {
     const videoUrl     = getPublicUrl(VIDEO_BUCKET, videoPath)
       || (baseUrl ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${videoPath.split('/').map(encodeURIComponent).join('/')}` : null);
     const thumbnailUrl = thumbnailPath
-      ? (getPublicUrl(IMAGE_BUCKET, thumbnailPath) || (baseUrl ? `${baseUrl}/storage/v1/object/public/${IMAGE_BUCKET}/${thumbnailPath}` : null))
+      ? (getPublicUrl(IMAGE_BUCKET, thumbnailPath) || (baseUrl ? `${baseUrl}/storage/v1/object/public/${IMAGE_BUCKET}/${String(thumbnailPath).split('/').map(encodeURIComponent).join('/')}` : null))
       : null;
 
     if (!videoUrl) return res.status(500).json({ success: false, message: 'Could not resolve video URL' });
@@ -591,7 +594,7 @@ export async function uploadAndPublish(req, res) {
     const description = normalizeDescription(req.body?.description || '');
     const consentGiven = req.body?.consentGiven === true || req.body?.consentGiven === 'true';
     const mainOrientationCategory = normalizeMainOrientationCategory(req.body?.mainOrientationCategory || req.body?.category);
-    const tags = normalizeTags(req.body?.tags ? (() => {
+    let tags = normalizeTags(req.body?.tags ? (() => {
       try { return JSON.parse(req.body.tags); } catch { return req.body.tags; }
     })() : []);
     const allowPeopleToComment = parseBodyBoolean(req.body?.allowPeopleToComment, true);
@@ -599,7 +602,7 @@ export async function uploadAndPublish(req, res) {
     const tokenPrice           = isPremiumContent ? Math.max(0, parseInt(String(req.body?.tokenPrice || '0'), 10) || 0) : 0;
 
     if (!mainOrientationCategory) return res.status(400).json({ success: false, message: 'Main category is required' });
-    if (!Array.isArray(tags) || tags.length < 1) return res.status(400).json({ success: false, message: 'At least one tag is required' });
+    if (!Array.isArray(tags) || tags.length < 1) tags = [mainOrientationCategory.toLowerCase().replace(/\s+/g, '-')];
     if (title.length > MAX_UPLOAD_TITLE_LENGTH) return res.status(400).json({ success: false, message: `Title must be at most ${MAX_UPLOAD_TITLE_LENGTH} characters` });
     if (description.length > MAX_UPLOAD_DESCRIPTION_LENGTH) return res.status(400).json({ success: false, message: `Description must be at most ${MAX_UPLOAD_DESCRIPTION_LENGTH} characters` });
     if (!file) return res.status(400).json({ success: false, message: 'Video file is required' });
@@ -646,7 +649,7 @@ export async function uploadAndPublish(req, res) {
       const thumbPath  = `${uid}/${timestamp}-thumb.jpg`;
       const thumbData  = await uploadFileToBucket(IMAGE_BUCKET, thumbPath, thumbFile, thumbFile.mimetype || 'image/jpeg');
       thumbnailUrl     = getPublicUrl(IMAGE_BUCKET, thumbData.path)
-        || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${IMAGE_BUCKET}/${thumbPath}`;
+        || `${process.env.SUPABASE_URL?.replace(/\/$/, '')}/storage/v1/object/public/${IMAGE_BUCKET}/${thumbPath.split('/').map(encodeURIComponent).join('/')}`;
     }
 
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
@@ -728,7 +731,18 @@ export async function getPublicVideos(req, res) {
     });
   } catch (err) {
     console.error('videoPublish.getPublicVideos error', err?.message || err);
-    return res.status(500).json({ success: false, data: [], message: err?.message || 'Failed' });
+    res.set('X-API-Fallback', 'videos-public');
+    return res.status(200).json({
+      success: false,
+      data: [],
+      page: Math.max(1, parseInt(req.query?.page || '1', 10) || 1),
+      limit: Math.min(Math.max(parseInt(req.query?.limit || '20', 10) || 20, 1), 50),
+      hasMore: false,
+      nextPage: null,
+      recoverable: true,
+      requestId: req.requestId,
+      message: 'Video feed is temporarily unavailable.',
+    });
   }
 }
 

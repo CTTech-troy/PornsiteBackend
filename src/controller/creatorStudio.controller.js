@@ -64,7 +64,7 @@ function extractMissingColumnName(err) {
 }
 
 function emptyStudioEarnings() {
-  return { total: 0, available: 0, pending: 0, bySource: [], rows: [] };
+  return { total: 0, available: 0, pending: 0, processing: 0, withdrawn: 0, bySource: [], rows: [] };
 }
 
 function studioSupabaseReady() {
@@ -234,7 +234,75 @@ function videosRef() {
   return rtdb ? rtdb.ref('videos') : null;
 }
 
-async function getCreatorVideos(uid) {
+function toMillis(value) {
+  if (value == null || value === '') return Date.now();
+  if (typeof value === 'number' && Number.isFinite(value)) return value > 9999999999 ? value : value * 1000;
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? Date.now() : parsed;
+}
+
+function formatDurationSeconds(seconds) {
+  const n = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(n / 3600);
+  const m = Math.floor((n % 3600) / 60);
+  const s = n % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function mapSupabaseCreatorVideo(row = {}) {
+  const videoId = String(row.video_id || row.id || '').trim();
+  if (!videoId) return null;
+  const durationSeconds = Number(row.duration_seconds ?? row.duration ?? row.duration_sec ?? 0) || 0;
+  const tokenPrice = Number(row.token_price ?? row.coin_price ?? 0) || 0;
+  const accessType = String(row.access_type || '').trim().toLowerCase().replace(/-/g, '_');
+  const isPremiumContent =
+    row.is_premium_content === true ||
+    tokenPrice > 0 ||
+    ['premium', 'members_only', 'coin_unlock'].includes(accessType);
+  return {
+    videoId,
+    userId: row.user_id,
+    title: row.title || 'Untitled',
+    description: row.description || '',
+    totalViews: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
+    views: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
+    totalLikes: Number(row.likes_count ?? row.totalLikes ?? 0) || 0,
+    totalComments: Number(row.comments_count ?? row.totalComments ?? 0) || 0,
+    thumbnailUrl: row.thumbnail_url || row.thumbnailUrl || row.thumbnail || null,
+    durationSeconds,
+    duration: formatDurationSeconds(durationSeconds),
+    isPremiumContent,
+    tokenPrice,
+    isLive: row.is_live === true || row.status === 'published',
+    status: row.status || (row.is_live === true ? 'published' : 'draft'),
+    createdAt: toMillis(row.created_at || row.createdAt || row.updated_at || row.updatedAt),
+    source: 'supabase',
+  };
+}
+
+async function getSupabaseCreatorVideos(uid) {
+  if (!uid || !studioSupabaseReady()) return [];
+  try {
+    const { data, error } = await supabase
+      .from('tiktok_videos')
+      .select('*')
+      .eq('user_id', uid)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (isMissingTable(error) || isMissingColumn(error)) return [];
+      console.warn('[studio] creator videos supabase fallback:', error.message || error);
+      return [];
+    }
+    return (data || []).map(mapSupabaseCreatorVideo).filter(Boolean);
+  } catch (err) {
+    console.warn('[studio] creator videos supabase error:', err?.message || err);
+    return [];
+  }
+}
+
+async function getLegacyCreatorVideos(uid) {
   try {
     const ref = videosRef();
     if (!ref) return [];
@@ -247,6 +315,22 @@ async function getCreatorVideos(uid) {
   } catch {
     return [];
   }
+}
+
+async function getCreatorVideos(uid) {
+  const [supabaseVideos, legacyVideos] = await Promise.all([
+    getSupabaseCreatorVideos(uid),
+    getLegacyCreatorVideos(uid),
+  ]);
+  const seen = new Set();
+  const merged = [];
+  for (const video of [...supabaseVideos, ...legacyVideos]) {
+    const key = String(video?.videoId || video?.id || '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(video);
+  }
+  return merged;
 }
 
 function parsePagination(query = {}, { defaultLimit = 20, maxLimit = 100 } = {}) {
@@ -320,28 +404,83 @@ function groupEarningsByDay(rows, days) {
   }));
 }
 
+function premiumPurchaseToEarningRow(row = {}) {
+  const id = String(row.id || '').trim();
+  if (!id) return null;
+  const amount = Number(row.creator_revenue_usd ?? row.creatorRevenueUsd ?? 0) || 0;
+  if (amount <= 0) return null;
+  return {
+    id: `premium-${id}`,
+    creator_id: row.creator_id,
+    amount_usd: amount,
+    gross_usd: Number(row.purchase_amount_usd ?? row.purchaseAmountUsd ?? amount) || amount,
+    platform_fee_usd: Number(row.platform_revenue_usd ?? row.platformRevenueUsd ?? 0) || 0,
+    source: 'video_purchase',
+    reference_id: `premium_purchase:${id}`,
+    created_at: row.purchased_at || row.created_at || new Date().toISOString(),
+    metadata: { videoId: row.video_id || null, fallback: 'premium_video_purchases' },
+  };
+}
+
+function mergePremiumPurchaseEarnings(earnings = [], purchases = []) {
+  const rows = dedupeEarningRows(earnings || []);
+  const refs = new Set(rows.map((row) => row.reference_id ? String(row.reference_id) : '').filter(Boolean));
+  for (const purchase of purchases || []) {
+    const row = premiumPurchaseToEarningRow(purchase);
+    if (!row || refs.has(row.reference_id)) continue;
+    refs.add(row.reference_id);
+    rows.push(row);
+  }
+  return dedupeEarningRows(rows);
+}
+
+async function getCreatorEarningsRows(uid, { since = null, order = 'desc' } = {}) {
+  if (!studioSupabaseReady()) return [];
+  let earningsQuery = supabase
+    .from('creator_earnings')
+    .select('*')
+    .eq('creator_id', uid);
+  let purchaseQuery = supabase
+    .from('premium_video_purchases')
+    .select('id, creator_id, video_id, purchase_amount_usd, creator_revenue_usd, platform_revenue_usd, purchased_at, created_at')
+    .eq('creator_id', uid);
+  if (since) {
+    const iso = since instanceof Date ? since.toISOString() : String(since);
+    earningsQuery = earningsQuery.gte('created_at', iso);
+    purchaseQuery = purchaseQuery.gte('purchased_at', iso);
+  }
+  earningsQuery = earningsQuery.order('created_at', { ascending: order === 'asc' });
+  purchaseQuery = purchaseQuery.order('purchased_at', { ascending: order === 'asc' });
+
+  const [earningsRes, purchasesRes] = await Promise.all([
+    safeStudioQuery('studio creator earnings', earningsQuery, { data: [], error: null, degraded: true }),
+    safeStudioQuery('studio premium purchase earnings fallback', purchaseQuery, { data: [], error: null, degraded: true }),
+  ]);
+  if (earningsRes.error && !isMissingTable(earningsRes.error) && !isMissingColumn(earningsRes.error)) throw earningsRes.error;
+  const earnings = earningsRes.error ? [] : (earningsRes.data || []);
+  const purchases = purchasesRes?.error && (isMissingTable(purchasesRes.error) || isMissingColumn(purchasesRes.error))
+    ? []
+    : (purchasesRes?.data || []);
+  return mergePremiumPurchaseEarnings(earnings, purchases);
+}
+
 // ── GET /api/studio/overview ─────────────────────────────────────────────────
 
 export async function getOverview(req, res) {
   try {
     const uid = req.uid;
 
-    const [videos, userRes, earningsRes] = await Promise.all([
+    const [videos, userRes, earnings] = await Promise.all([
       getCreatorVideos(uid),
       safeStudioQuery(
         'studio overview user profile',
         () => supabase.from('users').select('followers, following, coin_balance').eq('id', uid).maybeSingle(),
         { data: null }
       ),
-      safeStudioQuery(
-        'studio overview earnings',
-        () => supabase.from('creator_earnings').select('amount_usd, source, created_at, reference_id').eq('creator_id', uid),
-        { data: [] }
-      ),
+      getCreatorEarningsRows(uid),
     ]);
 
     const user     = userRes?.data || {};
-    const earnings = earningsRes?.data || [];
     const followers = Number(user.followers) || 0;
 
     const totalViews  = videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views) || 0), 0);
@@ -366,6 +505,14 @@ export async function getOverview(req, res) {
       payoutBalances.total = sumEarningRowsUsd(earnings);
       payoutBalances.available = payoutBalances.total;
     }
+    const computedEarningsTotal = sumEarningRowsUsd(earnings);
+    if (computedEarningsTotal > Number(payoutBalances.total || 0)) {
+      const committed = Number(payoutBalances.pending || 0)
+        + Number(payoutBalances.processing || 0)
+        + Number(payoutBalances.withdrawn || 0);
+      payoutBalances.total = computedEarningsTotal;
+      payoutBalances.available = Math.max(0, computedEarningsTotal - committed);
+    }
 
     const totalEarnings = Number(payoutBalances.total || 0);
 
@@ -382,6 +529,8 @@ export async function getOverview(req, res) {
         views:      Number(v.totalViews ?? v.views) || 0,
         likes:      Number(v.totalLikes) || 0,
         thumbnail:  v.thumbnailUrl || v.thumbnail || null,
+        durationSeconds: Number(v.durationSeconds ?? v.duration_seconds ?? 0) || 0,
+        duration: formatDurationSeconds(v.durationSeconds ?? v.duration_seconds ?? v.duration ?? 0),
         isPremium:  Boolean(v.isPremiumContent),
         tokenPrice: Number(v.tokenPrice) || 0,
         createdAt:  v.createdAt,
@@ -427,28 +576,24 @@ export async function getAnalytics(req, res) {
     const since  = new Date();
     since.setDate(since.getDate() - days);
 
-    const [videos, userRes, earningsRes] = await Promise.all([
+    const [videos, userRes, earningsRows] = await Promise.all([
       getCreatorVideos(uid),
       safeStudioQuery(
         'studio analytics user profile',
         () => supabase.from('users').select('followers').eq('id', uid).maybeSingle(),
         { data: null }
       ),
-      safeStudioQuery(
-        'studio analytics earnings',
-        () => supabase.from('creator_earnings').select('amount_usd, source, created_at, reference_id').eq('creator_id', uid).gte('created_at', since.toISOString()).order('created_at', { ascending: true }),
-        { data: [] }
-      ),
+      getCreatorEarningsRows(uid, { since, order: 'asc' }),
     ]);
 
-    const earningsRows = dedupeEarningRows(earningsRes?.data || []);
+    const earningsRowsDeduped = dedupeEarningRows(earningsRows || []);
     const followers    = Number(userRes?.data?.followers) || 0;
     const totalViews   = videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views) || 0), 0);
     const totalLikes   = videos.reduce((s, v) => s + (Number(v.totalLikes) || 0), 0);
 
-    const earningsTrend  = groupEarningsByDay(earningsRows, days);
+    const earningsTrend  = groupEarningsByDay(earningsRowsDeduped, days);
 
-    const sourceMap = groupEarningRowsBySource(earningsRows);
+    const sourceMap = groupEarningRowsBySource(earningsRowsDeduped);
     const earningsBySource = Object.entries(sourceMap).map(([name, value]) => ({
       name:  name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
       value: parseFloat(value.toFixed(2)),
@@ -464,7 +609,7 @@ export async function getAnalytics(req, res) {
         likes: Number(v.totalLikes) || 0,
       }));
 
-    const periodEarnings = sumEarningRowsUsd(earningsRows);
+    const periodEarnings = sumEarningRowsUsd(earningsRowsDeduped);
     const level   = computeLevel(followers, totalViews);
     const lvlIdx  = CREATOR_LEVELS.indexOf(level);
     const nextLvl = lvlIdx < CREATOR_LEVELS.length - 1 ? CREATOR_LEVELS[lvlIdx + 1] : null;
@@ -511,6 +656,9 @@ export async function getVideos(req, res) {
         likes:          Number(v.totalLikes) || 0,
         comments:       Number(v.totalComments) || 0,
         thumbnail:      v.thumbnailUrl || v.thumbnail || null,
+        thumbnailUrl:   v.thumbnailUrl || v.thumbnail || null,
+        durationSeconds: Number(v.durationSeconds ?? v.duration_seconds ?? 0) || 0,
+        duration:       formatDurationSeconds(v.durationSeconds ?? v.duration_seconds ?? v.duration ?? 0),
         isPremium:      Boolean(v.isPremiumContent),
         tokenPrice:     Number(v.tokenPrice) || 0,
         isPublished:    v.isLive !== false,
@@ -534,12 +682,8 @@ export async function getEarnings(req, res) {
     const uid = req.uid;
     if (!studioSupabaseReady()) return res.json({ success: true, data: emptyStudioEarnings(), degraded: true });
 
-    const [earningsRes, pendingRes] = await Promise.all([
-      safeStudioQuery(
-        'studio earnings rows',
-        supabase.from('creator_earnings').select('*').eq('creator_id', uid).order('created_at', { ascending: false }),
-        { data: [], error: null, degraded: true }
-      ),
+    const [earningsRows, pendingRes] = await Promise.all([
+      getCreatorEarningsRows(uid),
       safeStudioQuery(
         'studio earnings pending payouts',
         supabase.from('creator_payout_requests').select('amount_usd, status').eq('creator_id', uid).in('status', ['pending', 'approved', 'processing', 'paid', 'completed']),
@@ -547,14 +691,7 @@ export async function getEarnings(req, res) {
       ),
     ]);
 
-    if (earningsRes.error) {
-      if (isMissingTable(earningsRes.error)) {
-        return res.json({ success: true, data: emptyStudioEarnings() });
-      }
-      throw earningsRes.error;
-    }
-
-    const earnings = dedupeEarningRows(earningsRes?.data || []);
+    const earnings = dedupeEarningRows(earningsRows || []);
     const pending  = pendingRes?.error && (isMissingTable(pendingRes.error) || isMissingColumn(pendingRes.error))
       ? []
       : (pendingRes?.data || []);
@@ -573,6 +710,13 @@ export async function getEarnings(req, res) {
     try {
       balances = await getCreatorPayoutBalances(uid);
     } catch (_) {}
+    if (total > Number(balances.total || 0)) {
+      balances = {
+        ...balances,
+        total,
+        available: Math.max(0, total - pendingAmount - processingAmount - withdrawnAmount),
+      };
+    }
     const available = balances.available;
 
     const grouped = groupEarningRowsBySource(earnings);
@@ -1169,6 +1313,37 @@ export async function updateVideo(req, res) {
   try {
     const uid = req.uid;
     const videoId = req.params.id;
+
+    if (studioSupabaseReady()) {
+      const { data: existing, error: lookupError } = await supabase
+        .from('tiktok_videos')
+        .select('video_id,user_id')
+        .eq('video_id', videoId)
+        .maybeSingle();
+      if (lookupError && !isMissingTable(lookupError) && !isMissingColumn(lookupError)) throw lookupError;
+      if (existing) {
+        if (existing.user_id !== uid) return res.status(404).json({ success: false, message: 'Video not found' });
+        const patch = {};
+        if (typeof req.body.title === 'string') patch.title = req.body.title.trim().slice(0, 200);
+        if (typeof req.body.isPremium === 'boolean') patch.is_premium_content = req.body.isPremium;
+        if (req.body.tokenPrice != null) patch.token_price = Math.max(0, Number(req.body.tokenPrice) || 0);
+        if (typeof req.body.isPublished === 'boolean') {
+          patch.is_live = req.body.isPublished;
+          patch.status = req.body.isPublished ? 'published' : 'draft';
+        }
+        if (!Object.keys(patch).length) {
+          return res.status(400).json({ success: false, message: 'No valid fields to update' });
+        }
+        const { error: updateError } = await supabase
+          .from('tiktok_videos')
+          .update(patch)
+          .eq('video_id', videoId)
+          .eq('user_id', uid);
+        if (updateError) throw updateError;
+        return res.json({ success: true, data: { id: videoId, ...patch } });
+      }
+    }
+
     const ref = videosRef();
     if (!ref) return res.status(503).json({ success: false, message: 'Video storage unavailable' });
 

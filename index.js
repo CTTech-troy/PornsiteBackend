@@ -76,6 +76,9 @@ import {
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
+
+const LIVEKIT_HTTP_ORIGIN = 'https://xstream-8lx5fseo.livekit.cloud';
+const LIVEKIT_WS_ORIGIN = 'wss://xstream-8lx5fseo.livekit.cloud';
  
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -90,10 +93,18 @@ app.use(helmet({
         'https://xstreamvideos.site',
         'https://admin.xstreamvideos.site',
         'https://*.supabase.co',
-        'wss://*.livekit.cloud',
+        LIVEKIT_HTTP_ORIGIN,
+        LIVEKIT_WS_ORIGIN,
+        'https://imasdk.googleapis.com',
+        'https://s.magsrv.com',
+        'https://*.magsrv.com',
+        'https://googleads.g.doubleclick.net',
+        'https://securepubads.g.doubleclick.net',
+        'https://pagead2.googlesyndication.com',
+        'https://pubads.g.doubleclick.net',
       ],
-      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
-      mediaSrc: ["'self'", 'blob:', 'https:'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:', LIVEKIT_HTTP_ORIGIN],
+      mediaSrc: ["'self'", 'blob:', 'https:', LIVEKIT_HTTP_ORIGIN],
       scriptSrc: [
         "'self'",
         "'unsafe-inline'",
@@ -112,8 +123,9 @@ app.use(helmet({
         'https://securepubads.g.doubleclick.net',
         'https://*.googlesyndication.com',
       ],
-      childSrc: ["'self'", 'https:'],
-      frameSrc: ["'self'", 'https:'],
+      childSrc: ["'self'", 'https:', LIVEKIT_HTTP_ORIGIN],
+      frameSrc: ["'self'", 'https:', LIVEKIT_HTTP_ORIGIN],
+      workerSrc: ["'self'", 'blob:', LIVEKIT_HTTP_ORIGIN],
       upgradeInsecureRequests: [],
     },
   },
@@ -136,8 +148,12 @@ const DEFAULT_ALLOWED_ORIGINS = [
 const DEVELOPMENT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
+  'http://localhost:5175',
+  'http://localhost:5176',
   'http://127.0.0.1:5173',
   'http://127.0.0.1:5174',
+  'http://127.0.0.1:5175',
+  'http://127.0.0.1:5176',
 ];
 
 function isDeveloperMode() {
@@ -145,9 +161,30 @@ function isDeveloperMode() {
   return ['development', 'dev', 'local', 'test'].includes(env);
 }
 
+function isEnabledEnvFlag(value, fallback = false) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function shouldAllowLocalhostCors() {
+  return isEnabledEnvFlag(process.env.ALLOW_LOCALHOST_CORS, true);
+}
+
+function isLocalhostOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return ['http:', 'https:'].includes(url.protocol)
+      && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function parseAllowedOrigins(rawOrigins) {
   const envList = typeof rawOrigins === 'string' && rawOrigins.trim() ? rawOrigins.split(',').map((s) => s.trim()).filter(Boolean) : [];
-  const devList = isDeveloperMode() ? DEVELOPMENT_ALLOWED_ORIGINS : [];
+  const devList = (isDeveloperMode() || shouldAllowLocalhostCors()) ? DEVELOPMENT_ALLOWED_ORIGINS : [];
   return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...devList, ...envList]));
 }
 
@@ -155,14 +192,31 @@ const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ORIGINS);
 const allowedOriginsSet = new Set(ALLOWED_ORIGINS);
 console.info('[cors] Allowed origins configured', {
   mode: isDeveloperMode() ? 'development' : 'production',
+  localhostCors: shouldAllowLocalhostCors() ? 'enabled' : 'disabled',
   origins: ALLOWED_ORIGINS,
 });
 
+function isOriginAllowed(origin) {
+  return !origin
+    || allowedOriginsSet.has(origin)
+    || (shouldAllowLocalhostCors() && isLocalhostOrigin(origin));
+}
+
+function buildCorsError(origin) {
+  const error = new Error(`Not allowed by CORS for origin: ${origin}`);
+  error.status = 403;
+  error.statusCode = 403;
+  error.code = 'CORS_ORIGIN_DENIED';
+  return error;
+}
+
+function corsOriginDelegate(origin, callback) {
+  if (isOriginAllowed(origin)) return callback(null, true);
+  return callback(buildCorsError(origin));
+}
+
 app.use(cors({
-  origin(origin, callback) {
-    if (!origin || allowedOriginsSet.has(origin)) return callback(null, true);
-    callback(new Error(`Not allowed by CORS for origin: ${origin}`));
-  },
+  origin: corsOriginDelegate,
   credentials: true,
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   optionsSuccessStatus: 204,
@@ -319,10 +373,19 @@ app.use('/api/admin/memberships', adminMembershipsRouter);
 app.use('/api/creators-main-application', creatorsMainApplicationRouter);
 
 app.use('/api', (req, res) => {
+  const message = `API route not found: ${req.method} ${req.originalUrl}`;
   res.status(404).json({
     success: false,
-    message: `API route not found: ${req.method} ${req.originalUrl}`,
+    message,
     requestId: req.requestId,
+    error: {
+      code: 'ROUTE_NOT_FOUND',
+      message,
+      requestId: req.requestId,
+      method: req.method,
+      path: req.originalUrl,
+      timestamp: new Date().toISOString(),
+    },
   });
 });
 
@@ -331,18 +394,30 @@ app.use((err, req, res, next) => {
   const status = Number(err?.status || err?.statusCode || 500);
   const safeStatus = status >= 400 && status < 600 ? status : 500;
   const isProduction = process.env.NODE_ENV === 'production';
+  const publicMessage = isProduction && safeStatus >= 500 ? 'Internal server error' : (err?.message || 'Request failed');
+  const code = err?.code || (safeStatus >= 500 ? 'INTERNAL_SERVER_ERROR' : 'REQUEST_FAILED');
   console.error('[request:error]', {
     requestId: req.requestId,
     method: req.method,
     path: req.originalUrl,
     status: safeStatus,
     message: err?.message || String(err),
+    code,
     stack: isProduction ? undefined : err?.stack,
   });
   res.status(safeStatus).json({
     success: false,
-    message: isProduction && safeStatus >= 500 ? 'Internal server error' : (err?.message || 'Request failed'),
+    message: publicMessage,
     requestId: req.requestId,
+    error: {
+      code,
+      message: publicMessage,
+      requestId: req.requestId,
+      method: req.method,
+      path: req.originalUrl,
+      timestamp: new Date().toISOString(),
+      ...(isProduction ? {} : { details: err?.message || String(err) }),
+    },
   });
 });
 
@@ -350,7 +425,7 @@ const PORT = process.env.PORT || 5043;
 import http from 'http';
 const server = http.createServer(app);
 import { Server } from 'socket.io';
-const io = new Server(server, { cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'], credentials: true } });
+const io = new Server(server, { cors: { origin: corsOriginDelegate, methods: ['GET', 'POST'], credentials: true } });
 
 io.use(async (socket, next) => {
   try {
