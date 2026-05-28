@@ -1,9 +1,41 @@
 import { Client, Receiver } from '@upstash/qstash';
 
-const qstashToken = (process.env.QSTASH_TOKEN || '').trim();
-const currentSigningKey = (process.env.QSTASH_CURRENT_SIGNING_KEY || '').trim();
-const nextSigningKey = (process.env.QSTASH_NEXT_SIGNING_KEY || '').trim();
-const renderBackendUrl = (process.env.RENDER_BACKEND_URL || '').trim();
+function env(name) {
+  return String(process.env[name] || '').trim();
+}
+
+function normalizeEnvPrefix(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function regionalEnv(name) {
+  const region = normalizeEnvPrefix(process.env.QSTASH_REGION);
+  if (!region) return '';
+  return env(`${region}_${name}`);
+}
+
+function resolveQstashValue(name) {
+  // If QSTASH_URL is explicitly provided, treat the top-level QSTASH_* values
+  // as the active credential set. Otherwise, honor QSTASH_REGION and its
+  // region-scoped variables before falling back to top-level legacy values.
+  if (name === 'QSTASH_URL' && env('QSTASH_URL')) return env('QSTASH_URL');
+  if (env('QSTASH_URL')) return env(name) || regionalEnv(name);
+  return regionalEnv(name) || env(name);
+}
+
+const qstashUrl = resolveQstashValue('QSTASH_URL');
+const qstashToken = resolveQstashValue('QSTASH_TOKEN');
+const currentSigningKey = resolveQstashValue('QSTASH_CURRENT_SIGNING_KEY');
+const nextSigningKey = resolveQstashValue('QSTASH_NEXT_SIGNING_KEY');
+const publicBackendUrl = env('RENDER_BACKEND_URL') ||
+  env('BACKEND_PUBLIC_URL') ||
+  env('PUBLIC_API_URL') ||
+  env('API_PUBLIC_URL') ||
+  env('BACKEND_URL');
 
 function readPositiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -16,6 +48,7 @@ function normalizeBaseUrl(value) {
 
 export const qstashClient = qstashToken
   ? new Client({
+      ...(qstashUrl ? { baseUrl: qstashUrl } : {}),
       token: qstashToken,
       enableTelemetry: false,
       retry: {
@@ -42,10 +75,13 @@ export function isQstashReceiverConfigured() {
 
 export function getQstashStatus() {
   return {
-    configured: isQstashClientConfigured() && isQstashReceiverConfigured() && Boolean(renderBackendUrl),
+    configured: isQstashClientConfigured() && isQstashReceiverConfigured() && Boolean(publicBackendUrl),
     clientConfigured: isQstashClientConfigured(),
     receiverConfigured: isQstashReceiverConfigured(),
-    renderBackendUrlConfigured: Boolean(renderBackendUrl),
+    qstashUrlConfigured: Boolean(qstashUrl),
+    qstashUrl: qstashUrl || 'https://qstash.upstash.io',
+    qstashRegion: normalizeEnvPrefix(process.env.QSTASH_REGION) || null,
+    renderBackendUrlConfigured: Boolean(publicBackendUrl),
     keepAliveCron: process.env.QSTASH_KEEPALIVE_CRON || '*/10 * * * *',
     monitoringAggregationCron: process.env.QSTASH_MONITORING_AGGREGATE_CRON || '* * * * *',
     monitoringHealthCron: process.env.QSTASH_MONITORING_HEALTH_CRON || '*/5 * * * *',
@@ -64,7 +100,7 @@ export function getQstashStatus() {
 }
 
 export function getPublicBackendUrl() {
-  return normalizeBaseUrl(renderBackendUrl);
+  return normalizeBaseUrl(publicBackendUrl);
 }
 
 export function getKeepAliveUrl(path = '') {
@@ -100,6 +136,13 @@ export function getMonetizationWorkflowUrl(path = '') {
   if (!baseUrl) return '';
   const suffix = String(path || '').startsWith('/') ? path : `/${path}`;
   return `${baseUrl}/api/internal/qstash/monetization${suffix === '/' ? '' : suffix}`;
+}
+
+export function getEnterpriseImportWorkflowUrl(path = '') {
+  const baseUrl = getPublicBackendUrl();
+  if (!baseUrl) return '';
+  const suffix = String(path || '').startsWith('/') ? path : `/${path}`;
+  return `${baseUrl}/api/internal/qstash/enterprise-import${suffix === '/' ? '' : suffix}`;
 }
 
 export function getQstashVerificationUrl(req) {

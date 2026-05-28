@@ -4,7 +4,7 @@
  * Search fallback: porn-xnxx-api.p.rapidapi.com POST /search (same key usually).
  * Env: RAPIDAPI_PORN_XNXX_HOST, RAPIDAPI_PORN_XNXX_SEARCH_PATH, SEARCH_CACHE_MS (default 120000), SEARCH_FALLBACK_ON_EMPTY.
  */
-import { annotatePlayableVideo, filterHomeFeedVideos, filterPlayableVideos } from './videoPlaybackValidation.js';
+import { annotatePlayableVideo, filterHomeFeedVideos, filterPlayableVideos, isDirectPlayableStreamUrl } from './videoPlaybackValidation.js';
 import {
   getExternalFeedConfigSync,
   loadExternalFeedConfig,
@@ -615,13 +615,38 @@ export function homeCardToFeedVideoItem(card, index) {
   if (!card) return null;
   const duration = Number(card.durationSeconds) || 0;
   const preview = card.previewVideo ?? '';
-  const page = String(card.playbackUrl || card.streamUrl || card.videoUrl || card.videoSrc || '');
+  const iframeEmbed = String(card.iframeEmbed || card.iframe_embed || '').trim();
+  const playbackType = iframeEmbed
+    ? 'external_embed'
+    : String(card.playbackType || card.playback_type || '').trim();
+  const isExternalEmbed = playbackType.toLowerCase() === 'external_embed' || iframeEmbed.length > 0;
+  const page = String(
+    isExternalEmbed
+      ? (card.videoUrl || card.video_url || card.pageUrl || card.page_url || card.externalUrl || card.external_url || card.url || card.videoSrc || '')
+      : (card.playbackUrl || card.playback_url || card.streamUrl || card.stream_url || card.videoUrl || card.video_url || card.videoSrc || '')
+  );
+  const directCandidate = String(card.playbackUrl || card.playback_url || card.streamUrl || card.stream_url || card.storageUrl || card.storage_url || card.file_url || card.videoSrc || '').trim();
+  const allowImportedDirectHost = String(card.source || card.contentSource || card.content_source || card.sourceType || card.source_type || '').toLowerCase().includes('imported');
+  const directPlayableUrl = isDirectPlayableStreamUrl(directCandidate, { allowUnapprovedDirectHost: allowImportedDirectHost }) ? directCandidate : '';
+  const playableUrl = directPlayableUrl || (isExternalEmbed ? '' : page);
+  const effectivePlaybackType = directPlayableUrl ? 'internal' : playbackType;
+  const effectiveSourceType = directPlayableUrl ? 'imported_direct_stream' : (card.sourceType || card.source_type || (isExternalEmbed ? 'external_embed' : ''));
   return {
     id: String(card.id),
     videoUrl: page,
-    streamUrl: page,
+    video_url: page,
+    streamUrl: playableUrl,
+    stream_url: playableUrl,
+    playbackUrl: playableUrl,
+    playback_url: playableUrl,
+    iframeEmbed,
+    iframe_embed: iframeEmbed,
+    playbackType: effectivePlaybackType,
+    playback_type: effectivePlaybackType,
     previewVideo: preview,
     thumbnailUrl: String(card.thumbnail || ''),
+    thumbnail_url: String(card.thumbnail_url || card.thumbnailUrl || card.thumbnail || ''),
+    thumbnail: String(card.thumbnail || card.thumbnailUrl || card.thumbnail_url || ''),
     duration,
     createdAt: new Date().toISOString(),
     title: card.title || '',
@@ -639,11 +664,14 @@ export function homeCardToFeedVideoItem(card, index) {
     tags: Array.isArray(card.tags) ? card.tags : [],
     isPremiumContent: card.isPremiumContent === true,
     tokenPrice: Number(card.tokenPrice) || 0,
-    playable: card.playable === true,
-    listableInFeed: card.listableInFeed === true || card.feedVisible === true,
-    feedVisible: card.listableInFeed === true || card.feedVisible === true,
-    sourceType: card.sourceType || card.source_type || '',
-    embedAllowed: card.embedAllowed === true || card.embed_allowed === true,
-    validationStatus: card.validationStatus || card.validation_status || (card.playable ? 'playable' : 'unsupported'),
+    playable: isExternalEmbed || card.playable === true,
+    listableInFeed: isExternalEmbed || card.listableInFeed === true || card.feedVisible === true,
+    feedVisible: isExternalEmbed || card.listableInFeed === true || card.feedVisible === true,
+    sourceType: effectiveSourceType,
+    source_type: effectiveSourceType,
+    embedAllowed: !directPlayableUrl && (card.embedAllowed === true || card.embed_allowed === true || isExternalEmbed),
+    embed_allowed: !directPlayableUrl && (card.embedAllowed === true || card.embed_allowed === true || isExternalEmbed),
+    validationStatus: card.validationStatus || card.validation_status || (isExternalEmbed ? 'playable' : (card.playable ? 'playable' : 'unsupported')),
+    validation_status: card.validationStatus || card.validation_status || (isExternalEmbed ? 'playable' : (card.playable ? 'playable' : 'unsupported')),
   };
 }

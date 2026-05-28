@@ -479,6 +479,7 @@ const MONITORED_ROUTES = [
   { group: 'Admin · System',     path: '/api/admin/system/email-templates',   adminAuth: true },
   // ── Admin — content ───────────────────────────────────────────────────────
   { group: 'Admin · Content',    path: '/api/admin/content/videos',           adminAuth: true },
+  { group: 'Admin · Content',    path: '/api/admin/content/imported-videos',  adminAuth: true },
   { group: 'Admin · Content',    path: '/api/admin/content/lives',            adminAuth: true },
   { group: 'Admin · Content',    path: '/api/admin/content/random-sessions',  adminAuth: true },
   { group: 'Admin · Content',    path: '/api/admin/content/premium-videos',   adminAuth: true },
@@ -493,7 +494,7 @@ const MONITORED_ROUTES = [
   { group: 'Admin · Finance',    path: '/api/admin/finance/summary',          adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/membership-plans', adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/subscribers',      adminAuth: true },
-  { group: 'Admin · Finance',    path: '/api/admin/finance/payments',         adminAuth: true },
+  { group: 'Admin · Finance',    path: '/api/admin/finance/payment-history',  adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/payouts',          adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/ads',              adminAuth: true },
 ];

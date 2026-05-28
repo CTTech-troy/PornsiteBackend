@@ -135,6 +135,57 @@ async function logAction(adminId, adminName, action, targetType, targetId, detai
   await writeAuditAction(adminId, adminName, action, targetType, targetId, details);
 }
 
+function cleanAdminVideoText(value) {
+  return String(value ?? '').trim();
+}
+
+function hasAdminVideoUrl(value) {
+  const text = cleanAdminVideoText(value);
+  return /^https?:\/\//i.test(text) || /^rtdb:/i.test(text);
+}
+
+function hasMeaningfulAdminTitle(value) {
+  const text = cleanAdminVideoText(value);
+  return Boolean(text && !/^untitled$/i.test(text));
+}
+
+function isEmptySupabaseVideoRow(row = {}) {
+  const hasSource = [
+    row.storage_url,
+    row.stream_url,
+    row.playback_url,
+    row.embed_url,
+    row.video_url,
+  ].some(hasAdminVideoUrl);
+  const hasThumbnail = hasAdminVideoUrl(row.thumbnail_url);
+  const hasCreator = Boolean(cleanAdminVideoText(row.user_id) || cleanAdminVideoText(row.creator_display_name));
+
+  return (
+    !hasSource &&
+    !hasThumbnail &&
+    !hasCreator &&
+    !hasMeaningfulAdminTitle(row.title)
+  );
+}
+
+function isEmptyRtdbVideoRow(row = {}) {
+  const hasSource = [
+    row.videoUrl,
+    row.streamUrl,
+    row.videoSrc,
+    row.url,
+  ].some(hasAdminVideoUrl);
+  const hasThumbnail = hasAdminVideoUrl(row.thumbnailUrl || row.thumbnail || row.poster);
+  const hasCreator = Boolean(cleanAdminVideoText(row.userId) || cleanAdminVideoText(row.creatorDisplayName));
+
+  return (
+    !hasSource &&
+    !hasThumbnail &&
+    !hasCreator &&
+    !hasMeaningfulAdminTitle(row.title)
+  );
+}
+
 // Maps a Supabase tiktok_videos row to the standard admin Video shape.
 // ID is plain — no prefix.
 function mapSupabaseVideo(v, userMap) {
@@ -250,6 +301,117 @@ function mapRtdbVideo(videoId, v) {
   };
 }
 
+function mapImportedAdminVideo(v = {}) {
+  const validation = validateVideoPlaybackSource({
+    streamUrl: v.video_url,
+    videoUrl: v.video_url,
+    iframeEmbed: v.iframe_embed,
+    iframe_embed: v.iframe_embed,
+    playbackType: v.playback_type,
+    playback_type: v.playback_type,
+    source: 'imported_csv',
+  });
+  return {
+    id: v.id,
+    title: v.title || 'Untitled',
+    thumbnail: v.thumbnail_url || null,
+    thumbnailUrl: v.thumbnail_url || null,
+    thumbnail_url: v.thumbnail_url || null,
+    creatorName: v.creator_id || 'Imported',
+    creatorId: v.creator_id || null,
+    creator_id: v.creator_id || null,
+    channelName: v.studio || v.category || 'Imported',
+    uploadDate: v.created_at || null,
+    publishDate: v.publish_date || null,
+    publish_date: v.publish_date || null,
+    status: 'published',
+    visibility: 'public',
+    views: Number(v.views || 0),
+    likes: 0,
+    reports: 0,
+    earnings: 0,
+    videoUrl: v.video_url || null,
+    video_url: v.video_url || null,
+    iframeEmbed: v.iframe_embed || null,
+    iframe_embed: v.iframe_embed || null,
+    playbackType: v.iframe_embed ? 'external_embed' : (v.playback_type || 'external_redirect'),
+    playback_type: v.iframe_embed ? 'external_embed' : (v.playback_type || 'external_redirect'),
+    duration: Number(v.duration || 0),
+    description: String(v.metadata?.description || ''),
+    tags: Array.isArray(v.tags) ? v.tags : [],
+    actors: Array.isArray(v.actors) ? v.actors : [],
+    category: v.category || null,
+    quality: v.quality || null,
+    studio: v.studio || null,
+    metadata: v.metadata || {},
+    createdAt: v.created_at || null,
+    updatedAt: v.updated_at || null,
+    importJobId: v.import_job_id || null,
+    import_job_id: v.import_job_id || null,
+    importStatus: v.import_jobs?.status || v.import_status || 'unknown',
+    import_status: v.import_jobs?.status || v.import_status || 'unknown',
+    source: 'imported_csv',
+    playable: validation.playable,
+    sourceType: validation.sourceType,
+    validationStatus: validation.validationStatus,
+    playbackUrl: validation.playbackUrl,
+    embedAllowed: validation.embedAllowed,
+  };
+}
+
+function cleanSearchTerm(value) {
+  return String(value || '')
+    .trim()
+    .replace(/['"]/g, '')
+    .replace(/[%_]/g, '')
+    .replace(/[(),]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
+}
+
+const IMPORTED_VIDEO_SELECT = [
+  'id',
+  'video_url',
+  'iframe_embed',
+  'playback_type',
+  'title',
+  'duration',
+  'thumbnail_url',
+  'tags',
+  'actors',
+  'views',
+  'category',
+  'quality',
+  'studio',
+  'publish_date',
+  'metadata',
+  'creator_id',
+  'import_job_id',
+  'created_at',
+  'updated_at',
+  'import_jobs(status)',
+].join(',');
+
+const IMPORTED_VIDEO_SELECT_LEGACY = [
+  'id',
+  'video_url',
+  'title',
+  'duration',
+  'thumbnail_url',
+  'tags',
+  'actors',
+  'views',
+  'category',
+  'quality',
+  'studio',
+  'publish_date',
+  'metadata',
+  'import_job_id',
+  'created_at',
+  'updated_at',
+  'import_jobs(status)',
+].join(',');
+
 function isPremiumSupabaseRow(v) {
   return (
     v?.is_premium_content === true ||
@@ -277,11 +439,26 @@ async function fetchRtdbVideos({ search, statusFilter, isPremium }) {
   try {
     const rtdb = getFirebaseRtdb();
     if (!rtdb) return [];
-    const snap = await rtdb.ref('videos').once('value');
-    const val = snap.val();
-    if (!val) return [];
+    const ref = rtdb.ref('videos');
+    let snapshots;
+    try {
+      snapshots = await Promise.all([
+        ref.orderByChild('videoUrl').startAt('http').limitToLast(5000).once('value'),
+        ref.orderByChild('streamUrl').startAt('http').limitToLast(5000).once('value'),
+      ]);
+    } catch {
+      snapshots = [await ref.orderByKey().limitToLast(2000).once('value')];
+    }
 
-    let list = Object.entries(val).map(([id, v]) => ({ _id: id, ...v }));
+    const byId = new Map();
+    for (const snap of snapshots) {
+      const val = snap.val();
+      if (!val || typeof val !== 'object') continue;
+      for (const [id, v] of Object.entries(val)) {
+        byId.set(id, { _id: id, ...(v && typeof v === 'object' ? v : {}) });
+      }
+    }
+    let list = [...byId.values()].filter((v) => !isEmptyRtdbVideoRow(v));
 
     // statusFilter mapping: 'published' → isLive true, 'removed' → isLive false, others → skip RTDB (no concept)
     if (statusFilter === 'blocked' || statusFilter === 'pending') return []; // RTDB has no blocked/pending
@@ -325,7 +502,7 @@ async function fetchSupabaseVideos({ search, statusFilter, isPremium, validation
       }
     }
 
-    let rows = data || [];
+    let rows = (data || []).filter((row) => !isEmptySupabaseVideoRow(row));
     if (isPremium === 'true') {
       rows = rows.filter((v) => isPremiumSupabaseRow(v));
     } else if (isPremium === 'false') {
@@ -343,6 +520,228 @@ async function fetchSupabaseVideos({ search, statusFilter, isPremium, validation
 // Merges Firebase RTDB (public videos) + Supabase tiktok_videos.
 // isPremium=true filters to premium content from both sources.
 // RTDB video IDs are prefixed with "rtdb:" so moderation actions route correctly.
+
+function applyImportedVideoFilters(query, { search, category }) {
+  const term = cleanSearchTerm(search);
+  const categoryFilter = String(category || '').trim();
+  let next = query;
+  if (term) {
+    next = next.or(`title.ilike.%${term}%,studio.ilike.%${term}%,category.ilike.%${term}%,video_url.ilike.%${term}%`);
+  }
+  if (categoryFilter) {
+    next = next.eq('category', categoryFilter);
+  }
+  return next;
+}
+
+async function queryImportedVideos(selectClause, { search, category, offset, limit }) {
+  let q = supabase
+    .from('videos')
+    .select(selectClause, { count: 'planned' });
+  q = applyImportedVideoFilters(q, { search, category });
+  return q
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+}
+
+async function queryImportedVideoById(selectClause, id) {
+  let q = supabase
+    .from('videos')
+    .select(selectClause);
+  q = applyImportedVideoFilters(q, { search: '', category: '' });
+  return q.eq('id', id).maybeSingle();
+}
+
+// GET /api/admin/content/imported-videos
+export async function getImportedVideos(req, res) {
+  try {
+    const { search = '', category = '', page: rawPage, limit: rawLimit } = req.query;
+    const { page, limit, offset } = paginate(rawPage, rawLimit);
+
+    let { data, error, count } = await queryImportedVideos(IMPORTED_VIDEO_SELECT, {
+      search,
+      category,
+      offset,
+      limit,
+    });
+
+    if (error && isMissingColumn(error)) {
+      ({ data, error, count } = await queryImportedVideos(IMPORTED_VIDEO_SELECT_LEGACY, {
+        search,
+        category,
+        offset,
+        limit,
+      }));
+    }
+
+    if (error) {
+      if (isMissingTable(error)) return res.json({ videos: [], total: 0, page, limit });
+      return res.status(500).json({ message: error.message });
+    }
+
+    return res.json({
+      videos: (data || []).map(mapImportedAdminVideo),
+      total: Number(count || 0),
+      page,
+      limit,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+// GET /api/admin/content/imported-videos/:id
+export async function getImportedVideoById(req, res) {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ message: 'Video id is required.' });
+
+    let { data, error } = await queryImportedVideoById(IMPORTED_VIDEO_SELECT, id);
+    if (error && isMissingColumn(error)) {
+      ({ data, error } = await queryImportedVideoById(IMPORTED_VIDEO_SELECT_LEGACY, id));
+    }
+
+    if (error) {
+      if (isMissingTable(error)) return res.status(404).json({ message: 'Imported video not found.' });
+      return res.status(500).json({ message: error.message });
+    }
+    if (!data) return res.status(404).json({ message: 'Imported video not found.' });
+
+    return res.json({ video: mapImportedAdminVideo(data) });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+// DELETE /api/admin/content/imported-videos/:id
+export async function deleteImportedVideo(req, res) {
+  try {
+    const { id } = req.params;
+    const { reason = '' } = req.body || {};
+    if (!id) return res.status(400).json({ message: 'Video id is required.' });
+
+    let { data: existing, error: lookupError } = await queryImportedVideoById(IMPORTED_VIDEO_SELECT, id);
+    if (lookupError && isMissingColumn(lookupError)) {
+      ({ data: existing, error: lookupError } = await queryImportedVideoById(IMPORTED_VIDEO_SELECT_LEGACY, id));
+    }
+
+    if (lookupError) {
+      if (isMissingTable(lookupError)) return res.status(404).json({ message: 'Imported video not found.' });
+      return res.status(500).json({ message: lookupError.message });
+    }
+    if (!existing) return res.status(404).json({ message: 'Imported video not found.' });
+
+    const { error } = await supabase.from('videos').delete().eq('id', id);
+    if (error) return res.status(500).json({ message: error.message });
+
+    invalidateCreatorLeaderboard();
+    enqueueSearchIndex(id, 'delete').catch(() => {});
+    await logAction(req.admin?.id, req.admin?.name, 'Imported video deleted', 'imported_video', id, {
+      reason,
+      title: existing.title,
+      videoUrl: existing.video_url,
+    });
+
+    return res.json({ message: 'Imported video deleted successfully.' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+function hasRawIframeEmbed(value) {
+  return /<iframe\b/i.test(String(value || ''));
+}
+
+async function selectImportedVideosWithoutIframe(limit) {
+  const selectColumns = 'id, title, video_url, iframe_embed, import_job_id';
+  const { data: nullRows, error: nullError } = await supabase
+    .from('videos')
+    .select(selectColumns)
+    .not('import_job_id', 'is', null)
+    .is('iframe_embed', null)
+    .limit(limit);
+  if (nullError) return { data: [], error: nullError };
+
+  const remaining = Math.max(0, limit - (nullRows || []).length);
+  if (!remaining) return { data: nullRows || [], error: null };
+
+  const { data: emptyRows, error: emptyError } = await supabase
+    .from('videos')
+    .select(selectColumns)
+    .not('import_job_id', 'is', null)
+    .eq('iframe_embed', '')
+    .limit(remaining);
+  if (emptyError) return { data: [], error: emptyError };
+
+  const nextRemaining = Math.max(0, remaining - (emptyRows || []).length);
+  if (!nextRemaining) return { data: [...(nullRows || []), ...(emptyRows || [])], error: null };
+
+  const { data: nonIframeRows, error: nonIframeError } = await supabase
+    .from('videos')
+    .select(selectColumns)
+    .not('import_job_id', 'is', null)
+    .not('iframe_embed', 'ilike', '%<iframe%')
+    .limit(nextRemaining);
+
+  if (nonIframeError) {
+    return { data: [...(nullRows || []), ...(emptyRows || [])], error: null };
+  }
+
+  const byId = new Map();
+  for (const row of [...(nullRows || []), ...(emptyRows || []), ...(nonIframeRows || [])]) {
+    if (row?.id) byId.set(row.id, row);
+  }
+  return { data: [...byId.values()], error: null };
+}
+
+// DELETE /api/admin/content/imported-videos/without-iframe
+export async function deleteImportedVideosWithoutIframe(req, res) {
+  try {
+    const batchSize = Math.max(50, Math.min(1000, Number(req.query.batchSize || 500) || 500));
+    const maxDeletes = Math.max(1, Math.min(250000, Number(req.query.maxDeletes || 250000) || 250000));
+    let deleted = 0;
+    let scanned = 0;
+    const sampleIds = [];
+
+    while (deleted < maxDeletes) {
+      const { data, error } = await selectImportedVideosWithoutIframe(Math.min(batchSize, maxDeletes - deleted));
+      if (error) {
+        if (isMissingTable(error)) return res.json({ message: 'No imported videos table found.', deleted, scanned, ids: sampleIds });
+        return res.status(500).json({ message: error.message });
+      }
+
+      scanned += (data || []).length;
+      const ids = [...new Set((data || [])
+        .filter((row) => row?.id && !hasRawIframeEmbed(row.iframe_embed))
+        .map((row) => row.id))];
+      if (!ids.length) break;
+
+      const { error: deleteError } = await supabase.from('videos').delete().in('id', ids);
+      if (deleteError) return res.status(500).json({ message: deleteError.message, deleted, scanned });
+
+      deleted += ids.length;
+      if (sampleIds.length < 20) sampleIds.push(...ids.slice(0, 20 - sampleIds.length));
+      if (ids.length < batchSize) break;
+    }
+
+    if (deleted) invalidateCreatorLeaderboard();
+    await logAction(req.admin?.id, req.admin?.name, 'Imported videos without iframe deleted', 'imported_video', 'bulk', {
+      deleted,
+      scanned,
+    });
+
+    return res.json({
+      message: deleted
+        ? `Deleted ${deleted} imported video${deleted === 1 ? '' : 's'} without iframe playback.`
+        : 'No imported videos without iframe playback were found.',
+      deleted,
+      scanned,
+      ids: sampleIds,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
 
 export async function getVideos(req, res) {
   try {
@@ -369,6 +768,95 @@ export async function getVideos(req, res) {
 }
 
 // ── GET /api/admin/content/videos/:id ─────────────────────────────────────────
+
+export async function cleanupEmptyVideos(req, res) {
+  try {
+    const maxScan = Math.max(100, Math.min(50000, Number(req.query.maxScan || 20000) || 20000));
+    const pageSize = 1000;
+    const supabaseCandidates = [];
+    const rtdbCandidates = [];
+    let supabaseScanned = 0;
+    let rtdbScanned = 0;
+
+    if (supabase) {
+      for (let from = 0; from < maxScan; from += pageSize) {
+        const { data, error } = await supabase
+          .from('tiktok_videos')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .range(from, Math.min(from + pageSize - 1, maxScan - 1));
+
+        if (error) {
+          if (isMissingTable(error)) break;
+          return res.status(500).json({ message: error.message });
+        }
+
+        const rows = data || [];
+        supabaseScanned += rows.length;
+        for (const row of rows) {
+          if (row?.video_id && isEmptySupabaseVideoRow(row)) supabaseCandidates.push(row.video_id);
+        }
+        if (rows.length < pageSize) break;
+      }
+    }
+
+    const rtdb = getFirebaseRtdb();
+    if (rtdb) {
+      const snap = await rtdb
+        .ref('videos')
+        .orderByChild('videoUrl')
+        .equalTo(null)
+        .limitToFirst(maxScan)
+        .once('value');
+      const val = snap.val();
+      const entries = val && typeof val === 'object' ? Object.entries(val) : [];
+      rtdbScanned = entries.length;
+      for (const [id, row] of entries) {
+        const normalized = { _id: id, ...(row && typeof row === 'object' ? row : {}) };
+        if (isEmptyRtdbVideoRow(normalized)) rtdbCandidates.push(id);
+      }
+    }
+
+    const supabaseIds = [...new Set(supabaseCandidates)];
+    for (let i = 0; i < supabaseIds.length; i += 100) {
+      const chunk = supabaseIds.slice(i, i + 100);
+      const { error } = await supabase.from('tiktok_videos').delete().in('video_id', chunk);
+      if (error) return res.status(500).json({ message: error.message, deleted: i });
+      chunk.forEach((id) => enqueueSearchIndex(id, 'delete').catch(() => {}));
+    }
+
+    const rtdbIds = [...new Set(rtdbCandidates)];
+    if (rtdb && rtdbIds.length) {
+      const ref = rtdb.ref('videos');
+      for (let i = 0; i < rtdbIds.length; i += 100) {
+        await Promise.all(rtdbIds.slice(i, i + 100).map((id) => ref.child(id).remove()));
+      }
+    }
+
+    const deleted = supabaseIds.length + rtdbIds.length;
+    const scanned = supabaseScanned + rtdbScanned;
+    if (deleted) invalidateCreatorLeaderboard();
+    await logAction(req.admin?.id, req.admin?.name, 'Empty videos cleaned up', 'video', 'bulk', {
+      deleted,
+      scanned,
+      supabaseDeleted: supabaseIds.length,
+      rtdbDeleted: rtdbIds.length,
+    });
+
+    return res.json({
+      message: deleted ? `Removed ${deleted} empty video${deleted === 1 ? '' : 's'}.` : 'No empty videos found.',
+      deleted,
+      scanned,
+      ids: [...supabaseIds, ...rtdbIds.map((id) => `rtdb:${id}`)],
+      sources: {
+        supabase: { deleted: supabaseIds.length, scanned: supabaseScanned },
+        rtdb: { deleted: rtdbIds.length, scanned: rtdbScanned },
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+}
 
 export async function getVideoById(req, res) {
   try {

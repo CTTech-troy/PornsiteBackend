@@ -54,13 +54,15 @@ Deno.serve(async (req) => {
     if (giftType) {
       const { data: row, error: gErr } = await supabase
         .from("gift_catalog")
-        .select("price")
-        .eq("gift_type", giftType)
+        .select("coin_cost")
+        .eq("id", giftType)
+        .eq("is_active", true)
+        .eq("admin_created", true)
         .maybeSingle();
-      if (gErr || !row?.price) {
+      if (gErr || !row?.coin_cost) {
         return json({ error: "Unknown gift_type" }, 400);
       }
-      amount = Number(row.price);
+      amount = Number(row.coin_cost);
     }
 
     if (!Number.isFinite(amount) || amount <= 0) {

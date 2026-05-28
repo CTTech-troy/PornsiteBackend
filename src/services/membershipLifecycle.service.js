@@ -587,11 +587,32 @@ export async function getUserMembership(userId) {
     ? Math.max(0, Math.ceil((grace - now) / 86_400_000))
     : 0;
 
+  const coinBalance = wallet?.balance ?? Number(userRes.data?.coin_balance ?? 0);
+  let planDetails = null;
+  try {
+    if (plan && plan !== 'basic') {
+      const { data: planRow, error: planError } = await supabase
+        .from('membership_plans')
+        .select('*')
+        .eq('id', plan)
+        .maybeSingle();
+      if (planError && !isMissingDbFeature(planError)) throw planError;
+      planDetails = normalizeMembershipPlan(planRow);
+    }
+  } catch {
+    planDetails = null;
+  }
+
+  const includedCoins = Number(planDetails?.coinBonus ?? planDetails?.coins ?? 0) || 0;
+  const limits = planDetails?.limits && typeof planDetails.limits === 'object' ? planDetails.limits : {};
+  const tokenLimit = Number(limits.token_limit ?? limits.tokenLimit ?? limits.coins_limit ?? limits.coinsLimit ?? 0) || null;
+
   return {
     userId,
     membershipId: membership?.id || null,
     plan,
     planId: plan,
+    planDetails,
     planStatus,
     status: planStatus,
     renewalStatus: membership?.renewal_status || 'none',
@@ -599,7 +620,12 @@ export async function getUserMembership(userId) {
     pausedAt: membership?.paused_at || null,
     cancelledAt: membership?.cancelled_at || null,
     nextBillingAt: membership?.next_billing_at || null,
-    coinBalance: wallet?.balance ?? Number(userRes.data?.coin_balance ?? 0),
+    coinBalance,
+    coinsIncluded: includedCoins,
+    includedCoins,
+    tokenLimit,
+    limits,
+    remainingTokens: coinBalance,
     expiresAt,
     graceEndsAt,
     daysLeft,

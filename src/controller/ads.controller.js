@@ -1,4 +1,4 @@
-import { resolveSlotRenderPlan, incrementSlotStats } from '../services/adSlot.service.js';
+import { resolveSlotRenderPlan, incrementSlotStats, getAdSlotByKey } from '../services/adSlot.service.js';
 import {
   getCampaignForPlacement,
   getSidebarPoolMeta,
@@ -10,7 +10,13 @@ import { validateAdForRender } from '../services/safeAdPolicy.service.js';
 const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
 
 const PLACEMENT_BY_SLOT = {
+  home_after_subheader_900x250: 'home_after_subheader_900x250',
+  home_feed_native: 'feed_native',
+  home_mobile_inline_300x100: 'mobile_inline',
+  category_feed_native: 'category_feed',
+  home_bottom_900x250: 'homepage_bottom',
   home_sidebar: 'sidebar',
+  home_softcore_160x600: 'home_sidebar',
   video_sidebar: 'sidebar',
   video_recommended: 'sidebar',
   creator_sidebar: 'sidebar',
@@ -19,13 +25,47 @@ const PLACEMENT_BY_SLOT = {
   search_sidebar: 'sidebar',
 };
 
+function placementForSlot(slotKey, slot = null) {
+  if (slot?.location === 'after_subheader' || slotKey === 'home_after_subheader_900x250') return 'home_after_subheader_900x250';
+  if (slot?.location === 'before_footer' || /_before_footer_900x250$/i.test(String(slotKey || ''))) return 'before_footer';
+  return PLACEMENT_BY_SLOT[slotKey] || 'sidebar';
+}
+
 function isMissingTable(err) {
-  return err?.code === '42P01' || err?.code === 'PGRST200' || err?.code === 'PGRST205';
+  return (
+    err?.code === '42P01' ||
+    err?.code === '42703' ||
+    err?.code === 'PGRST200' ||
+    err?.code === 'PGRST204' ||
+    err?.code === 'PGRST205' ||
+    /schema cache|does not exist/i.test(err?.message || '')
+  );
+}
+
+const IMPRESSION_DEDUPE_MS = 60_000;
+const impressionSeen = new Map();
+
+function clientKey(req) {
+  return String(req.ip || req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || 'unknown')
+    .split(',')[0]
+    .trim()
+    .slice(0, 80);
+}
+
+function shouldSkipDuplicateImpression(req, key) {
+  const now = Date.now();
+  const dedupeKey = `${clientKey(req)}:${key}`;
+  const last = impressionSeen.get(dedupeKey) || 0;
+  impressionSeen.set(dedupeKey, now);
+  for (const [k, seenAt] of impressionSeen) {
+    if (now - seenAt > IMPRESSION_DEDUPE_MS * 2) impressionSeen.delete(k);
+  }
+  return now - last < IMPRESSION_DEDUPE_MS;
 }
 
 function safeFormatForAd(ad, placement) {
   const raw = String(ad?.creativeType || ad?.creative_type || ad?.sourceType || '').toLowerCase();
-  if (placement === 'feed' || raw.includes('native')) return 'native';
+  if (['feed', 'feed_native', 'category_feed', 'mobile_inline', 'native_card'].includes(String(placement || '')) || raw.includes('native')) return 'native';
   if (raw.includes('vast') || raw.includes('video_preroll')) return 'vast';
   return 'banner';
 }
@@ -100,18 +140,18 @@ export async function getSlotAd(req, res) {
   try {
     const { slotKey } = req.params;
     const slot = await import('../services/adSlot.service.js').then((m) => m.getAdSlotByKey(slotKey));
-    const placement = 'sidebar';
+    const placement = placementForSlot(slotKey, slot);
     const excludeId = String(req.query.exclude || '') || null;
     let customAd = await getCampaignForPlacement(placement, { seed: slotKey, excludeId });
     let rejected = null;
     if (customAd) {
       const check = await validateAdForRender({
-        placement: PLACEMENT_BY_SLOT[slotKey] || placement,
+        placement,
         width: customAd.width || 300,
         height: customAd.height || 250,
         embedHtml: customAd.embedHtml,
         providerSlug: customAd.providerSlug || 'custom',
-        format: safeFormatForAd(customAd, PLACEMENT_BY_SLOT[slotKey] || placement),
+        format: safeFormatForAd(customAd, placement),
       });
       if (!check.ok) {
         rejected = check.reason || 'policy';
@@ -134,14 +174,21 @@ export async function getSlotAd(req, res) {
 export async function trackCampaignImpression(req, res) {
   try {
     const { adId } = req.params;
-    if (!supabase) return res.json({ ok: true });
+    if (!adId || shouldSkipDuplicateImpression(req, `campaign:${adId}`)) {
+      return res.json({ ok: true, deduped: true });
+    }
+    if (!supabase) return res.json({ ok: true, tracked: false });
     await supabase.rpc('increment_ad_stat', { p_ad_id: adId, p_field: 'impressions' }).catch(async () => {
-      const { data } = await supabase.from('ad_campaigns').select('impressions').eq('id', adId).maybeSingle();
+      const { data, error } = await supabase.from('ad_campaigns').select('impressions').eq('id', adId).maybeSingle();
+      if (error && !isMissingTable(error)) throw error;
       if (data) await supabase.from('ad_campaigns').update({ impressions: Number(data.impressions || 0) + 1 }).eq('id', adId);
     });
     return res.json({ ok: true });
-  } catch {
-    return res.json({ ok: true });
+  } catch (err) {
+    if (!isMissingTable(err)) {
+      console.warn('[ads] campaign impression ignored', { adId: req.params.adId, message: err?.message || String(err), code: err?.code });
+    }
+    return res.json({ ok: true, tracked: false });
   }
 }
 
@@ -165,10 +212,19 @@ export async function trackCampaignClick(req, res) {
 
 export async function trackSlotImpression(req, res) {
   try {
+    const { slotKey } = req.params;
+    if (!slotKey || shouldSkipDuplicateImpression(req, `slot:${slotKey}`)) {
+      return res.json({ ok: true, deduped: true });
+    }
+    const slot = await getAdSlotByKey(slotKey);
+    if (!slot) return res.json({ ok: true, tracked: false, reason: 'slot_not_found' });
     await incrementSlotStats(req.params.slotKey, { impressions: 1 });
-    return res.json({ ok: true });
-  } catch {
-    return res.json({ ok: true });
+    return res.json({ ok: true, tracked: true });
+  } catch (err) {
+    if (!isMissingTable(err)) {
+      console.warn('[ads] slot impression ignored', { slotKey: req.params.slotKey, message: err?.message || String(err), code: err?.code });
+    }
+    return res.json({ ok: true, tracked: false });
   }
 }
 

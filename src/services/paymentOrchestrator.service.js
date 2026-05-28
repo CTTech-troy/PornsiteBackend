@@ -12,6 +12,21 @@ function normalizeProvider(value) {
   return '';
 }
 
+function envProvider(name) {
+  return normalizeProvider(process.env[name]);
+}
+
+function envBoolean(name, fallback) {
+  const raw = String(process.env[name] || '').trim().toLowerCase();
+  if (!raw) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw);
+}
+
+function envNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 export async function getPaymentGatewayConfig() {
   const [
     primary,
@@ -32,15 +47,17 @@ export async function getPaymentGatewayConfig() {
   ]);
 
   const normalizedFallback = normalizeProvider(fallback);
+  const envPrimary = envProvider('PAYMENT_PRIMARY_PROVIDER') || envProvider('PAYMENT_DEFAULT_PROVIDER');
+  const envFallback = envProvider('PAYMENT_FALLBACK_PROVIDER');
 
   return {
-    primary: normalizeProvider(primary) || 'flutterwave',
-    fallback: normalizedFallback || 'paystack',
-    flutterwaveEnabled,
-    paystackEnabled,
-    maxRetries: Math.max(0, Math.min(5, Number(maxRetries) || 2)),
-    retryDelayMs: Math.max(100, Number(retryDelayMs) || 750),
-    timeoutMs: Math.max(5000, Number(timeoutMs) || 20000),
+    primary: envPrimary || normalizeProvider(primary) || 'flutterwave',
+    fallback: envFallback || normalizedFallback || 'paystack',
+    flutterwaveEnabled: envBoolean('FLUTTERWAVE_ENABLED', flutterwaveEnabled),
+    paystackEnabled: envBoolean('PAYSTACK_ENABLED', paystackEnabled),
+    maxRetries: Math.max(0, Math.min(5, envNumber('PAYMENT_MAX_RETRIES', maxRetries) || 2)),
+    retryDelayMs: Math.max(100, envNumber('PAYMENT_RETRY_DELAY_MS', retryDelayMs) || 750),
+    timeoutMs: Math.max(5000, envNumber('PAYMENT_REQUEST_TIMEOUT_MS', timeoutMs) || 20000),
   };
 }
 

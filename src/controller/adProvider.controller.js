@@ -35,6 +35,7 @@ import {
   getPublicSlotsConfig,
   AD_SIZES,
   AD_PAGES,
+  getDefaultAdSlots,
   invalidateSlotCache,
 } from '../services/adSlot.service.js';
 import { getPlatformSettingsMap, saveAdminSettings } from '../services/platformSettings.service.js';
@@ -63,6 +64,9 @@ const EXOCLICK_DISPLAY_CONFIG = {
 const EXOCLICK_DISPLAY_ZONES = [
   { placement: 'leaderboard', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
   { placement: 'homepage_banner', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'feed_native', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 300, height: 250, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'category_feed', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 300, height: 250, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'mobile_inline', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 300, height: 100, config: EXOCLICK_DISPLAY_CONFIG },
   { placement: 'banner', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
   { placement: 'feed', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 640, height: 360, config: EXOCLICK_DISPLAY_CONFIG },
   { placement: 'native_card', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 640, height: 360, config: EXOCLICK_DISPLAY_CONFIG },
@@ -82,6 +86,8 @@ const SAFE_AD_DOMAINS = [
   'googleads.g.doubleclick.net',
   'securepubads.g.doubleclick.net',
   'googlesyndication.com',
+  'adtng.com',
+  'a.adtng.com',
   'quge5.com',
   'monetag.com',
   'www.monetag.com',
@@ -95,6 +101,25 @@ const SAFE_PROVIDER_PRIORITY_JSON = JSON.stringify(['exoclick', 'juicyads', 'mon
 const BLOCKED_SCRIPT_PATTERN =
   /adserver\.juicyads\.com|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|window\.open|top\.location|betway|casino|popads|popcash|propellerads|onclickads/i;
 const QUGE5_HOST_PATTERN = /quge5\.com/i;
+const MONITORING_DEDUPE_MS = 3000;
+const MONITORING_RATE_WINDOW_MS = 60_000;
+const MONITORING_RATE_LIMIT = 120;
+const monitoringRecent = new Map();
+const monitoringRate = new Map();
+const MONITORING_EVENT_TYPES = new Set([
+  'diagnostic',
+  'request',
+  'impression',
+  'started',
+  'complete',
+  'skip',
+  'click',
+  'error',
+  'timeout',
+  'empty_vast',
+  'blocked',
+  'adblock',
+]);
 
 function normalizeJuicyScriptUrl(url) {
   const value = String(url || '').trim();
@@ -115,7 +140,16 @@ function defaultZoneDimensions(placement) {
   const specs = {
     video_preroll: { width: 1920, height: 1080 },
     sidebar: { width: 300, height: 250 },
+    home_after_subheader_900x250: { width: 900, height: 250 },
     home_sidebar: { width: 300, height: 250 },
+    home_softcore_160x600: { width: 160, height: 600 },
+    feed_native: { width: 300, height: 250 },
+    category_feed: { width: 300, height: 250 },
+    mobile_inline: { width: 300, height: 100 },
+    homepage_top: { width: 900, height: 250 },
+    homepage_bottom: { width: 900, height: 250 },
+    sticky_banner: { width: 728, height: 90 },
+    before_footer: { width: 900, height: 250 },
     video_sidebar: { width: 300, height: 250 },
     video_recommended: { width: 300, height: 250 },
     creator_sidebar: { width: 300, height: 250 },
@@ -134,7 +168,7 @@ function defaultZoneDimensions(placement) {
 
 function inferSafeFormat(providerSlug, placement) {
   if (providerSlug === 'exoclick' && placement === 'video_preroll') return 'vast';
-  if (['feed', 'native_card', 'between_content'].includes(String(placement || ''))) return 'native';
+  if (['feed', 'feed_native', 'category_feed', 'mobile_inline', 'native_card', 'between_content'].includes(String(placement || ''))) return 'native';
   return 'banner';
 }
 
@@ -180,6 +214,11 @@ function sendFallbackJson(req, res, endpoint, payload, err) {
 function fallbackSafePolicy() {
   return {
     strictMode: true,
+    allowPreRoll: true,
+    allowSidebarAds: true,
+    allowFeedAds: true,
+    blockPopups: true,
+    blockRedirects: true,
     allowPopups: false,
     allowRedirects: false,
     allowFloatingAds: false,
@@ -211,22 +250,38 @@ function fallbackSafePolicy() {
     monetagNativeZoneId: APPROVED_MONETAG_ZONE_ID,
     monetagSidebarZoneId: APPROVED_MONETAG_ZONE_ID,
     monetagBannerZoneId: APPROVED_MONETAG_ZONE_ID,
-    monetagAllowedPages: ['home', 'video', 'creator', 'feed', 'search', 'live'],
+    monetagAllowedPages: AD_PAGES,
     monetagAllowedSlots: [
       'feed_native',
+      'home_after_subheader_900x250',
       'home_sidebar',
+      'home_softcore_160x600',
       'video_sidebar',
       'video_recommended',
       'creator_sidebar',
       'live_sidebar',
       'feed_sidebar',
       'search_sidebar',
+      'before_footer',
       'homepage_banner',
       'leaderboard',
       'banner',
     ],
     monetagAllowedDomains: MONETAG_SAFE_DOMAINS,
   };
+}
+
+function defaultPlacementForFallbackSlot(slot) {
+  if (slot.location === 'after_subheader' || slot.slot_key === 'home_after_subheader_900x250') return 'home_after_subheader_900x250';
+  if (slot.location === 'before_footer') return 'before_footer';
+  if (slot.page === 'home') return 'home_sidebar';
+  if (slot.page === 'video' && slot.location === 'recommended') return 'video_recommended';
+  if (slot.page === 'video') return 'video_sidebar';
+  if (slot.page === 'creator') return 'creator_sidebar';
+  if (slot.page === 'live') return 'live_sidebar';
+  if (slot.page === 'feed') return 'feed_sidebar';
+  if (slot.page === 'search') return 'search_sidebar';
+  return 'sidebar';
 }
 
 function fallbackAdConfig() {
@@ -299,17 +354,35 @@ function fallbackAdConfig() {
   };
 }
 
-function fallbackSlotsConfig({ page = null } = {}) {
-  const slots = [
-    { slotKey: 'home_sidebar', name: 'Home Sidebar MPU', page: 'home', location: 'sidebar', width: 300, height: 250, sizeLabel: '300x250', providerType: 'mixed', providerId: 'monetag', zoneId: APPROVED_MONETAG_ZONE_ID, placement: 'sidebar', displayMode: 'third_party_first', customEnabled: true, thirdPartyEnabled: true, deviceTarget: 'all', priority: 10, embedCode: null },
-    { slotKey: 'video_sidebar', name: 'Video Page Sidebar', page: 'video', location: 'sidebar', width: 300, height: 250, sizeLabel: '300x250', providerType: 'mixed', providerId: 'monetag', zoneId: APPROVED_MONETAG_ZONE_ID, placement: 'video_sidebar', displayMode: 'third_party_first', customEnabled: true, thirdPartyEnabled: true, deviceTarget: 'all', priority: 20, embedCode: null },
-    { slotKey: 'video_recommended', name: 'Video Recommended Sidebar', page: 'video', location: 'recommended', width: 300, height: 250, sizeLabel: '300x250', providerType: 'mixed', providerId: 'monetag', zoneId: APPROVED_MONETAG_ZONE_ID, placement: 'video_recommended', displayMode: 'third_party_first', customEnabled: true, thirdPartyEnabled: true, deviceTarget: 'all', priority: 30, embedCode: null },
-    { slotKey: 'creator_sidebar', name: 'Creator Sidebar MPU', page: 'creator', location: 'sidebar', width: 300, height: 250, sizeLabel: '300x250', providerType: 'mixed', providerId: 'monetag', zoneId: APPROVED_MONETAG_ZONE_ID, placement: 'creator_sidebar', displayMode: 'third_party_first', customEnabled: true, thirdPartyEnabled: true, deviceTarget: 'all', priority: 40, embedCode: null },
-    { slotKey: 'live_sidebar', name: 'Live Sidebar MPU', page: 'live', location: 'sidebar', width: 300, height: 250, sizeLabel: '300x250', providerType: 'mixed', providerId: 'monetag', zoneId: APPROVED_MONETAG_ZONE_ID, placement: 'live_sidebar', displayMode: 'third_party_first', customEnabled: true, thirdPartyEnabled: true, deviceTarget: 'all', priority: 50, embedCode: null },
-  ];
+function fallbackSlotsConfig({ page = null, device = 'desktop' } = {}) {
+  const slots = getDefaultAdSlots().map((slot) => ({
+    slotKey: slot.slot_key,
+    name: slot.name,
+    page: slot.page,
+    location: slot.location,
+    width: slot.width,
+    height: slot.height,
+    sizeLabel: slot.size_label,
+    providerType: slot.provider_type,
+    providerId: slot.provider_id || 'juicyads',
+    zoneId: slot.zone_id || null,
+    placement: defaultPlacementForFallbackSlot(slot),
+    displayMode: slot.display_mode,
+    customEnabled: slot.custom_enabled !== false,
+    thirdPartyEnabled: slot.third_party_enabled !== false,
+    deviceTarget: slot.device_target || 'all',
+    priority: slot.priority || 100,
+    embedCode: slot.embed_code || null,
+  }));
   const filteredSlots = page ? slots.filter((slot) => slot.page === page) : slots;
   return {
     enabled: true,
+    device,
+    layouts: {
+      desktop: { columns: 1, maxWidth: 336, gap: 16 },
+      tablet: { columns: 1, maxWidth: 336, gap: 14 },
+      mobile: { columns: 1, maxWidth: 320, gap: 12, sticky: false },
+    },
     customEnabled: true,
     thirdPartyEnabled: true,
     juicyAds: {
@@ -331,11 +404,56 @@ function fallbackSlotsConfig({ page = null } = {}) {
         sidebar: APPROVED_MONETAG_ZONE_ID,
         banner: APPROVED_MONETAG_ZONE_ID,
       },
-      allowedPages: ['home', 'video', 'creator', 'feed', 'search', 'live'],
+      allowedPages: AD_PAGES,
       allowedSlots: slots.map((slot) => slot.slotKey),
     },
     slots: filteredSlots,
+    slotMappings: Object.fromEntries(filteredSlots.map((slot) => [slot.slotKey, slot.placement])),
   };
+}
+
+function clientKey(req) {
+  return String(req.ip || req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || 'unknown')
+    .split(',')[0]
+    .trim()
+    .slice(0, 80);
+}
+
+function acceptMonitoringRequest(req, body) {
+  const now = Date.now();
+  const ip = clientKey(req);
+  const bucket = monitoringRate.get(ip) || { count: 0, resetAt: now + MONITORING_RATE_WINDOW_MS };
+  if (now > bucket.resetAt) {
+    bucket.count = 0;
+    bucket.resetAt = now + MONITORING_RATE_WINDOW_MS;
+  }
+  bucket.count += 1;
+  monitoringRate.set(ip, bucket);
+  if (bucket.count > MONITORING_RATE_LIMIT) return { ok: false, reason: 'rate_limited' };
+
+  const eventType = String(body.eventType || body.type || body.event || 'diagnostic')
+    .toLowerCase()
+    .slice(0, 80);
+  const dedupeKey = [
+    ip,
+    body.sessionId || '',
+    body.providerId || '',
+    body.zoneId || '',
+    body.placement || '',
+    eventType,
+  ].join('|');
+  const last = monitoringRecent.get(dedupeKey) || 0;
+  monitoringRecent.set(dedupeKey, now);
+
+  for (const [key, seenAt] of monitoringRecent) {
+    if (now - seenAt > MONITORING_RATE_WINDOW_MS) monitoringRecent.delete(key);
+  }
+  for (const [key, value] of monitoringRate) {
+    if (now > value.resetAt) monitoringRate.delete(key);
+  }
+
+  if (now - last < MONITORING_DEDUPE_MS) return { ok: false, reason: 'duplicate' };
+  return { ok: true, eventType };
 }
 
 export async function getPublicAdConfigHandler(req, res) {
@@ -350,6 +468,13 @@ export async function getPublicAdConfigHandler(req, res) {
 export async function postAdMonitoringEvent(req, res) {
   try {
     const body = req.body || {};
+    const accepted = acceptMonitoringRequest(req, body);
+    if (!accepted.ok) {
+      return res.status(202).json({ ok: true, id: null, stored: false, skipped: accepted.reason });
+    }
+    const eventType = MONITORING_EVENT_TYPES.has(String(accepted.eventType))
+      ? String(accepted.eventType)
+      : 'diagnostic';
     const id = await recordMonitoringEvent({
       providerId: body.providerId,
       zoneId: body.zoneId,
@@ -357,7 +482,7 @@ export async function postAdMonitoringEvent(req, res) {
       videoId: body.videoId,
       userId: req.user?.id || body.userId,
       fingerprint: body.fingerprint,
-      eventType: body.eventType || body.type || body.event || 'diagnostic',
+      eventType,
       placement: body.placement,
       deviceType: body.deviceType,
       browser: body.browser,
@@ -573,7 +698,7 @@ export async function getPublicSlotsConfigHandler(req, res) {
       req,
       res,
       'GET /api/ad-providers/slots/config',
-      fallbackSlotsConfig({ page: req.query.page || null }),
+      fallbackSlotsConfig({ page: req.query.page || null, device: req.query.device || 'desktop' }),
       err,
     );
   }
@@ -669,7 +794,7 @@ export async function saveAdminSafeAdSettings(req, res) {
       { key: 'ad_click_isolation', value: 'true' },
       { key: 'ad_safe_formats_only', value: 'true' },
       { key: 'ad_allowed_formats', value: '["banner","display","native","vast","video"]' },
-      { key: 'ad_allowed_placements', value: '["video_preroll","feed","native_card","between_content","sidebar","home_sidebar","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","homepage_banner","leaderboard","banner"]' },
+      { key: 'ad_allowed_placements', value: '["video_preroll","feed","native_card","between_content","sidebar","home_after_subheader_900x250","home_sidebar","home_softcore_160x600","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]' },
       { key: 'ad_allowed_domains', value: SAFE_AD_DOMAINS_JSON },
       { key: 'ad_provider_priority_order', value: SAFE_PROVIDER_PRIORITY_JSON },
       { key: 'juicyads_script_url', value: SAFE_JUICY_SCRIPT_URL },

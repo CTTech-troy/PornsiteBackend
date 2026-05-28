@@ -211,6 +211,7 @@ export async function addComment(req, res) {
     }
 
     return res.status(201).json({
+      success: true,
       comment: {
         commentId:  inserted.id,
         userId:     uid,

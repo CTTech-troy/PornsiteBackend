@@ -5,6 +5,7 @@ import {
   getCoinAnalytics,
   getCoinPackages,
   getGiftCatalog,
+  getGiftCatalogAnalytics,
   getGiftCatalogAdmin,
   createGiftCatalogItem,
   updateGiftCatalogItem,
@@ -18,6 +19,7 @@ import {
   toggleCoinPackage,
   transferCoins,
   updateCoinPackage,
+  uploadGiftImageAsset,
 } from '../services/coinWallet.service.js';
 import { createSecurePaymentSession } from '../services/securePayments.service.js';
 
@@ -35,7 +37,7 @@ export async function getPublicGiftCatalog(_req, res) {
     const gifts = await getGiftCatalog();
     return res.json({ success: true, ok: true, data: gifts });
   } catch (error) {
-    return res.status(500).json({ success: false, ok: false, error: error.message });
+    return res.json({ success: true, ok: true, data: [], warning: error.message });
   }
 }
 
@@ -129,9 +131,31 @@ export async function giftCreator(req, res) {
       giftId: giftId || gift?.id,
       gift,
     });
-    return res.json({ success: true, ok: true, newBalance: result.newBalance, giftId: result.giftId });
+    emitGiftRealtime(req, {
+      streamId,
+      senderId: req.uid,
+      senderName,
+      result,
+    });
+    return res.json({
+      success: true,
+      ok: true,
+      newBalance: result.newBalance,
+      giftId: result.giftId,
+      liveGiftId: result.liveGiftId,
+      totalGiftsAmount: result.totalGiftsAmount,
+      creatorAmount: result.creatorAmount,
+      platformAmount: result.platformAmount,
+      gift: result.gift,
+    });
   } catch (error) {
-    const status = error.code === 'INSUFFICIENT_TOKENS' ? 402 : 500;
+    const status = error.code === 'INSUFFICIENT_TOKENS'
+      ? 402
+      : error.code === 'GIFT_NOT_FOUND'
+        ? 400
+        : error.code === 'GIFT_SYSTEM_UNAVAILABLE'
+          ? 503
+          : 500;
     return res.status(status).json({ success: false, ok: false, error: error.message, code: error.code });
   }
 }
@@ -219,11 +243,11 @@ export async function getAdminCoinTransactions(req, res) {
 export async function getAdminGiftCatalog(_req, res) {
   try {
     const gifts = await getGiftCatalogAdmin({ includeInactive: true });
-    const activeGifts = gifts.filter((g) => g.isActive).length;
+    const stats = await getGiftCatalogAnalytics(gifts);
     return res.json({
       success: true,
       data: gifts,
-      stats: { total: gifts.length, active: activeGifts },
+      stats,
     });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -266,6 +290,16 @@ export async function deleteAdminGiftCatalogItem(req, res) {
   }
 }
 
+export async function uploadAdminGiftImage(req, res) {
+  try {
+    const data = await uploadGiftImageAsset(req.file);
+    return res.status(201).json({ success: true, ...data });
+  } catch (error) {
+    const status = error.code === 'INVALID_GIFT_IMAGE' ? 400 : 500;
+    return res.status(status).json({ success: false, error: error.message, message: error.message });
+  }
+}
+
 export async function getAdminCoinAnalytics(_req, res) {
   try {
     const analytics = await getCoinAnalytics();
@@ -273,4 +307,31 @@ export async function getAdminCoinAnalytics(_req, res) {
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
+}
+
+function emitGiftRealtime(req, { streamId, senderId, senderName, result }) {
+  const io = req.app?.get?.('io');
+  if (!io || !streamId || !result?.gift) return;
+  const gift = result.gift;
+  const payload = {
+    id: result.liveGiftId || result.giftId || `${Date.now()}`,
+    liveId: result.liveGiftId ? streamId : undefined,
+    roomId: result.liveGiftId ? undefined : streamId,
+    senderId,
+    senderName: senderName || 'Viewer',
+    giftId: gift.id,
+    giftType: gift.id,
+    giftName: gift.name,
+    name: gift.name,
+    emoji: gift.emoji,
+    imageUrl: gift.imageUrl,
+    animationType: gift.animationType,
+    category: gift.category,
+    rarity: gift.rarity,
+    amount: Number(gift.coinCost || gift.price || 0),
+    totalGiftsAmount: result.totalGiftsAmount,
+    createdAt: new Date().toISOString(),
+  };
+  if (result.liveGiftId) io.to(streamId).emit('new-gift', payload);
+  else io.to(streamId).emit('chat:gift', payload);
 }

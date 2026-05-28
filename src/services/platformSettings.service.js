@@ -9,6 +9,8 @@ const LANGUAGE_OPTIONS = ['en', 'en-US'];
 const TIMEZONE_OPTIONS = ['UTC', 'Africa/Lagos', 'America/Los_Angeles', 'America/New_York', 'Europe/London'];
 const QUALITY_OPTIONS = ['auto', '480p', '720p', '1080p'];
 const STORAGE_OPTIONS = ['supabase', 'firebase', 'cloudinary', 's3', 'mux', 'bunny'];
+const WATERMARK_POSITION_OPTIONS = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
+const WATERMARK_ANIMATION_OPTIONS = ['none', 'pulse', 'fade'];
 
 export const PLATFORM_SETTINGS_CATALOG = [
   // Brand and company
@@ -20,6 +22,16 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'contact_phone', label: 'Contact Phone', section: 'Brand', type: 'text', defaultValue: '', public: true },
   { key: 'company_name', label: 'Company Name', section: 'Brand', type: 'text', defaultValue: 'XStreamVideos', public: true },
   { key: 'company_address', label: 'Company Address', section: 'Brand', type: 'textarea', defaultValue: '', public: true },
+  { key: 'video_watermark_enabled', label: 'Video Watermark Enabled', section: 'Video Watermark', type: 'toggle', defaultValue: 'true', public: true },
+  { key: 'video_watermark_logo_url', label: 'Watermark Logo URL', section: 'Video Watermark', type: 'url', defaultValue: '', public: true },
+  { key: 'video_watermark_logo_url_dark', label: 'Dark Watermark Logo URL', section: 'Video Watermark', type: 'url', defaultValue: '', public: true },
+  { key: 'video_watermark_logo_url_light', label: 'Light Watermark Logo URL', section: 'Video Watermark', type: 'url', defaultValue: '', public: true },
+  { key: 'video_watermark_size_px', label: 'Watermark Size (px)', section: 'Video Watermark', type: 'number', defaultValue: '92', min: 32, max: 240, public: true },
+  { key: 'video_watermark_opacity', label: 'Watermark Opacity', section: 'Video Watermark', type: 'number', defaultValue: '0.72', min: 0.15, max: 1, public: true },
+  { key: 'video_watermark_margin_px', label: 'Watermark Margin (px)', section: 'Video Watermark', type: 'number', defaultValue: '16', min: 4, max: 80, public: true },
+  { key: 'video_watermark_position', label: 'Watermark Position', section: 'Video Watermark', type: 'select', defaultValue: 'bottom-right', options: WATERMARK_POSITION_OPTIONS, public: true },
+  { key: 'video_watermark_animation', label: 'Watermark Animation', section: 'Video Watermark', type: 'select', defaultValue: 'none', options: WATERMARK_ANIMATION_OPTIONS, public: true },
+  { key: 'video_watermark_burn_in_enabled', label: 'Burn Watermark Into Exports', section: 'Video Watermark', type: 'toggle', defaultValue: 'true', public: true },
 
   // Legal
   { key: 'terms_url', label: 'Terms URL', section: 'Legal', type: 'url', defaultValue: '/terms', public: true },
@@ -107,8 +119,8 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'ad_preroll_enabled', label: 'Pre-roll Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'ad_feed_ads_enabled', label: 'Feed Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'ad_banner_ads_enabled', label: 'Banner Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
-  { key: 'ad_allowed_placements', label: 'Allowed Placements (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["video_preroll","feed","native_card","between_content","sidebar","home_sidebar","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","homepage_banner","leaderboard","banner"]' },
-  { key: 'ad_allowed_domains', label: 'Allowed Ad Domains (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["juicyads.com","www.juicyads.com","js.juicyads.com","poweredby.jads.co","jads.co","exoclick.com","magsrv.com","a.magsrv.com","s.magsrv.com","googleads.g.doubleclick.net","securepubads.g.doubleclick.net","googlesyndication.com","quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com"]' },
+  { key: 'ad_allowed_placements', label: 'Allowed Placements (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["video_preroll","feed","native_card","between_content","sidebar","home_after_subheader_900x250","home_sidebar","home_softcore_160x600","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]' },
+  { key: 'ad_allowed_domains', label: 'Allowed Ad Domains (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["juicyads.com","www.juicyads.com","js.juicyads.com","poweredby.jads.co","jads.co","exoclick.com","magsrv.com","a.magsrv.com","s.magsrv.com","googleads.g.doubleclick.net","securepubads.g.doubleclick.net","googlesyndication.com","adtng.com","a.adtng.com","quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com"]' },
   { key: 'juicyads_enabled', label: 'JuicyAds Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'juicyads_script_url', label: 'JuicyAds Script URL', section: 'Monetization', type: 'url', defaultValue: 'https://poweredby.jads.co/js/jads.js' },
   { key: 'juicyads_sidebar_zone_id', label: 'JuicyAds Sidebar Zone ID', section: 'Monetization', type: 'text', defaultValue: '1118510' },
@@ -124,7 +136,7 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'monetag_sidebar_zone_id', label: 'Monetag Sidebar Zone ID', section: 'Monetization', type: 'text', defaultValue: '242279' },
   { key: 'monetag_banner_zone_id', label: 'Monetag Banner Zone ID', section: 'Monetization', type: 'text', defaultValue: '242279' },
   { key: 'monetag_allowed_pages', label: 'Monetag Allowed Pages (JSON)', section: 'Monetization', type: 'json', defaultValue: '["home","video","creator","feed","search","live"]' },
-  { key: 'monetag_allowed_slots', label: 'Monetag Allowed Slots (JSON)', section: 'Monetization', type: 'json', defaultValue: '["feed_native","home_sidebar","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","homepage_banner","leaderboard","banner"]' },
+  { key: 'monetag_allowed_slots', label: 'Monetag Allowed Slots (JSON)', section: 'Monetization', type: 'json', defaultValue: '["home_feed_native","home_mobile_inline_300x100","category_feed_native","feed_native","mobile_inline","category_feed","home_after_subheader_900x250","home_sidebar","home_bottom_900x250","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","homepage_top","homepage_bottom","leaderboard","banner"]' },
   { key: 'monetag_allowed_domains', label: 'Monetag Allowed Domains (JSON)', section: 'Monetization', type: 'json', defaultValue: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com"]' },
   { key: 'google_ad_manager_enabled', label: 'Google Ad Manager Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'false' },
   { key: 'coin_to_usd_rate', label: 'Coin to USD Rate', section: 'Monetization', type: 'number', defaultValue: '0.01', min: 0 },
@@ -166,6 +178,7 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'uploads_enabled', label: 'Uploads Enabled', section: 'Uploads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'max_video_size_mb', label: 'Max Video Size (MB)', section: 'Uploads', type: 'number', defaultValue: '1024', min: 1, max: 10240 },
   { key: 'max_thumbnail_size_mb', label: 'Max Thumbnail Size (MB)', section: 'Uploads', type: 'number', defaultValue: '10', min: 1, max: 100 },
+  { key: 'import_batch_size', label: 'Import Chunk Size', section: 'Uploads', type: 'number', defaultValue: '500', min: 100, max: 10000 },
   { key: 'allowed_video_types', label: 'Allowed Video Types JSON', section: 'Uploads', type: 'json', defaultValue: '["video/mp4","video/webm","application/x-mpegURL"]' },
   { key: 'video_storage_provider', label: 'Video Storage Provider', section: 'Uploads', type: 'select', defaultValue: 'supabase', options: STORAGE_OPTIONS },
   { key: 'default_video_quality', label: 'Default Video Quality', section: 'Uploads', type: 'select', defaultValue: 'auto', options: QUALITY_OPTIONS, public: true },

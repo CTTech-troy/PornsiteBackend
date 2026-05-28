@@ -75,6 +75,7 @@ router.get('/system/latency', adminSystem.getRouteLatency);
 // --- Sub-routers ---
 router.use('/content', adminContentRouter);
 router.use('/content/imports', adminVideoImportRouter);
+router.use('/imports', adminVideoImportRouter);
 router.use('/content-removal', contentRemovalRouter);
 router.use('/moderation', adminModerationRouter);
 router.use('/search', adminSearchRouter);

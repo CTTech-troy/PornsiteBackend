@@ -9,7 +9,7 @@ import crypto from 'crypto';
  *
  * Environment variable:
  *   PAYMENT_SERVICE_URL  — base URL of the payment service
- *     Production: https://payments.xstreamvideos.site
+ *     Production: https://pornsite-paymentsystem-1.onrender.com
  *
  * The backend and payment service are fully independent:
  *   - The backend calls this client only for checkout creation.
@@ -17,7 +17,7 @@ import crypto from 'crypto';
  *   - Either service can be down without crashing the other.
  */
 
-const PRODUCTION_PAYMENT_SERVICE_URL = 'https://payments.xstreamvideos.site';
+const PRODUCTION_PAYMENT_SERVICE_URL = 'https://pornsite-paymentsystem-1.onrender.com';
 const _rawUrl = process.env.PAYMENT_SERVICE_URL;
 
 // Warn loudly in production if the env var is missing.

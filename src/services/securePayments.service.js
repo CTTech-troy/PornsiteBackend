@@ -370,6 +370,10 @@ export async function createSecurePaymentSession({
         idempotencyKey,
         officialAmount: product.amount,
         officialUnits: product.officialUnits,
+        userId,
+        productType: product.productType,
+        productId: product.productId,
+        orderKey: intentKey,
       },
     });
   } catch (err) {

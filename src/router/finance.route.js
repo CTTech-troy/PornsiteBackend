@@ -9,6 +9,10 @@ import {
   deleteMembershipPlan,
   getSubscribers,
   getPaymentsAdmin,
+  getPaymentHistoryAdmin,
+  exportPaymentHistoryCsv,
+  exportPaymentHistoryExcel,
+  exportPaymentHistoryPdf,
   getFraudAlertsAdmin,
   getWebhookEventsAdmin,
   getPaymentAuditAdmin,
@@ -68,6 +72,11 @@ router.delete('/membership-plans/:id', deleteMembershipPlan);
 router.get('/subscribers', getSubscribers);
 
 // Payments
+router.get('/payment-history', getPaymentHistoryAdmin);
+router.get('/payment-history/export.csv', exportPaymentHistoryCsv);
+router.get('/payment-history/export.xlsx', exportPaymentHistoryExcel);
+router.get('/payment-history/export.xls', exportPaymentHistoryExcel);
+router.get('/payment-history/export.pdf', exportPaymentHistoryPdf);
 router.get('/payments', getPaymentsAdmin);
 router.get('/fraud-alerts', getFraudAlertsAdmin);
 router.get('/webhook-events', getWebhookEventsAdmin);

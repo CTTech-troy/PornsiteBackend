@@ -4,6 +4,14 @@ import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
 import { loadExternalFeedConfig } from '../services/externalFeedConfig.service.js';
 import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 
+function creatorPriorityRank(card = {}) {
+  if (card.creatorPriority === true || card.userId || card.user_id || card.creatorId || card.creator_id) return 0;
+  const source = String(card.source || card.contentSource || card.content_source || '').toLowerCase();
+  if (['community', 'creator', 'rtdb', 'media', 'official_import'].includes(source)) return 0;
+  if (card.officialCompanyContent === true || card.official_company_content === true) return 1;
+  return 2;
+}
+
 export async function getTrending(req, res) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -25,7 +33,11 @@ export async function getTrending(req, res) {
       }
     }
 
-    merged.sort((a, b) => Number(b.views || b.totalViews || 0) - Number(a.views || a.totalViews || 0));
+    merged.sort((a, b) => {
+      const priority = creatorPriorityRank(a) - creatorPriorityRank(b);
+      if (priority !== 0) return priority;
+      return Number(b.views || b.totalViews || 0) - Number(a.views || a.totalViews || 0);
+    });
     const data = merged.slice(0, limit);
     ingestHomeFeedVideos(data);
 

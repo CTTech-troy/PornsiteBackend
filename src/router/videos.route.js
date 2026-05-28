@@ -4,7 +4,12 @@ import multer from 'multer';
 import os from 'os';
 import path from 'path';
 import { fetchPornstars } from '../controller/star.controller.js';
-import { getVideosPaginated, getVideoById as getFeedVideoById } from '../controller/videoFeed.controller.js';
+import {
+  getVideosPaginated,
+  getLatestVideos,
+  getCategoryVideos,
+  getVideoById as getFeedVideoById,
+} from '../controller/videoFeed.controller.js';
 import * as videoPublish from '../controller/videoPublish.controller.js';
 import * as videoInteractions from '../controller/videoInteractions.controller.js';
 import * as search from '../controller/search.controller.js';
@@ -13,6 +18,7 @@ import * as homeFeed from '../controller/homeFeed.controller.js';
 import * as todaysSelection from '../controller/todaysSelection.controller.js';
 import * as streamCtrl from '../controller/stream.controller.js';
 import * as vastAdCtrl from '../controller/vastAd.controller.js';
+import * as importedVideos from '../controller/importedVideos.controller.js';
 import * as playbackAnalytics from '../controller/playbackAnalytics.controller.js';
 import * as watchHistory from '../controller/watchHistory.controller.js';
 import { listPosts } from '../controller/videos.controller.js';
@@ -117,6 +123,9 @@ router.get('/', optionalAuth, async (req, res) => {
 });
 
 router.get('/posts', optionalAuth, listPosts);
+router.get('/imported', importedVideos.getImportedVideos);
+router.get('/imported-categories', importedVideos.getImportedVideoCategories);
+router.get('/imported/:id', importedVideos.getImportedVideoById);
 
 // Protected creator publishing routes.
 router.post('/upload', requireAuth, requireVerifiedEmail, attachPublishFiles, videoPublish.uploadAndPublish);
@@ -160,7 +169,9 @@ router.get('/search/config', search.searchConfig);
 router.get('/search/suggest', search.searchSuggest);
 router.get('/search/trending-queries', search.searchTrendingQueries);
 router.get('/search', search.searchVideos);
+router.get('/latest', optionalAuth, getLatestVideos);
 router.get('/trending', trending.getTrending);
+router.get('/category/:slug', optionalAuth, getCategoryVideos);
 router.get('/home-feed', optionalAuth, homeFeed.getHomeFeed);
 router.get('/todays-selection', todaysSelection.getTodaysSelection);
 router.get('/pornstars', async (req, res) => {

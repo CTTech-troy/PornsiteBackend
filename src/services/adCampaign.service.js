@@ -1,10 +1,32 @@
 import { supabase } from '../config/supabase.js';
 import { getPlatformSettingsMap } from './platformSettings.service.js';
 
-const SAFE_CAMPAIGN_PLACEMENTS = new Set(['homepage_banner', 'sidebar', 'feed']);
+const SAFE_CAMPAIGN_PLACEMENTS = new Set([
+  'homepage_banner',
+  'homepage_top',
+  'homepage_bottom',
+  'sidebar',
+  'feed',
+  'feed_native',
+  'mobile_inline',
+  'category_feed',
+  'video_page',
+  'sticky_banner',
+  'native_card',
+  'before_footer',
+]);
 
 function isMissingTable(err) {
-  return err?.code === '42P01' || err?.code === 'PGRST200' || err?.code === 'PGRST205';
+  const msg = String(err?.message || err?.code || '');
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('schema cache') ||
+    err?.code === '42P01' ||
+    err?.code === '42703' ||
+    err?.code === 'PGRST200' ||
+    err?.code === 'PGRST204' ||
+    err?.code === 'PGRST205'
+  );
 }
 
 function hashSeed(input) {
@@ -26,16 +48,23 @@ export function mapCampaignRow(row) {
     imageUrl: row.image_url || null,
     clickUrl: row.redirect_url || row.click_url || null,
     placement: row.placement,
+    placementType: row.placement_type || row.placement || null,
+    slotKey: row.slot_key || null,
+    adSize: row.ad_size || null,
     creativeType: row.creative_type || row.source_type || 'image',
     sourceType: row.source_type || 'image',
     externalPlatform: row.external_platform || null,
     embedHtml: row.embed_sanitized_html || row.embed_html || null,
     ctaText: row.cta_text || 'Learn More',
-    width: row.image_width || null,
-    height: row.image_height || null,
+    width: row.image_width || row.width || null,
+    height: row.image_height || row.height || null,
     networkVisible: Boolean(row.network_visible),
     ownership: row.ownership || 'platform',
     paymentStatus: row.payment_status || 'waived',
+    priority: row.priority ?? null,
+    deviceTarget: row.device_target || 'all',
+    metadata: row.metadata || {},
+    renderFailures: Number(row.render_failures || 0),
   };
 }
 
@@ -57,22 +86,34 @@ function isBillableForServe(row) {
 export async function listActiveCampaigns(placement, { networkOnly = false } = {}) {
   if (placement && !SAFE_CAMPAIGN_PLACEMENTS.has(placement)) return [];
   if (!supabase) return [];
-  let query = supabase
-    .from('ad_campaigns')
-    .select('*')
-    .eq('status', 'active')
-    .eq('is_active', true)
-    .order('priority', { ascending: false, nullsFirst: false })
-    .order('created_at', { ascending: false })
-    .limit(48);
+  const runQuery = async ({ includePriority = true, includeNetwork = true } = {}) => {
+    let query = supabase
+      .from('ad_campaigns')
+      .select('*')
+      .eq('status', 'active')
+      .eq('is_active', true);
 
-  if (placement) query = query.eq('placement', placement);
-  if (networkOnly) query = query.eq('network_visible', true);
+    if (placement) query = query.eq('placement', placement);
+    if (networkOnly && includeNetwork) query = query.eq('network_visible', true);
+    if (includePriority) query = query.order('priority', { ascending: false, nullsFirst: false });
+    return query.order('created_at', { ascending: false }).limit(48);
+  };
 
-  const { data, error } = await query;
+  let { data, error } = await runQuery();
+  if (error && (error.code === '42703' || error.code === 'PGRST204')) {
+    const retry = await runQuery({ includePriority: false, includeNetwork: !/network_visible/i.test(error.message || '') });
+    data = retry.data;
+    error = retry.error;
+  }
   if (error) {
     if (isMissingTable(error)) return [];
-    throw error;
+    console.warn('[ads] active campaign lookup failed; returning empty inventory', {
+      placement,
+      networkOnly,
+      message: error.message || String(error),
+      code: error.code,
+    });
+    return [];
   }
 
   return filterScheduled(data || [])

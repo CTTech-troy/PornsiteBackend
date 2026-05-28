@@ -46,6 +46,13 @@ const OFFICIAL_EMBED_PATTERNS = [
   /^https:\/\/player\.vimeo\.com\/video\/\d+/i,
   /^https:\/\/www\.dailymotion\.com\/embed\/video\/[a-zA-Z0-9]+/i,
 ];
+const IMPORTED_SOURCE_VALUES = new Set([
+  'imported_csv',
+  'imported',
+  'external_catalog',
+  'official_import',
+  'csv_import',
+]);
 
 function hostname(url) {
   try {
@@ -86,16 +93,28 @@ export function isApprovedDirectHost(url) {
   return Boolean(host && APPROVED_DIRECT_HOSTS.some((pattern) => pattern.test(host)));
 }
 
-export function isDirectPlayableStreamUrl(url) {
+export function isImportedCatalogSource(video = {}) {
+  if (!video || typeof video !== 'object') return false;
+  const source = String(video.source || video.contentSource || video.content_source || '').trim().toLowerCase();
+  const sourceType = String(video.sourceType || video.source_type || '').trim().toLowerCase();
+  return (
+    IMPORTED_SOURCE_VALUES.has(source) ||
+    IMPORTED_SOURCE_VALUES.has(sourceType) ||
+    (sourceType.includes('imported') && sourceType.includes('stream'))
+  );
+}
+
+export function isDirectPlayableStreamUrl(url, options = {}) {
   if (!isSafeHttpUrl(url)) return false;
   const value = url.trim();
   if (isBlockedStreamHost(value)) return false;
   if (isKnownUnsupportedPageUrl(value)) return false;
   if (WATCH_PAGE_PATTERNS.some((pattern) => pattern.test(value))) return false;
-  if (!isApprovedDirectHost(value)) return false;
+  const allowUnapprovedDirectHost = options.allowUnapprovedDirectHost === true;
+  if (!isApprovedDirectHost(value) && !allowUnapprovedDirectHost) return false;
   if (DIRECT_STREAM_EXT.test(value)) return true;
   if (/\/storage\/v1\/object\/public\//i.test(value)) return true;
-  return /\/(video|videos|stream)\//i.test(value);
+  return isApprovedDirectHost(value) && /\/(video|videos|stream)\//i.test(value);
 }
 
 function extractIframeSrc(value) {
@@ -120,6 +139,22 @@ function playbackCandidates(video = {}) {
     video.videoUrl,
     video.video_url,
     video.url,
+    video.videoSrc,
+  ];
+  return values
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean);
+}
+
+function directStreamCandidates(video = {}) {
+  const values = [
+    video.playbackUrl,
+    video.playback_url,
+    video.streamUrl,
+    video.stream_url,
+    video.storage_url,
+    video.file_url,
+    video.download_url,
     video.videoSrc,
   ];
   return values
@@ -154,7 +189,17 @@ export function validateVideoPlaybackSource(video = {}) {
     };
   }
 
-  if (video.playable === false || video.validationStatus === 'unsupported' || video.validation_status === 'unsupported') {
+  const importedCatalogSource = isImportedCatalogSource(video);
+  const rawPlaybackType = String(video.playback_type || video.playbackType || '').trim().toLowerCase();
+  const iframeEmbed = String(video.iframe_embed || video.iframeEmbed || '').trim();
+  const playbackType = iframeEmbed ? 'external_embed' : rawPlaybackType;
+  const sourceType = String(video.sourceType || video.source_type || '').toLowerCase();
+  const allowImportedDirectHost = importedCatalogSource || sourceType.includes('imported');
+  const markedUnsupported =
+    video.playable === false ||
+    video.validationStatus === 'unsupported' ||
+    video.validation_status === 'unsupported';
+  if (markedUnsupported && !importedCatalogSource) {
     return {
       playable: false,
       sourceType: video.sourceType || video.source_type || 'unsupported',
@@ -176,6 +221,33 @@ export function validateVideoPlaybackSource(video = {}) {
     };
   }
 
+  const previewUrl = getPreviewUrl(video);
+  for (const candidate of directStreamCandidates(video)) {
+    if (previewUrl && candidate === previewUrl) continue;
+    if (isDirectPlayableStreamUrl(candidate, { allowUnapprovedDirectHost: allowImportedDirectHost })) {
+      return {
+        playable: true,
+        sourceType: isApprovedDirectHost(candidate) ? 'approved_stream' : 'imported_direct_stream',
+        embedAllowed: false,
+        validationStatus: 'playable',
+        playbackUrl: candidate,
+        externalUrl: '',
+        reason: '',
+      };
+    }
+  }
+
+  if (iframeEmbed && (importedCatalogSource || playbackType === 'external_embed')) {
+    return {
+      playable: true,
+      sourceType: 'external_embed',
+      embedAllowed: true,
+      validationStatus: 'playable',
+      playbackUrl: extractIframeSrc(iframeEmbed) || '',
+      reason: '',
+    };
+  }
+
   const embedSource =
     String(video.embed_url || video.embedUrl || '').trim() ||
     extractIframeSrc(String(video.embed_code || video.embedCode || ''));
@@ -184,6 +256,16 @@ export function validateVideoPlaybackSource(video = {}) {
       return {
         playable: true,
         sourceType: 'official_embed',
+        embedAllowed: true,
+        validationStatus: 'playable',
+        playbackUrl: embedSource,
+        reason: '',
+      };
+    }
+    if (importedCatalogSource || playbackType === 'external_embed') {
+      return {
+        playable: true,
+        sourceType: 'external_embed',
         embedAllowed: true,
         validationStatus: 'playable',
         playbackUrl: embedSource,
@@ -204,17 +286,17 @@ export function validateVideoPlaybackSource(video = {}) {
   if (previewResult) return previewResult;
 
   const source = String(video.source || '').toLowerCase();
-  const previewUrl = getPreviewUrl(video);
 
   for (const candidate of playbackCandidates(video)) {
     if (source === 'external' && previewUrl && candidate === previewUrl) continue;
-    if (isDirectPlayableStreamUrl(candidate)) {
+    if (isDirectPlayableStreamUrl(candidate, { allowUnapprovedDirectHost: allowImportedDirectHost })) {
       return {
         playable: true,
-        sourceType: isApprovedDirectHost(candidate) ? 'approved_stream' : 'direct_stream',
+        sourceType: isApprovedDirectHost(candidate) ? 'approved_stream' : 'imported_direct_stream',
         embedAllowed: false,
         validationStatus: 'playable',
         playbackUrl: candidate,
+        externalUrl: '',
         reason: '',
       };
     }
@@ -223,9 +305,25 @@ export function validateVideoPlaybackSource(video = {}) {
         playable: false,
         sourceType: 'external_page',
         embedAllowed: false,
-        validationStatus: 'unsupported',
+        validationStatus: 'external_page',
         playbackUrl: '',
+        externalUrl: candidate,
         reason: 'Source is a page URL that cannot play inside the platform.',
+      };
+    }
+  }
+
+  if (importedCatalogSource) {
+    const candidate = playbackCandidates(video).find((value) => isSafeHttpUrl(value));
+    if (candidate) {
+      return {
+        playable: false,
+        sourceType: 'external_page',
+        embedAllowed: false,
+        validationStatus: 'external_page',
+        playbackUrl: '',
+        externalUrl: candidate,
+        reason: 'Imported source is a webpage URL and must open on the source site.',
       };
     }
   }
@@ -253,8 +351,38 @@ export function validateVideoPlaybackSource(video = {}) {
 
 export function annotatePlayableVideo(video = {}) {
   const validation = validateVideoPlaybackSource(video);
+  const externalUrl = validation.externalUrl || video.externalUrl || video.external_url || video.pageUrl || video.page_url || '';
+  const publicVideoUrl = String(
+    video.videoUrl ||
+    video.video_url ||
+    video.streamUrl ||
+    video.stream_url ||
+    video.storage_url ||
+    video.playbackUrl ||
+    video.playback_url ||
+    ''
+  ).trim();
+  const thumbnailUrl = video.thumbnailUrl || video.thumbnail_url || video.thumbnail || null;
+  const existingPlaybackType = String(video.playbackType || video.playback_type || '').trim().toLowerCase();
+  const playbackType = (
+    validation.sourceType === 'external_embed' ||
+    validation.sourceType === 'official_embed'
+      ? 'external_embed'
+      : validation.playable
+        ? 'internal'
+        : existingPlaybackType || (validation.validationStatus === 'external_page' ? 'external_redirect' : '')
+  );
   return {
     ...video,
+    videoUrl: publicVideoUrl || video.videoUrl || video.video_url || '',
+    video_url: publicVideoUrl || video.video_url || video.videoUrl || '',
+    iframeEmbed: video.iframeEmbed || video.iframe_embed || '',
+    iframe_embed: video.iframe_embed || video.iframeEmbed || '',
+    playbackType,
+    playback_type: playbackType,
+    thumbnailUrl,
+    thumbnail_url: thumbnailUrl,
+    duration: video.duration ?? video.durationSeconds ?? video.duration_seconds ?? 0,
     playable: validation.playable,
     sourceType: validation.sourceType,
     source_type: validation.sourceType,
@@ -264,6 +392,10 @@ export function annotatePlayableVideo(video = {}) {
     validation_status: validation.validationStatus,
     playbackUrl: validation.playbackUrl,
     playback_url: validation.playbackUrl,
+    externalUrl,
+    external_url: externalUrl,
+    pageUrl: externalUrl || video.pageUrl || video.page_url || '',
+    page_url: externalUrl || video.page_url || video.pageUrl || '',
     unavailableReason: validation.reason || '',
   };
 }
@@ -279,6 +411,17 @@ export function filterPlayableVideos(videos = []) {
 /** Home/trending grid: only show videos that can play inside the platform. */
 export function isListableInHomeFeed(video = {}) {
   if (!video || typeof video !== 'object') return false;
+  if (video.listableInFeed === true || video.feedVisible === true) return true;
+  const source = String(video.source || video.contentSource || video.content_source || '').toLowerCase();
+  const thumbnail = String(video.thumbnail || video.thumbnailUrl || video.thumbnail_url || '').trim();
+  const url = String(video.videoUrl || video.video_url || video.videoSrc || video.pageUrl || video.externalUrl || video.url || '').trim();
+  if (
+    ['imported_csv', 'imported', 'external_catalog'].includes(source) &&
+    thumbnail &&
+    isSafeHttpUrl(url)
+  ) {
+    return true;
+  }
   return video.playable === true;
 }
 

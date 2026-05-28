@@ -6,7 +6,15 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 
 function isMissingTable(err) {
   const msg = String(err?.message || err?.code || '');
-  return msg.includes('does not exist') || err?.code === '42P01' || err?.code === 'PGRST205';
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('schema cache') ||
+    err?.code === '42P01' ||
+    err?.code === '42703' ||
+    err?.code === 'PGRST200' ||
+    err?.code === 'PGRST204' ||
+    err?.code === 'PGRST205'
+  );
 }
 
 function isInvalidReferenceInput(err) {
@@ -83,9 +91,11 @@ async function insertMonitoringRow(row) {
   if (!error) return data?.id || null;
 
   if (isMissingTable(error)) {
-    console.warn('[ad-monitoring] ad_monitoring_events table missing; event accepted without persistence', {
+    console.warn('[ad-monitoring] monitoring table/schema unavailable; event accepted without persistence', {
       eventType: row.event_type,
       providerId: row.provider_id,
+      message: error.message || String(error),
+      code: error.code,
     });
     return null;
   }
@@ -198,10 +208,14 @@ export async function getMonitoringOverview(range = '24h') {
   if (!supabase) return empty;
 
   const [eventsRes, vastSessionsRes, vastEventsRes] = await Promise.all([
-    supabase.from('ad_monitoring_events').select('event_type,revenue_usd,provider_id').gte('created_at', since),
+    supabase.from('ad_monitoring_events').select('event_type,revenue_usd,provider_id,session_id').gte('created_at', since),
     supabase.from('vast_ad_sessions').select('id,status').gte('started_at', since),
     supabase.from('vast_ad_events').select('event_type').gte('created_at', since),
   ]);
+
+  if (eventsRes.error && !isMissingTable(eventsRes.error)) throw eventsRes.error;
+  if (vastSessionsRes.error && !isMissingTable(vastSessionsRes.error)) throw vastSessionsRes.error;
+  if (vastEventsRes.error && !isMissingTable(vastEventsRes.error)) throw vastEventsRes.error;
 
   const events = eventsRes.data || [];
   const vastSessions = vastSessionsRes.data || [];
@@ -259,6 +273,8 @@ export async function getSessionTimeline(sessionId) {
     supabase.from('ad_monitoring_events').select('*').eq('session_id', sessionId).order('created_at'),
     supabase.from('vast_ad_events').select('*').eq('session_id', sessionId).order('created_at'),
   ]);
+  if (monitoring.error && !isMissingTable(monitoring.error)) throw monitoring.error;
+  if (vast.error && !isMissingTable(vast.error)) throw vast.error;
   const items = [
     ...(monitoring.data || []).map((r) => ({ source: 'monitoring', ...r })),
     ...(vast.data || []).map((r) => ({ source: 'vast', event_type: r.event_type, created_at: r.created_at, metadata: r.metadata })),
@@ -270,23 +286,30 @@ export async function getProviderAnalytics(range = '30d') {
   const since = rangeToSince(range);
   if (!supabase) return [];
 
-  const { data: providers } = await supabase.from('ad_providers').select('*').order('priority');
-  const { data: events } = await supabase
+  const { data: providers, error: providersError } = await supabase.from('ad_providers').select('*').order('priority');
+  if (providersError) {
+    if (isMissingTable(providersError)) return [];
+    throw providersError;
+  }
+  const { data: events, error: eventsError } = await supabase
     .from('ad_monitoring_events')
     .select('provider_id,event_type,revenue_usd')
     .gte('created_at', since);
+  if (eventsError && !isMissingTable(eventsError)) throw eventsError;
 
-  const { data: vastEvents } = await supabase
+  const { data: vastEvents, error: vastEventsError } = await supabase
     .from('vast_ad_events')
     .select('session_id,event_type')
     .gte('created_at', since);
+  if (vastEventsError && !isMissingTable(vastEventsError)) throw vastEventsError;
 
   const vastByProvider = {};
   if (vastEvents?.length) {
-    const { data: sessions } = await supabase
+    const { data: sessions, error: sessionsError } = await supabase
       .from('vast_ad_sessions')
       .select('id,vast_tag_url')
       .gte('started_at', since);
+    if (sessionsError && !isMissingTable(sessionsError)) throw sessionsError;
     const exoSessions = (sessions || []).filter((s) => String(s.vast_tag_url || '').includes('magsrv'));
     vastByProvider.exoclick = exoSessions.length;
   }
@@ -322,11 +345,15 @@ export async function getProviderAnalytics(range = '30d') {
 export async function getDailyAnalytics(range = '30d') {
   const since = rangeToSince(range);
   if (!supabase) return [];
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('ad_monitoring_events')
     .select('created_at,event_type,revenue_usd')
     .gte('created_at', since)
     .order('created_at');
+  if (error) {
+    if (isMissingTable(error)) return [];
+    throw error;
+  }
   const byDay = {};
   for (const row of data || []) {
     const day = String(row.created_at).slice(0, 10);

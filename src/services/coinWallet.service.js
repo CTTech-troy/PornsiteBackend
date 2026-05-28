@@ -551,33 +551,57 @@ export async function transferCoins({
   };
 }
 
-const STATIC_GIFT_CATALOG = [
-  { id: 'rose', name: 'Rose', coinCost: 30, tone: 'from-rose-500 to-red-500' },
-  { id: 'spark', name: 'Spark', coinCost: 75, tone: 'from-amber-400 to-orange-500' },
-  { id: 'halo', name: 'Halo', coinCost: 120, tone: 'from-cyan-400 to-blue-500' },
-  { id: 'crown', name: 'Crown', coinCost: 300, tone: 'from-fuchsia-500 to-pink-500' },
-  { id: 'diamond', name: 'Diamond', coinCost: 600, tone: 'from-sky-400 to-indigo-500' },
-];
+const GIFT_SELECT_COLUMNS = [
+  'id',
+  'name',
+  'coin_cost',
+  'emoji',
+  'tone',
+  'image_url',
+  'animation_type',
+  'category',
+  'rarity',
+  'is_active',
+  'admin_created',
+  'sort_order',
+  'metadata',
+  'created_at',
+  'updated_at',
+].join(',');
+const GIFT_IMAGE_TYPES = new Map([
+  ['image/png', 'png'],
+  ['image/svg+xml', 'svg'],
+  ['image/webp', 'webp'],
+  ['image/gif', 'gif'],
+  ['image/jpeg', 'jpg'],
+]);
+
+function giftUnavailableError(message = 'Gift catalog is not configured') {
+  const err = new Error(message);
+  err.code = 'GIFT_SYSTEM_UNAVAILABLE';
+  return err;
+}
 
 export async function getGiftCatalog() {
   if (!isConfigured() || !supabase) {
-    return STATIC_GIFT_CATALOG.map((g) => ({ ...g, price: g.coinCost }));
+    return [];
   }
 
   const { data, error } = await supabase
     .from('gift_catalog')
-    .select('id,name,coin_cost,emoji,tone,sort_order,metadata,image_url')
+    .select(GIFT_SELECT_COLUMNS)
     .eq('is_active', true)
+    .eq('admin_created', true)
     .order('sort_order', { ascending: true });
 
   if (error) {
-    if (isMissingDbFeature(error)) {
-      return STATIC_GIFT_CATALOG.map((g) => ({ ...g, price: g.coinCost }));
-    }
+    if (isMissingDbFeature(error)) return [];
     throw error;
   }
 
-  return (data || []).map(normalizeGiftCatalogRow);
+  return (data || [])
+    .map(normalizeGiftCatalogRow)
+    .filter((gift) => gift?.id && gift.isActive && gift.adminCreated && gift.coinCost > 0);
 }
 
 function normalizeGiftCatalogRow(row) {
@@ -590,15 +614,19 @@ function normalizeGiftCatalogRow(row) {
     || metadata.icon_url
     || null;
   return {
-    id: row.id,
-    name: row.name,
+    id: String(row.id || '').trim(),
+    name: String(row.name || '').trim(),
     coinCost: Number(row.coin_cost || 0),
     price: Number(row.coin_cost || 0),
     emoji: row.emoji || metadata.emoji || null,
     tone: row.tone || null,
     imageUrl: typeof imageUrl === 'string' && imageUrl.trim() ? imageUrl.trim() : null,
+    animationType: row.animation_type || metadata.animationType || metadata.animation_type || 'float',
+    category: row.category || metadata.category || 'general',
+    rarity: row.rarity || metadata.rarity || 'common',
     sortOrder: Number(row.sort_order || 0),
     isActive: row.is_active !== false,
+    adminCreated: row.admin_created === true,
     metadata,
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
@@ -607,30 +635,19 @@ function normalizeGiftCatalogRow(row) {
 
 export async function getGiftCatalogAdmin({ includeInactive = true } = {}) {
   if (!isConfigured() || !supabase) {
-    return STATIC_GIFT_CATALOG.map((g) => ({
-      ...g,
-      price: g.coinCost,
-      sortOrder: 0,
-      isActive: true,
-    }));
+    return [];
   }
 
   let query = supabase
     .from('gift_catalog')
-    .select('*')
+    .select(GIFT_SELECT_COLUMNS)
+    .eq('admin_created', true)
     .order('sort_order', { ascending: true });
   if (!includeInactive) query = query.eq('is_active', true);
 
   const { data, error } = await query;
   if (error) {
-    if (isMissingDbFeature(error)) {
-      return STATIC_GIFT_CATALOG.map((g) => ({
-        ...g,
-        price: g.coinCost,
-        sortOrder: 0,
-        isActive: true,
-      }));
-    }
+    if (isMissingDbFeature(error)) return [];
     throw error;
   }
   return (data || []).map(normalizeGiftCatalogRow);
@@ -641,21 +658,27 @@ export async function getActiveGiftById(giftId) {
   if (!id) throw new Error('giftId is required');
 
   if (!isConfigured() || !supabase) {
-    const gift = STATIC_GIFT_CATALOG.find((item) => item.id === id);
-    if (!gift) throw new Error(`Unknown gift: ${id}`);
-    return { ...gift, price: gift.coinCost, isActive: true };
+    throw giftUnavailableError('Gift catalog is not available');
   }
 
   const { data, error } = await supabase
     .from('gift_catalog')
-    .select('*')
+    .select(GIFT_SELECT_COLUMNS)
     .eq('id', id)
     .eq('is_active', true)
+    .eq('admin_created', true)
     .maybeSingle();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingDbFeature(error)) throw giftUnavailableError('Gift catalog migration has not been applied');
+    throw error;
+  }
   const gift = normalizeGiftCatalogRow(data);
-  if (!gift || gift.coinCost <= 0) throw new Error(`Unknown gift: ${id}`);
+  if (!gift || !gift.adminCreated || !gift.isActive || gift.coinCost <= 0) {
+    const err = new Error(`Unknown gift: ${id}`);
+    err.code = 'GIFT_NOT_FOUND';
+    throw err;
+  }
   return gift;
 }
 
@@ -668,13 +691,32 @@ function giftCatalogPayload(payload = {}, { partial = false } = {}) {
   }
   if (payload.emoji !== undefined || !partial) row.emoji = payload.emoji ? String(payload.emoji).trim() : null;
   if (payload.tone !== undefined || !partial) row.tone = payload.tone ? String(payload.tone).trim() : null;
+  if (payload.imageUrl !== undefined || payload.image_url !== undefined || !partial) {
+    const imageUrl = String(payload.imageUrl ?? payload.image_url ?? '').trim();
+    row.image_url = imageUrl && /^https?:\/\//i.test(imageUrl) ? imageUrl : null;
+  }
+  if (payload.animationType !== undefined || payload.animation_type !== undefined || !partial) {
+    row.animation_type = String(payload.animationType ?? payload.animation_type ?? 'float').trim().slice(0, 40) || 'float';
+  }
+  if (payload.category !== undefined || !partial) {
+    row.category = String(payload.category || 'general').trim().slice(0, 80) || 'general';
+  }
+  if (payload.rarity !== undefined || !partial) {
+    row.rarity = String(payload.rarity || 'common').trim().slice(0, 40) || 'common';
+  }
   if (payload.sortOrder !== undefined || payload.sort_order !== undefined || !partial) {
     row.sort_order = Number(payload.sortOrder ?? payload.sort_order ?? 0);
   }
   if (payload.isActive !== undefined || payload.is_active !== undefined || !partial) {
     row.is_active = payload.isActive ?? payload.is_active ?? true;
   }
-  if (payload.metadata !== undefined || !partial) row.metadata = payload.metadata || {};
+  row.admin_created = true;
+  if (payload.metadata !== undefined || !partial) {
+    row.metadata = {
+      ...(payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {}),
+      adminCreated: true,
+    };
+  }
   if (!partial) row.updated_at = new Date().toISOString();
   else if (Object.keys(row).length) row.updated_at = new Date().toISOString();
   return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));
@@ -686,8 +728,14 @@ export async function createGiftCatalogItem(payload = {}) {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, '_');
+  if (!id) throw new Error('Gift ID is required');
+  if (!String(payload.name || '').trim()) throw new Error('Gift name is required');
   const row = giftCatalogPayload({ ...payload, id }, { partial: false });
-  const { data, error } = await supabase.from('gift_catalog').insert(row).select().maybeSingle();
+  const { data, error } = await supabase
+    .from('gift_catalog')
+    .upsert(row, { onConflict: 'id' })
+    .select()
+    .maybeSingle();
   if (error) throw error;
   return normalizeGiftCatalogRow(data);
 }
@@ -701,7 +749,9 @@ export async function updateGiftCatalogItem(id, payload = {}) {
     .select()
     .maybeSingle();
   if (error) throw error;
-  return normalizeGiftCatalogRow(data);
+  const gift = normalizeGiftCatalogRow(data);
+  if (!gift) throw new Error('Gift not found');
+  return gift;
 }
 
 export async function toggleGiftCatalogItem(id, isActive) {
@@ -722,6 +772,62 @@ export async function resolveGiftCost(giftId) {
   return getActiveGiftById(giftId);
 }
 
+export async function uploadGiftImageAsset(file) {
+  if (!file) throw new Error('Image file is required');
+  if (!isConfigured() || !supabase) throw new Error('Storage not configured');
+  const contentType = String(file.mimetype || '').toLowerCase();
+  const ext = GIFT_IMAGE_TYPES.get(contentType);
+  if (!ext) {
+    const err = new Error('Gift image must be PNG, SVG, WebP, GIF, or JPG.');
+    err.code = 'INVALID_GIFT_IMAGE';
+    throw err;
+  }
+
+  const bucket = process.env.SUPABASE_GIFT_BUCKET || process.env.SUPABASE_IMAGE_BUCKET || 'images';
+  const filename = `gifts/${randomUUID()}.${ext}`;
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .upload(filename, file.buffer, { contentType, upsert: false });
+  if (error) throw error;
+
+  const baseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  return {
+    url: `${baseUrl}/storage/v1/object/public/${bucket}/${data.path}`,
+    path: data.path,
+    bucket,
+    contentType,
+  };
+}
+
+function normalizeGiftSendResult(data, fallbackGift) {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) throw new Error('Gift failed');
+  const gift = {
+    ...fallbackGift,
+    id: row.gift_id || fallbackGift.id,
+    name: row.gift_name || fallbackGift.name,
+    coinCost: Number(row.coin_cost || fallbackGift.coinCost || 0),
+    price: Number(row.coin_cost || fallbackGift.price || 0),
+    emoji: row.gift_emoji || fallbackGift.emoji || null,
+    imageUrl: row.gift_image_url || fallbackGift.imageUrl || null,
+    animationType: row.gift_animation_type || fallbackGift.animationType || 'float',
+    category: row.gift_category || fallbackGift.category || 'general',
+    rarity: row.gift_rarity || fallbackGift.rarity || 'common',
+  };
+  return {
+    newBalance: roundCoins(row.sender_balance || 0),
+    recipientBalance: roundCoins(row.recipient_balance || 0),
+    giftId: row.transfer_id || null,
+    senderTransactionId: row.sender_tx_id || null,
+    recipientTransactionId: row.recipient_tx_id || null,
+    liveGiftId: row.live_gift_id || null,
+    totalGiftsAmount: row.total_gifts_amount != null ? Number(row.total_gifts_amount) : null,
+    creatorAmount: roundCoins(row.creator_amount || 0),
+    platformAmount: roundCoins(row.platform_amount || 0),
+    gift,
+  };
+}
+
 export async function sendCreatorGift({ userId, senderName, creatorId, streamId, giftId, gift = null }) {
   const resolvedId = String(giftId || gift?.id || '').trim();
   if (!creatorId || !streamId || !resolvedId) {
@@ -735,24 +841,29 @@ export async function sendCreatorGift({ userId, senderName, creatorId, streamId,
     throw new Error('Invalid gift amount');
   }
 
-  const result = await transferCoins({
-    senderId: userId,
-    recipientId: creatorId,
-    amount,
-    reference: `gift:${streamId}:${resolvedId}:${Date.now()}`,
-    idempotencyKey: `gift:${userId}:${creatorId}:${streamId}:${resolvedId}:${Date.now()}:${randomUUID()}`,
-    sourceType: 'gift',
-    sourceId: streamId,
-    metadata: {
-      gift_id: resolvedId,
-      gift_name: catalogGift.name || resolvedId,
-      gift_emoji: gift?.emoji || catalogGift.emoji || null,
-      stream_id: streamId,
-      creator_id: creatorId,
-      sender_name: senderName || null,
-      official_coin_cost: amount,
-    },
+  const idempotencyKey = `gift:${userId}:${creatorId}:${streamId}:${resolvedId}:${Date.now()}:${randomUUID()}`;
+  const { data, error } = await supabase.rpc('send_catalog_gift', {
+    p_sender_id: userId,
+    p_creator_id: creatorId,
+    p_stream_id: streamId,
+    p_gift_id: resolvedId,
+    p_sender_name: senderName || null,
+    p_idempotency_key: idempotencyKey,
   });
+
+  if (error) {
+    if (/insufficient/i.test(error.message || '')) {
+      const err = new Error('Insufficient coins');
+      err.code = 'INSUFFICIENT_TOKENS';
+      throw err;
+    }
+    if (isMissingDbFeature(error)) {
+      throw giftUnavailableError('Gift wallet migration has not been applied');
+    }
+    throw error;
+  }
+
+  const result = normalizeGiftSendResult(data, catalogGift);
 
   try {
     const [{ data: creator }, { data: stream }] = await Promise.all([
@@ -774,7 +885,58 @@ export async function sendCreatorGift({ userId, senderName, creatorId, streamId,
     console.warn('[gifts] notification email failed:', err?.message || err);
   }
 
-  return { newBalance: result.senderBalance, giftId: result.transferId, gift: catalogGift };
+  return result;
+}
+
+export async function getGiftCatalogAnalytics(gifts = []) {
+  const empty = {
+    total: gifts.length,
+    active: gifts.filter((gift) => gift.isActive).length,
+    totalSent: 0,
+    totalRevenue: 0,
+    topGifts: [],
+  };
+  if (!supabase) return empty;
+  try {
+    const { data, error } = await supabase
+      .from('live_gifts')
+      .select('gift_type,gift_name,amount,created_at')
+      .order('created_at', { ascending: false })
+      .limit(5000);
+    if (error) {
+      if (isMissingDbFeature(error)) return empty;
+      throw error;
+    }
+    const byId = new Map(gifts.map((gift) => [gift.id, { ...gift, sent: 0, revenue: 0 }]));
+    let totalRevenue = 0;
+    for (const row of data || []) {
+      const id = String(row.gift_type || '').trim();
+      const amount = Number(row.amount || 0);
+      totalRevenue += amount;
+      if (!byId.has(id)) continue;
+      const item = byId.get(id);
+      item.sent += 1;
+      item.revenue += amount;
+    }
+    return {
+      ...empty,
+      totalSent: (data || []).length,
+      totalRevenue: roundCoins(totalRevenue),
+      topGifts: [...byId.values()]
+        .filter((gift) => gift.sent > 0)
+        .sort((a, b) => b.sent - a.sent || b.revenue - a.revenue)
+        .slice(0, 5)
+        .map((gift) => ({
+          id: gift.id,
+          name: gift.name,
+          sent: gift.sent,
+          revenue: roundCoins(gift.revenue),
+        })),
+    };
+  } catch (error) {
+    if (isMissingDbFeature(error)) return empty;
+    throw error;
+  }
 }
 
 export async function setCoinBalance({ userId, targetBalance, actorId = null, reason = 'Admin balance update' }) {

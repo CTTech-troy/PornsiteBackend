@@ -3,6 +3,14 @@ import { recordApiRequest, normalizeApiPath } from '../services/apiMonitoring.se
 
 const IGNORED_PREFIXES = [
   '/api/admin/system/observability',
+  '/api/admin/content/imports',
+  '/api/health/import-queue',
+  '/api/health/import-worker',
+  '/api/health/redis',
+  '/api/internal',
+  '/api/imports',
+  '/api/enterprise-import',
+  '/api/queue',
   '/api/internal/qstash/monitoring',
   '/api/keepalive/status',
 ];

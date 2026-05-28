@@ -2,14 +2,24 @@ import { getPlatformSettingsMap } from './platformSettings.service.js';
 
 export const APPROVED_PLACEMENTS = {
   sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
+  home_after_subheader_900x250: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
+  homepage_top: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
+  homepage_bottom: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
+  sticky_banner: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
   home_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
+  home_softcore_160x600: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   video_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   video_recommended: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   creator_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   live_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   feed_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   search_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
+  before_footer: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
   feed: { maxWidth: 970, maxHeight: 400, formats: ['banner', 'display', 'native'] },
+  feed_native: { maxWidth: 640, maxHeight: 400, formats: ['native', 'display'] },
+  mobile_inline: { maxWidth: 640, maxHeight: 400, formats: ['native', 'display', 'banner'] },
+  category_feed: { maxWidth: 640, maxHeight: 400, formats: ['native', 'display'] },
+  video_page: { maxWidth: 970, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   native_card: { maxWidth: 640, maxHeight: 400, formats: ['native', 'display'] },
   between_content: { maxWidth: 728, maxHeight: 120, formats: ['banner', 'display', 'native'] },
   homepage_banner: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
@@ -46,7 +56,13 @@ const AGGRESSIVE_SCRIPT_PATTERN =
   /popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|in.?page.?push|push.?notification|top\.location|window\.open|window\.top|betway|casino|gambling|adserver\.juicyads\.com|popads|popcash|propellerads|onclickads/i;
 
 const PLACEMENT_ALIASES = {
+  home_after_subheader_900x250: 'banner',
+  homepage_top: 'banner',
+  homepage_bottom: 'banner',
+  sticky_banner: 'banner',
   home_sidebar: 'sidebar',
+  home_softcore_160x600: 'sidebar',
+  before_footer: 'banner',
   video_sidebar: 'sidebar',
   creator_sidebar: 'sidebar',
   live_sidebar: 'sidebar',
@@ -54,6 +70,9 @@ const PLACEMENT_ALIASES = {
   search_sidebar: 'sidebar',
   video_recommended: 'sidebar',
   recommended_sidebar: 'sidebar',
+  feed_native: 'native_card',
+  category_feed: 'native_card',
+  mobile_inline: 'native_card',
 };
 
 const ALLOWED_AD_DOMAINS = [
@@ -69,6 +88,8 @@ const ALLOWED_AD_DOMAINS = [
   'googleads.g.doubleclick.net',
   'securepubads.g.doubleclick.net',
   'googlesyndication.com',
+  'adtng.com',
+  'a.adtng.com',
   ...MONETAG_SAFE_DOMAINS,
 ];
 
@@ -95,10 +116,11 @@ const BLOCKED_HTML_PATTERNS = [
 
 const BLOCKED_FORMATS = ['popunder', 'clickunder', 'floating', 'fullscreen_takeover', 'interstitial', 'popup', 'modal'];
 const MONETAG_ALLOWED_FORMATS = ['banner', 'display', 'native'];
-const MONETAG_NATIVE_PLACEMENTS = new Set(['feed', 'native_card', 'between_content']);
+const MONETAG_NATIVE_PLACEMENTS = new Set(['feed', 'feed_native', 'category_feed', 'mobile_inline', 'native_card', 'between_content']);
 const MONETAG_SIDEBAR_PLACEMENTS = new Set([
   'sidebar',
   'home_sidebar',
+  'home_softcore_160x600',
   'video_sidebar',
   'video_recommended',
   'creator_sidebar',
@@ -107,13 +129,16 @@ const MONETAG_SIDEBAR_PLACEMENTS = new Set([
   'search_sidebar',
   'recommended_sidebar',
 ]);
-const MONETAG_BANNER_PLACEMENTS = new Set(['homepage_banner', 'leaderboard', 'banner']);
+const MONETAG_BANNER_PLACEMENTS = new Set(['homepage_banner', 'homepage_top', 'homepage_bottom', 'sticky_banner', 'leaderboard', 'banner', 'before_footer', 'home_after_subheader_900x250']);
 
 export async function getSafeAdPolicySettings() {
   const map = await getPlatformSettingsMap();
   const strict = true;
   const safeFormatsOnly = true;
-  const allowedPlacements = parseJsonList(map.ad_allowed_placements, Object.keys(APPROVED_PLACEMENTS))
+  const allowedPlacements = uniqueList([
+    ...parseJsonList(map.ad_allowed_placements, Object.keys(APPROVED_PLACEMENTS)),
+    ...Object.keys(APPROVED_PLACEMENTS),
+  ])
     .filter((p) => Object.prototype.hasOwnProperty.call(APPROVED_PLACEMENTS, p));
   const monetagAllowedDomains = parseDomainList(map.monetag_allowed_domains, MONETAG_SAFE_DOMAINS);
   const allowedDomains = uniqueList([
@@ -123,6 +148,11 @@ export async function getSafeAdPolicySettings() {
   ]);
   return {
     strictMode: strict,
+    allowPreRoll: map.ad_preroll_enabled !== 'false',
+    allowSidebarAds: map.sidebar_ads_enabled !== 'false',
+    allowFeedAds: map.ad_feed_ads_enabled !== 'false',
+    blockPopups: true,
+    blockRedirects: true,
     allowPopups: false,
     allowRedirects: false,
     allowFloatingAds: false,
@@ -155,6 +185,7 @@ export async function getSafeAdPolicySettings() {
       .filter(Boolean),
     monetagAllowedSlots: parseJsonList(map.monetag_allowed_slots, [
       'feed_native',
+      'home_after_subheader_900x250',
       'home_sidebar',
       'video_sidebar',
       'video_recommended',
@@ -162,6 +193,7 @@ export async function getSafeAdPolicySettings() {
       'live_sidebar',
       'feed_sidebar',
       'search_sidebar',
+      'before_footer',
       'homepage_banner',
       'leaderboard',
       'banner',

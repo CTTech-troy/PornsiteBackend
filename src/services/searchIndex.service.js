@@ -13,7 +13,7 @@ import {
   isMeilisearchConfigured,
 } from '../config/meilisearch.js';
 import { publicVideoToHomeCard } from '../utils/platformPublicFeed.js';
-import { annotatePlayableVideo } from '../utils/videoPlaybackValidation.js';
+import { annotatePlayableVideo, isDirectPlayableStreamUrl } from '../utils/videoPlaybackValidation.js';
 
 const SEARCH_CACHE_TTL_MS = Math.max(5_000, Number(process.env.SEARCH_CACHE_TTL_MS || 30_000));
 const IMPORT_BATCH_SIZE = Math.min(10_000, Math.max(100, Number(process.env.IMPORT_BATCH_SIZE || 10_000)));
@@ -86,6 +86,19 @@ function text(value, fallback = '') {
   return String(value ?? fallback).trim();
 }
 
+function importedPlaybackType(row = {}) {
+  const iframeEmbed = text(row.iframe_embed || row.iframeEmbed);
+  return iframeEmbed ? 'external_embed' : text(row.playback_type || row.playbackType || '');
+}
+
+function allowsImportedDirectHost(row = {}) {
+  const source = text(row.source || row.contentSource || row.content_source).toLowerCase();
+  const sourceType = text(row.sourceType || row.source_type).toLowerCase();
+  return ['imported_csv', 'imported', 'external_catalog', 'official_import', 'csv_import'].includes(source) ||
+    ['imported_csv', 'imported', 'external_catalog', 'official_import', 'csv_import'].includes(sourceType) ||
+    sourceType.includes('imported');
+}
+
 function scoreVideo(row) {
   const views = Number(row.views_count || row.viewsCount || 0);
   const likes = Number(row.likes_count || row.likesCount || 0);
@@ -99,7 +112,16 @@ function scoreVideo(row) {
 
 export function rowToSearchDoc(row = {}) {
   const id = String(row.video_id || row.videoId || row.id || '');
-  const playbackUrl = text(row.playback_url || row.playbackUrl || row.stream_url || row.streamUrl || row.storage_url || row.videoUrl || row.embed_url);
+  const iframeEmbed = text(row.iframe_embed || row.iframeEmbed);
+  const playbackType = importedPlaybackType(row);
+  const sourcePageUrl = text(row.video_url || row.videoUrl || row.page_url || row.pageUrl || row.external_url || row.externalUrl || row.url);
+  const rawPlaybackUrl = text(row.playback_url || row.playbackUrl || row.stream_url || row.streamUrl || row.storage_url || row.storageUrl || row.embed_url || row.embedUrl);
+  const directPlaybackUrl = isDirectPlayableStreamUrl(rawPlaybackUrl, { allowUnapprovedDirectHost: allowsImportedDirectHost(row) })
+    ? rawPlaybackUrl
+    : '';
+  const isExternalEmbed = !directPlaybackUrl && (playbackType.toLowerCase() === 'external_embed' || iframeEmbed.length > 0);
+  const effectivePlaybackType = directPlaybackUrl ? 'internal' : playbackType;
+  const playbackUrl = isExternalEmbed ? '' : (directPlaybackUrl || rawPlaybackUrl || sourcePageUrl);
   const tokenPrice = Number(row.token_price ?? row.tokenPrice ?? row.coin_price ?? 0);
   const accessType = text(row.access_type || row.accessType).replace(/-/g, '_')
     || (row.requires_membership === true || row.requiresMembership === true
@@ -126,10 +148,14 @@ export function rowToSearchDoc(row = {}) {
     provider: text(row.provider),
     thumbnailUrl: row.thumbnail_url || row.thumbnailUrl || row.thumbnail || '',
     duration: Number(row.duration_seconds ?? row.duration ?? 0),
-    videoUrl: playbackUrl,
+    videoUrl: sourcePageUrl || playbackUrl,
     playbackUrl,
-    streamUrl: playbackUrl,
+    streamUrl: directPlaybackUrl || (isExternalEmbed ? '' : playbackUrl),
     embedUrl: row.embed_url || row.embedUrl || '',
+    iframeEmbed,
+    iframe_embed: iframeEmbed,
+    playbackType: effectivePlaybackType,
+    playback_type: effectivePlaybackType,
     isPremiumContent:
       row.is_premium_content === true ||
       row.isPremiumContent === true ||
@@ -143,8 +169,8 @@ export function rowToSearchDoc(row = {}) {
     requiresMembership,
     subscriptionAccess,
     officialCompanyContent: row.official_company_content === true || row.officialCompanyContent === true,
-    contentSource: text(row.content_source || row.contentSource, 'creator'),
-    playable: row.playable !== false,
+    contentSource: text(row.content_source || row.contentSource || (row.import_job_id || iframeEmbed ? 'imported_csv' : ''), 'creator'),
+    playable: isExternalEmbed ? true : row.playable !== false,
     deleted: Boolean(row.deleted_at || row.deleted || (row.is_live !== true && row.status !== 'published')),
     viewsCount: Number(row.views_count ?? row.viewsCount ?? 0),
     likesCount: Number(row.likes_count ?? row.likesCount ?? 0),
@@ -278,6 +304,11 @@ function memoryStats() {
 }
 
 function docToHomeCard(doc) {
+  const iframeEmbed = doc.iframeEmbed || doc.iframe_embed || '';
+  const explicitPlaybackType = String(doc.playbackType || doc.playback_type || '').trim().toLowerCase();
+  const playbackType = explicitPlaybackType === 'internal'
+    ? 'internal'
+    : iframeEmbed ? 'external_embed' : explicitPlaybackType;
   const card = publicVideoToHomeCard({
     id: doc.id,
     videoId: doc.id,
@@ -287,6 +318,10 @@ function docToHomeCard(doc) {
     streamUrl: doc.streamUrl || doc.playbackUrl,
     videoUrl: doc.videoUrl,
     playbackUrl: doc.playbackUrl,
+    iframeEmbed,
+    iframe_embed: iframeEmbed,
+    playbackType,
+    playback_type: playbackType,
     creatorDisplayName: doc.creatorDisplayName,
     userId: doc.creatorId || doc.userId,
     isPremiumContent: doc.isPremiumContent,
@@ -298,7 +333,12 @@ function docToHomeCard(doc) {
     officialCompanyContent: doc.officialCompanyContent,
     tags: doc.tags,
     category: doc.categories?.[0] || doc.category || '',
-    source: doc.contentSource === 'imported' ? 'imported' : 'community',
+    source: ['imported', 'imported_csv', 'official_import'].includes(String(doc.contentSource || '').toLowerCase())
+      ? 'imported_csv'
+      : 'community',
+    contentSource: doc.contentSource,
+    sourceType: playbackType === 'external_embed' ? 'external_embed' : '',
+    embedAllowed: playbackType === 'external_embed' && Boolean(iframeEmbed),
     playable: doc.playable !== false,
   }, 0);
   return card ? annotatePlayableVideo(card) : null;

@@ -283,7 +283,7 @@ begin
   values (
     p_video_id,
     nullif(btrim(coalesce(p_user_id, '')), ''),
-    case when p_user_id is null or btrim(coalesce(p_user_id, '')) = '' then v_session else null end,
+    case when p_user_id is null or btrim(coalesce(p_user_id, '')) = '' then coalesce(v_session, v_fingerprint, v_ip_hash) else null end,
     v_identity,
     v_fingerprint,
     v_ip_hash,

@@ -1,6 +1,7 @@
 {
   "provider": "upstash-qstash",
   "requiredEnv": [
+    "QSTASH_URL",
     "QSTASH_TOKEN",
     "QSTASH_CURRENT_SIGNING_KEY",
     "QSTASH_NEXT_SIGNING_KEY"
@@ -17,7 +18,8 @@
     "monitoring": "/api/internal/qstash/monitoring",
     "payouts": "/api/internal/qstash/payouts",
     "aiModeration": "/api/internal/qstash/ai-moderation",
-    "monetization": "/api/internal/qstash/monetization"
+    "monetization": "/api/internal/qstash/monetization",
+    "enterpriseImport": "/api/internal/qstash/enterprise-import"
   }
 }
 

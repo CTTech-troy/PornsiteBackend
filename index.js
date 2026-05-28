@@ -10,6 +10,7 @@ import apiMonitoringWorkflowRouter from './src/router/apiMonitoringWorkflow.rout
 import payoutWorkflowRouter from './src/router/payoutWorkflow.route.js';
 import aiModerationWorkflowRouter from './src/router/aiModerationWorkflow.route.js';
 import monetizationWorkflowRouter from './src/router/monetizationWorkflow.route.js';
+import enterpriseImportWorkflowRouter from './src/router/enterpriseImportWorkflow.route.js';
 import videosRouter from './src/router/videos.route.js';
 import postsRouter from './src/router/posts.route.js';
 import * as streamCtrl from './src/controller/stream.controller.js';
@@ -37,7 +38,6 @@ import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.
 import { getPublicSettings } from './src/controller/adminSystem.controller.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
-import * as giftCtrl from './src/controller/gift.controller.js';
 import * as walletsystem from './src/controller/walletsystem.controller.js';
 import * as chatQueue from './src/controller/chatQueue.controller.js';
 import * as randomChatBilling from './src/services/randomChatBilling.service.js';
@@ -62,9 +62,24 @@ import { renderVideoSharePreview } from './src/controller/sharePreview.controlle
 import { preloadExternalFeedConfig } from './src/services/externalFeedConfig.service.js';
 import { startSearchSyncScheduler } from './src/services/searchIndex.service.js';
 import { generalApiRateLimiter } from './src/middleware/apiRateLimit.js';
+import { getRateLimitStoreDiagnostics } from './src/middleware/rateLimitStore.js';
 import { apiMonitoringMiddleware } from './src/middleware/apiMonitoring.js';
-import { getRedisHealth, pingRedis } from './src/config/redis.js';
+import { getRedisDiagnostics, getRedisHealth, pingRedis } from './src/config/redis.js';
 import { getQstashStatus } from './src/config/qstash.js';
+import {
+  assertEnterpriseImportQueueReady,
+  getEnterpriseImportQueueHealth,
+  reconcileEnterpriseImportQueue,
+} from './src/services/enterpriseImportQueue.service.js';
+import {
+  getEnterpriseImportWorkerRuntimeStatus,
+  startEnterpriseImportWorker,
+} from './src/services/enterpriseImportWorker.service.js';
+import {
+  getR2ImportStorageStatus,
+  validateR2ImportBucket,
+} from './src/services/r2ImportStorage.service.js';
+import { getLocalMemoryCacheDiagnostics } from './src/services/localMemoryCache.service.js';
 import { resolveAdminSessionFromToken } from './src/middleware/adminAuth.js';
 import { getApiOverview } from './src/services/apiMonitoring.service.js';
 import {
@@ -79,6 +94,26 @@ app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
 
 const LIVEKIT_HTTP_ORIGIN = 'https://xstream-8lx5fseo.livekit.cloud';
 const LIVEKIT_WS_ORIGIN = 'wss://xstream-8lx5fseo.livekit.cloud';
+const SOCKET_IO_HTTP_ORIGIN = 'https://pornsitebackend.onrender.com';
+const SOCKET_IO_WS_ORIGIN = 'wss://pornsitebackend.onrender.com';
+const PERMISSIONS_POLICY_HEADER = [
+  'accelerometer=()',
+  'autoplay=(self)',
+  'bluetooth=()',
+  'browsing-topics=()',
+  'camera=()',
+  'display-capture=()',
+  'encrypted-media=(self)',
+  'fullscreen=(self)',
+  'geolocation=()',
+  'gyroscope=()',
+  'magnetometer=()',
+  'microphone=()',
+  'midi=()',
+  'payment=(self)',
+  'usb=()',
+  'xr-spatial-tracking=()',
+].join(', ');
  
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -88,7 +123,8 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       connectSrc: [
         "'self'",
-        'https://pornsitebackend.onrender.com',
+        SOCKET_IO_HTTP_ORIGIN,
+        SOCKET_IO_WS_ORIGIN,
         'https://payments.xstreamvideos.site',
         'https://xstreamvideos.site',
         'https://admin.xstreamvideos.site',
@@ -136,6 +172,7 @@ app.use((req, res, next) => {
   const requestId = req.headers['x-request-id'] || randomUUID();
   req.requestId = String(requestId);
   res.setHeader('X-Request-Id', req.requestId);
+  res.setHeader('Permissions-Policy', PERMISSIONS_POLICY_HEADER);
   next();
 });
 
@@ -231,6 +268,7 @@ app.use('/api/internal/qstash/payouts', express.raw({ type: '*/*', limit: '64kb'
 app.use('/api/internal/qstash/ai-moderation', express.raw({ type: '*/*', limit: '128kb' }));
 app.use('/api/internal/qstash/monetization', express.raw({ type: '*/*', limit: '64kb' }));
 app.use('/api/internal/qstash/publisher', express.raw({ type: '*/*', limit: '64kb' }));
+app.use('/api/internal/qstash/enterprise-import', express.raw({ type: '*/*', limit: '64kb' }));
 app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
 app.use(apiMonitoringMiddleware);
 
@@ -305,13 +343,28 @@ app.get('/', (req, res) => {
 app.get('/api/health/services', async (req, res) => {
   try {
     const { firebase, supabase } = await pingServices();
-    res.json({ firebase, supabase, redis: getRedisHealth(), qstash: getQstashStatus() });
+    res.json({ firebase, supabase, redis: getRedisHealth(), qstash: getQstashStatus(), r2Import: getR2ImportStorageStatus() });
   } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
 });
 
 app.get('/api/health/redis', async (req, res) => {
   const redis = await pingRedis();
-  res.status(redis.configured && !redis.connected ? 503 : 200).json({ redis });
+  res.status(redis.configured && !redis.connected ? 503 : 200).json({
+    redis,
+    diagnostics: getRedisDiagnostics(),
+    rateLimits: getRateLimitStoreDiagnostics(),
+    memoryCache: getLocalMemoryCacheDiagnostics(),
+    apiHotspots: apiMetrics.snapshot().routes,
+  });
+});
+
+app.get('/api/health/import-queue', async (_req, res) => {
+  const health = await getEnterpriseImportQueueHealth();
+  res.status(health.redis.configured && !health.redis.connected ? 503 : 200).json({ success: true, health });
+});
+
+app.get('/api/health/import-worker', (_req, res) => {
+  res.json({ success: true, worker: getEnterpriseImportWorkerRuntimeStatus() });
 });
 
 app.get('/api/config/public', getPublicSettings);
@@ -323,6 +376,7 @@ app.use('/api/internal/qstash/ai-moderation', aiModerationWorkflowRouter);
 app.use('/api/internal/qstash/monetization', monetizationWorkflowRouter);
 app.use('/api/internal/qstash/publisher', publisherWorkflowRouter);
 app.use('/api/internal/qstash/video-import', videoImportWorkflowRouter);
+app.use('/api/internal/qstash/enterprise-import', enterpriseImportWorkflowRouter);
 
 // Shared Upstash Redis-backed limit for all API routes. Auth routes below add
 // stricter endpoint-specific limits on top of this baseline.
@@ -426,6 +480,8 @@ import http from 'http';
 const server = http.createServer(app);
 import { Server } from 'socket.io';
 const io = new Server(server, { cors: { origin: corsOriginDelegate, methods: ['GET', 'POST'], credentials: true } });
+const enterpriseImportWorkerController = new AbortController();
+let serverHasListened = false;
 
 io.use(async (socket, next) => {
   try {
@@ -1268,54 +1324,7 @@ io.on('connection', (socket) => {
     if (!liveId) return;
     if (socket.isGuest) return emitLiveError(socket, 'Sign in to send gifts.');
     if (!checkSocketRate(socket, 'live:gift', 30, 60_000)) return emitLiveError(socket, 'You are sending gifts too quickly.');
-
-    const giftType = cleanLiveText(payload.giftType || payload.gift?.id || payload.id || 'gift', 80);
-    const giftName = cleanLiveText(payload.name || payload.giftName || payload.gift?.name || giftType, 80);
-    const amount = Math.max(0, Number(payload.amount ?? payload.price ?? payload.gift?.price ?? 0));
-    const senderName = cleanLiveText(payload.senderName || payload.authorName || 'Viewer', 80) || 'Viewer';
-    const emoji = cleanLiveText(payload.emoji || payload.gift?.emoji || '', 20);
-    const state = getLiveRoomState(liveId);
-
-    try {
-      if (payload.tokenPaid) {
-        await liveCtrl.sendGift(liveId, socket.uid, giftType, amount);
-      } else {
-        await giftCtrl.processGift({ liveId, senderId: socket.uid, giftType, quantity: Number(payload.quantity) || 1 });
-      }
-    } catch (err) {
-      console.warn('[live] gift persistence failed:', err?.message || err);
-    }
-
-    state.giftsTotal = +(Number(state.giftsTotal || 0) + amount).toFixed(2);
-    recordModerationSignal({
-      sessionId: liveId,
-      sessionType: 'livestream',
-      eventType: 'gift_activity',
-      source: 'socket',
-      userId: socket.uid,
-      contentType: 'behavior',
-      metadata: {
-        giftType,
-        amount,
-        riskScore: amount >= 500 ? 55 : 5,
-        labels: amount >= 500 ? { signals: ['large_live_gift'] } : {},
-      },
-      queueAi: false,
-      io,
-    }).catch(() => {});
-    io.to(liveId).emit('new-gift', {
-      id: randomUUID(),
-      liveId,
-      senderId: socket.uid,
-      senderName,
-      giftType,
-      giftName,
-      name: giftName,
-      emoji,
-      amount,
-      totalGiftsAmount: state.giftsTotal,
-      createdAt: new Date().toISOString(),
-    });
+    emitLiveError(socket, 'Gift payments are processed by the secure gift API.');
   });
 
   socket.on('pause-live', async (payload = {}) => {
@@ -1511,18 +1520,6 @@ io.on('connection', (socket) => {
     const emoji = cleanLiveText(payload.emoji || payload.gift?.emoji || '', 20);
 
     if (payload.tokenPaid === true) {
-      io.to(room.roomId).emit('chat:gift', {
-        id: randomUUID(),
-        roomId: room.roomId,
-        senderId: socket.uid,
-        senderName,
-        giftId,
-        giftName,
-        emoji,
-        imageUrl: payload.imageUrl || payload.gift?.imageUrl || null,
-        amount,
-        createdAt: new Date().toISOString(),
-      });
       return;
     }
 
@@ -1641,9 +1638,57 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
+server.on('listening', () => {
+  serverHasListened = true;
+});
+
+server.on('close', () => {
+  serverHasListened = false;
+});
+
 server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  const r2Status = getR2ImportStorageStatus();
+  if (!r2Status.configured) {
+    console.warn('[enterprise-import:r2] Cloudflare R2 import storage is not configured.', {
+      missing: r2Status.missing,
+      endpointConfigured: r2Status.endpointConfigured,
+      bucketConfigured: r2Status.bucketConfigured,
+      accessKeyConfigured: r2Status.accessKeyConfigured,
+      secretKeyConfigured: r2Status.secretKeyConfigured,
+      accountIdConfigured: r2Status.accountIdConfigured,
+    });
+  } else {
+    console.info('[enterprise-import:r2] Cloudflare R2 import storage configured', {
+      endpointHost: r2Status.endpointHost,
+      bucket: r2Status.bucket,
+      region: r2Status.region,
+    });
+    validateR2ImportBucket()
+      .then((result) => console.info('[enterprise-import:r2] Bucket validation ok', result))
+      .catch((err) => console.warn('[enterprise-import:r2] Bucket validation failed:', err?.message || err));
+  }
   await ensureBuckets().catch(() => {});
+  if (isEnabledEnvFlag(process.env.IMPORT_WORKER_AUTOSTART, true)) {
+    assertEnterpriseImportQueueReady()
+      .then(async (redis) => {
+        console.info('[enterprise-import-worker] Redis queue ready', {
+          connected: redis.connected,
+          latencyMs: redis.latencyMs,
+        });
+        await reconcileEnterpriseImportQueue({ source: 'server-startup' }).catch((err) => {
+          console.warn('[enterprise-import-worker] startup reconcile failed:', err?.message || err);
+        });
+        startEnterpriseImportWorker({ signal: enterpriseImportWorkerController.signal }).catch((err) => {
+          console.error('[enterprise-import-worker] stopped unexpectedly:', err?.message || err);
+        });
+      })
+      .catch((err) => {
+        console.error('[enterprise-import-worker] autostart disabled because Redis queue is unavailable:', err?.message || err);
+      });
+  } else {
+    console.info('[enterprise-import-worker] autostart disabled by IMPORT_WORKER_AUTOSTART=false');
+  }
   preloadExternalFeedConfig().catch((err) => {
     console.warn('[externalFeed] config preload failed:', err?.message || err);
   });
@@ -1654,24 +1699,61 @@ server.listen(PORT, async () => {
 });
 
 let shuttingDown = false;
-function gracefulShutdown(signal) {
+function closeSocketServer() {
+  return new Promise((resolve) => {
+    try {
+      io.close(() => resolve());
+    } catch (err) {
+      console.warn('[server] Socket.IO close skipped:', err?.message || err);
+      resolve();
+    }
+  });
+}
+
+function closeHttpServer() {
+  return new Promise((resolve, reject) => {
+    if (!serverHasListened || !server.listening) {
+      console.log('[server] HTTP listener already closed or not started.');
+      resolve();
+      return;
+    }
+
+    server.close((err) => {
+      if (err?.code === 'ERR_SERVER_NOT_RUNNING') {
+        console.log('[server] HTTP listener already closed.');
+        resolve();
+        return;
+      }
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function gracefulShutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[server] ${signal} received; closing realtime and HTTP listeners.`);
-  io.close(() => {
-    server.close((err) => {
-      if (err) {
-        console.error('[server] Shutdown failed:', err);
-        process.exit(1);
-      }
-      console.log('[server] Shutdown complete.');
-      process.exit(0);
-    });
-  });
-  setTimeout(() => {
+  enterpriseImportWorkerController.abort();
+  const forceTimer = setTimeout(() => {
     console.error('[server] Forced shutdown after timeout.');
     process.exit(1);
   }, 15_000).unref?.();
+
+  try {
+    await closeSocketServer();
+    await closeHttpServer();
+    clearTimeout(forceTimer);
+    console.log('[server] Shutdown complete.');
+    process.exit(exitCode);
+  } catch (err) {
+    clearTimeout(forceTimer);
+    console.error('[server] Shutdown failed:', err);
+    process.exit(exitCode || 1);
+  }
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
@@ -1681,5 +1763,5 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('uncaughtException', (err) => {
   console.error('[process] Uncaught exception:', err);
-  gracefulShutdown('uncaughtException');
+  gracefulShutdown('uncaughtException', 1);
 });

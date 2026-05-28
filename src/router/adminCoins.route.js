@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { requireAdminAuth } from '../middleware/adminAuth.js';
 import {
   adjustAdminCoinWallet,
@@ -15,14 +16,20 @@ import {
   getAdminCoinWallet,
   toggleAdminCoinPackage,
   updateAdminCoinPackage,
+  uploadAdminGiftImage,
 } from '../controller/coins.controller.js';
 
 const router = Router();
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 },
+});
 
 router.use(requireAdminAuth);
 
 router.get('/analytics', getAdminCoinAnalytics);
 router.get('/gifts', getAdminGiftCatalog);
+router.post('/gifts/upload-image', upload.single('image'), uploadAdminGiftImage);
 router.post('/gifts', createAdminGiftCatalogItem);
 router.put('/gifts/:id', updateAdminGiftCatalogItem);
 router.patch('/gifts/:id/toggle', toggleAdminGiftCatalogItem);

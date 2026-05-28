@@ -5,10 +5,176 @@ import { supabase, isConfigured } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { mergeCreatorIntoPublicVideo } from './creatorProfile.js';
 import { getPathSafeVideoId } from './videoPathId.js';
-import { annotatePlayableVideo, isPlayableVideo } from './videoPlaybackValidation.js';
+import { annotatePlayableVideo, isDirectPlayableStreamUrl, isPlayableVideo } from './videoPlaybackValidation.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 const LEGACY_MEDIA_PREFIX = 'media-';
+const PUBLIC_FEED_CACHE_TTL_MS = Math.max(5_000, Number(process.env.PUBLIC_VIDEO_FEED_CACHE_TTL_MS || 20_000));
+const PUBLIC_FEED_CACHE_MAX_KEYS = Math.max(10, Number(process.env.PUBLIC_VIDEO_FEED_CACHE_MAX_KEYS || 80));
+const VIDEO_DELIVERY_SLOW_QUERY_MS = Math.max(50, Number(process.env.VIDEO_DELIVERY_SLOW_QUERY_MS || 250));
+const VIDEO_DELIVERY_DIAGNOSTICS = String(process.env.VIDEO_DELIVERY_DIAGNOSTICS || '').toLowerCase() === 'true';
+
+const publicFeedCache = new Map();
+
+const TIKTOK_PUBLIC_SELECT_COLUMNS = [
+  'video_id',
+  'user_id',
+  'title',
+  'description',
+  'main_orientation_category',
+  'tags',
+  'allow_people_to_comment',
+  'storage_url',
+  'stream_url',
+  'thumbnail_url',
+  'duration_seconds',
+  'duration',
+  'creator_display_name',
+  'creator_avatar_url',
+  'consent_given',
+  'is_live',
+  'is_premium_content',
+  'token_price',
+  'coin_price',
+  'access_type',
+  'premium_visibility',
+  'requires_membership',
+  'subscription_access',
+  'official_company_content',
+  'likes_count',
+  'comments_count',
+  'views_count',
+  'created_at',
+  'status',
+  'visibility',
+  'deleted_at',
+  'content_source',
+  'playable',
+  'source_type',
+  'embed_allowed',
+  'validation_status',
+  'playback_url',
+];
+
+const IMPORTED_PUBLIC_SELECT_COLUMNS = [
+  'id',
+  'video_url',
+  'iframe_embed',
+  'playback_type',
+  'title',
+  'duration',
+  'thumbnail_url',
+  'tags',
+  'actors',
+  'views',
+  'category',
+  'quality',
+  'studio',
+  'publish_date',
+  'metadata',
+  'video_fingerprint',
+  'import_job_id',
+  'source_row_number',
+  'created_at',
+  'updated_at',
+  'import_jobs(status)',
+];
+
+const MEDIA_PUBLIC_SELECT_COLUMNS = [
+  'id',
+  'media_id',
+  'path',
+  'storage_url',
+  'stream_url',
+  'video_url',
+  'url',
+  'public_url',
+  'thumbnail_url',
+  'thumbnail',
+  'poster_url',
+  'poster',
+  'type',
+  'media_type',
+  'content_type',
+  'mime_type',
+  'bucket',
+  'user_id',
+  'title',
+  'name',
+  'description',
+  'main_orientation_category',
+  'category',
+  'tags',
+  'duration_seconds',
+  'duration',
+  'creator_display_name',
+  'creator_avatar_url',
+  'is_premium_content',
+  'token_price',
+  'access_type',
+  'premium_visibility',
+  'requires_membership',
+  'subscription_access',
+  'likes_count',
+  'comments_count',
+  'views_count',
+  'views',
+  'created_at',
+  'updated_at',
+  'status',
+  'visibility',
+  'is_live',
+];
+
+function cloneRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row) => ({ ...row }));
+}
+
+function getCachedFeed(key) {
+  const hit = publicFeedCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > PUBLIC_FEED_CACHE_TTL_MS) {
+    publicFeedCache.delete(key);
+    return null;
+  }
+  return cloneRows(hit.rows);
+}
+
+function setCachedFeed(key, rows) {
+  if (!Array.isArray(rows)) return;
+  publicFeedCache.set(key, { ts: Date.now(), rows: cloneRows(rows) });
+  while (publicFeedCache.size > PUBLIC_FEED_CACHE_MAX_KEYS) {
+    const oldest = publicFeedCache.keys().next().value;
+    if (!oldest) break;
+    publicFeedCache.delete(oldest);
+  }
+}
+
+function logDeliveryTiming(label, startMs, meta = {}) {
+  const durationMs = Date.now() - startMs;
+  if (!VIDEO_DELIVERY_DIAGNOSTICS && durationMs < VIDEO_DELIVERY_SLOW_QUERY_MS) return;
+  console.info('[video-delivery] query timing', {
+    label,
+    durationMs,
+    ...meta,
+  });
+}
+
+async function timedDelivery(label, fn, meta = {}) {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logDeliveryTiming(label, startedAt, {
+      ...meta,
+      count: Array.isArray(result?.data) ? result.data.length : undefined,
+      error: result?.error?.message || undefined,
+    });
+    return result;
+  } catch (error) {
+    logDeliveryTiming(label, startedAt, { ...meta, error: error?.message || String(error) });
+    throw error;
+  }
+}
 
 function applyPublicListingFilter(q) {
   return q.or('is_live.eq.true,status.eq.published');
@@ -22,6 +188,38 @@ function isMissingColumnError(err, columnName) {
     (columnName && msg.includes(`'${columnName}'`)) ||
     /schema cache|Could not find the .* column/i.test(msg)
   );
+}
+
+function extractMissingColumnName(err) {
+  const msg = String(err?.message || '');
+  const quoted = msg.match(/'([^']+)'/);
+  if (quoted?.[1]) return quoted[1];
+  const named = msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?/i);
+  if (named?.[1]) return named[1];
+  return null;
+}
+
+async function runSelectWithColumnFallback(columns, runQuery, label) {
+  let active = [...columns];
+  const removed = [];
+  const maxAttempts = Math.min(40, active.length + 2);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const result = await runQuery(active.join(','));
+    if (!result?.error) {
+      if (removed.length && VIDEO_DELIVERY_DIAGNOSTICS) {
+        console.warn('[video-delivery] lean select removed missing columns', { label, removed });
+      }
+      return result;
+    }
+    const missing = extractMissingColumnName(result.error);
+    if (missing && active.includes(missing)) {
+      active = active.filter((column) => column !== missing);
+      removed.push(missing);
+      continue;
+    }
+    return result;
+  }
+  return runQuery('*');
 }
 
 function isMissingTableError(err) {
@@ -40,6 +238,76 @@ function toTimestamp(value) {
   }
   const parsed = Date.parse(String(value));
   return Number.isNaN(parsed) ? Date.now() : parsed;
+}
+
+function getPlaybackTypeForPublicVideo(video = {}) {
+  const iframeEmbed = String(video.iframeEmbed || video.iframe_embed || '').trim();
+  if (iframeEmbed) return 'external_embed';
+  const explicit = String(video.playbackType || video.playback_type || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  const source = String(video.source || video.contentSource || video.content_source || '').trim().toLowerCase();
+  return ['imported_csv', 'imported', 'external_catalog', 'official_import', 'csv_import'].includes(source)
+    ? 'external_redirect'
+    : 'internal';
+}
+
+function isImportedSource(video = {}) {
+  const source = String(video.source || video.contentSource || video.content_source || '').trim().toLowerCase();
+  const sourceType = String(video.sourceType || video.source_type || '').trim().toLowerCase();
+  return ['imported_csv', 'imported', 'external_catalog', 'official_import', 'csv_import'].includes(source) ||
+    ['imported_csv', 'imported', 'external_catalog', 'official_import', 'csv_import'].includes(sourceType) ||
+    sourceType.includes('imported');
+}
+
+function normalizeCategoryFilter(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^category:/i, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function humanizeCategoryFilter(value) {
+  const normalized = normalizeCategoryFilter(value);
+  if (!normalized) return '';
+  const acronyms = new Set(['ai', 'asmr', 'bbw', 'milf']);
+  return normalized
+    .replace(/_/g, ' ')
+    .split(' ')
+    .map((part) => (acronyms.has(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(' ');
+}
+
+function categoryFilterVariants(value) {
+  const raw = String(value || '').replace(/^category:/i, '').trim();
+  const normalized = normalizeCategoryFilter(raw);
+  if (!normalized) return [];
+  return [...new Set([
+    raw,
+    normalized,
+    normalized.replace(/_/g, '-'),
+    humanizeCategoryFilter(normalized),
+  ].map((item) => String(item || '').trim()).filter(Boolean))];
+}
+
+function applyCategoryFilter(query, columnName, category) {
+  const variants = categoryFilterVariants(category);
+  if (!variants.length) return query;
+  return variants.length === 1 ? query.eq(columnName, variants[0]) : query.in(columnName, variants);
+}
+
+function publicVideoMatchesCategory(video = {}, category) {
+  const wanted = normalizeCategoryFilter(category);
+  if (!wanted) return true;
+  const candidates = [
+    video.category,
+    video.mainOrientationCategory,
+    video.main_orientation_category,
+  ];
+  return candidates.some((value) => normalizeCategoryFilter(value) === wanted);
 }
 
 function looksLikeVideoUrl(value) {
@@ -82,7 +350,11 @@ function hasRenderablePublicVideo(v) {
   const title = String(v.title || '').trim();
   const thumb = String(v.thumbnailUrl || '').trim();
   const url = String(v.videoUrl || v.streamUrl || '').trim();
-  return Boolean(v.id || v.videoId) && Boolean(title || thumb || url) && isPlayableVideo(v);
+  const source = String(v.source || v.contentSource || v.content_source || '').toLowerCase();
+  const listableExternal =
+    (v.listableInFeed === true || v.feedVisible === true) ||
+    (['imported_csv', 'imported', 'external_catalog'].includes(source) && thumb && /^https?:\/\//i.test(url));
+  return Boolean(v.id || v.videoId) && Boolean(title || thumb || url) && (listableExternal || isPlayableVideo(v));
 }
 
 function isPublicLegacyRow(row = {}) {
@@ -120,6 +392,8 @@ function mapTiktokRowToPublicVideo(row) {
     id: row.video_id,
     videoId: row.video_id,
     userId: row.user_id,
+    creatorId: row.user_id,
+    creator_id: row.user_id,
     title: row.title || '',
     description: row.description || '',
     mainOrientationCategory: row.main_orientation_category || '',
@@ -148,6 +422,82 @@ function mapTiktokRowToPublicVideo(row) {
     createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
     source: row.content_source || (row.official_company_content === true ? 'imported' : 'community'),
     contentSource: row.content_source || null,
+    creatorPriority: Boolean(row.user_id),
+  };
+}
+
+function creatorPriorityRank(v = {}) {
+  const hasCreator = Boolean(v.userId || v.user_id || v.creatorId || v.creator_id);
+  if (hasCreator) return 0;
+  const source = String(v.source || v.contentSource || v.content_source || '').toLowerCase();
+  if (['community', 'creator', 'rtdb', 'media', 'official_import'].includes(source)) return 0;
+  if (v.officialCompanyContent === true || v.official_company_content === true) return 1;
+  return 2;
+}
+
+function hasCreatorPriority(v = {}) {
+  return creatorPriorityRank(v) === 0;
+}
+
+function mapImportedVideoRowToPublicVideo(row) {
+  if (!row || typeof row !== 'object') return null;
+  const iframeEmbed = row.iframe_embed || '';
+  const playbackType = iframeEmbed ? 'external_embed' : (row.playback_type || 'external_redirect');
+  return {
+    id: row.id,
+    videoId: row.id,
+    userId: row.creator_id || null,
+    creatorId: row.creator_id || null,
+    creator_id: row.creator_id || null,
+    title: row.title || '',
+    description: row.title || '',
+    mainOrientationCategory: row.category || '',
+    category: row.category || '',
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    actors: Array.isArray(row.actors) ? row.actors : [],
+    allowPeopleToComment: false,
+    videoUrl: row.video_url || '',
+    video_url: row.video_url || '',
+    iframeEmbed,
+    iframe_embed: iframeEmbed,
+    playbackType,
+    playback_type: playbackType,
+    thumbnailUrl: row.thumbnail_url || null,
+    thumbnail_url: row.thumbnail_url || null,
+    durationSeconds: Number(row.duration || 0),
+    creatorDisplayName: row.studio || 'Imported catalog',
+    creatorAvatarUrl: null,
+    consentQuestion: CONSENT_QUESTION,
+    consentGiven: true,
+    isLive: true,
+    isPremiumContent: false,
+    tokenPrice: 0,
+    accessType: 'free',
+    premiumVisibility: 'public',
+    requiresMembership: false,
+    subscriptionAccess: false,
+    officialCompanyContent: true,
+    totalLikes: 0,
+    totalComments: 0,
+    totalViews: Number(row.views || 0),
+    createdAt: toTimestamp(row.publish_date || row.created_at),
+    source: row.creator_id ? 'community' : 'imported_csv',
+    contentSource: 'imported_csv',
+    creatorPriority: Boolean(row.creator_id),
+    pageUrl: row.video_url || '',
+    page_url: row.video_url || '',
+    externalUrl: row.video_url || '',
+    external_url: row.video_url || '',
+    playable: Boolean(iframeEmbed),
+    listableInFeed: Boolean(row.thumbnail_url || row.title || row.video_url),
+    feedVisible: Boolean(row.thumbnail_url || row.title || row.video_url),
+    embedAllowed: Boolean(iframeEmbed),
+    sourceType: iframeEmbed ? 'external_embed' : 'external_page',
+    validationStatus: iframeEmbed ? 'playable' : 'external_page',
+    playbackUrl: iframeEmbed ? '' : null,
+    playback_url: iframeEmbed ? '' : null,
+    streamUrl: iframeEmbed ? '' : row.video_url || '',
+    stream_url: iframeEmbed ? '' : row.video_url || '',
   };
 }
 
@@ -161,6 +511,8 @@ function mapRtdbVideoRowToPublicVideo(videoId, row) {
     id,
     videoId: id,
     userId: row.userId || row.user_id || row.uid || null,
+    creatorId: row.userId || row.user_id || row.uid || null,
+    creator_id: row.userId || row.user_id || row.uid || null,
     title: row.title || row.name || 'Video',
     description: row.description || '',
     mainOrientationCategory: row.mainOrientationCategory || row.main_orientation_category || row.category || '',
@@ -187,6 +539,7 @@ function mapRtdbVideoRowToPublicVideo(videoId, row) {
     totalViews: Number(row.totalViews ?? row.views ?? row.views_count ?? 0) || 0,
     createdAt: toTimestamp(row.createdAt || row.created_at || row.updatedAt || row.updated_at),
     source: 'rtdb',
+    creatorPriority: true,
   };
 }
 
@@ -201,6 +554,8 @@ function mapMediaRowToPublicVideo(row, source = 'media') {
     id,
     videoId: id,
     userId: row.user_id || row.userId || row.uid || null,
+    creatorId: row.user_id || row.userId || row.uid || null,
+    creator_id: row.user_id || row.userId || row.uid || null,
     title: row.title || row.name || 'Creator video',
     description: row.description || '',
     mainOrientationCategory: row.main_orientation_category || row.mainOrientationCategory || row.category || '',
@@ -227,6 +582,7 @@ function mapMediaRowToPublicVideo(row, source = 'media') {
     totalViews: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
     createdAt: toTimestamp(row.created_at || row.createdAt || row.updated_at || row.updatedAt),
     source,
+    creatorPriority: Boolean(row.user_id || row.userId || row.uid),
   };
 }
 
@@ -237,12 +593,56 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function getPublicVideoPlaybackShape(v = {}) {
+  const iframeEmbed = String(v.iframeEmbed || v.iframe_embed || '').trim();
+  const playbackType = getPlaybackTypeForPublicVideo({ ...v, iframeEmbed, iframe_embed: iframeEmbed });
+  const externalPageUrl = String(
+    v.videoUrl ||
+    v.video_url ||
+    v.pageUrl ||
+    v.page_url ||
+    v.externalUrl ||
+    v.external_url ||
+    v.url ||
+    ''
+  ).trim();
+  const rawPlaybackUrl = String(
+    v.playbackUrl ||
+    v.playback_url ||
+    v.streamUrl ||
+    v.stream_url ||
+    v.storageUrl ||
+    v.storage_url ||
+    ''
+  ).trim();
+  const allowImportedDirectHost = isImportedSource(v) || String(v.sourceType || v.source_type || '').toLowerCase().includes('imported');
+  const directPlaybackUrl = isDirectPlayableStreamUrl(rawPlaybackUrl, { allowUnapprovedDirectHost: allowImportedDirectHost })
+    ? rawPlaybackUrl
+    : '';
+  const isExternalEmbed = !directPlaybackUrl && (playbackType.toLowerCase() === 'external_embed' || iframeEmbed.length > 0);
+  const playbackUrl = isExternalEmbed ? '' : (directPlaybackUrl || rawPlaybackUrl || externalPageUrl);
+  const effectivePlaybackType = directPlaybackUrl ? 'internal' : playbackType;
+  const pageUrl = externalPageUrl || rawPlaybackUrl;
+
+  return {
+    iframeEmbed,
+    playbackType: effectivePlaybackType,
+    isExternalEmbed,
+    pageUrl,
+    playbackUrl,
+    streamUrl: directPlaybackUrl || (isExternalEmbed ? '' : playbackUrl),
+    sourceType: directPlaybackUrl ? 'imported_direct_stream' : (isExternalEmbed ? 'external_embed' : ''),
+    embedAllowed: isExternalEmbed,
+    externalUrl: String(v.externalUrl || v.external_url || v.pageUrl || v.page_url || externalPageUrl || pageUrl || '').trim(),
+  };
+}
+
 /** Same shape as mapRawToHomeCard (xnxxRapidApi) for home-feed + VideoFeed.jsx */
 export function publicVideoToHomeCard(v, index) {
   if (!v || typeof v !== 'object') return null;
   const id = v.videoId ?? v.id;
   if (!id) return null;
-  const pageUrl = String(v.playbackUrl || v.streamUrl || v.videoUrl || '').trim();
+  const playback = getPublicVideoPlaybackShape(v);
   const preview = String(v.previewVideo || '').trim();
   const thumb = String(v.thumbnailUrl || '').trim();
   const dur = Number(v.durationSeconds) || 0;
@@ -264,17 +664,29 @@ export function publicVideoToHomeCard(v, index) {
     channel: String(v.creatorDisplayName || v.channel || 'Creator'),
     views: v.totalViews ?? v.views ?? 0,
     thumbnail: thumb,
+    thumbnailUrl: thumb,
+    thumbnail_url: thumb,
     duration: formatDuration(dur),
     durationSeconds: dur,
     avatar: v.creatorAvatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(seed)}`,
     creatorDisplayName: v.creatorDisplayName || v.channel || 'Creator',
     creatorAvatarUrl: v.creatorAvatarUrl || null,
-    videoSrc: preview || pageUrl,
-    videoUrl: pageUrl,
-    streamUrl: pageUrl,
-    playbackUrl: pageUrl,
-    playback_url: pageUrl,
+    videoSrc: preview || playback.playbackUrl || (playback.isExternalEmbed ? '' : playback.pageUrl),
+    videoUrl: playback.pageUrl,
+    video_url: playback.pageUrl,
+    streamUrl: playback.streamUrl,
+    stream_url: playback.streamUrl,
+    playbackUrl: playback.playbackUrl,
+    playback_url: playback.playbackUrl,
+    iframeEmbed: playback.iframeEmbed,
+    iframe_embed: playback.iframeEmbed,
+    playbackType: playback.playbackType,
+    playback_type: playback.playbackType,
     previewVideo: preview || undefined,
+    pageUrl: playback.pageUrl,
+    page_url: playback.pageUrl,
+    externalUrl: playback.externalUrl,
+    external_url: playback.externalUrl,
     likes: String(v.totalLikes ?? 0),
     comments: String(v.totalComments ?? 0),
     time: '',
@@ -282,6 +694,9 @@ export function publicVideoToHomeCard(v, index) {
     source: v.source || 'community',
     contentSource: v.contentSource || v.content_source || null,
     userId: v.userId || null,
+    creatorId: v.creatorId || v.creator_id || v.userId || null,
+    creator_id: v.creatorId || v.creator_id || v.userId || null,
+    creatorPriority: hasCreatorPriority(v),
     allowPeopleToComment: v.allowPeopleToComment !== false,
     category: v.category || v.mainOrientationCategory || '',
     mainOrientationCategory: v.mainOrientationCategory || v.category || '',
@@ -299,10 +714,15 @@ export function publicVideoToHomeCard(v, index) {
     subscription_access: subscriptionAccess,
     officialCompanyContent: v.officialCompanyContent === true || v.official_company_content === true,
     official_company_content: v.officialCompanyContent === true || v.official_company_content === true,
-    playable: v.playable !== false,
-    sourceType: v.sourceType || v.source_type || 'approved_stream',
-    embedAllowed: v.embedAllowed === true || v.embed_allowed === true,
-    validationStatus: v.validationStatus || v.validation_status || 'playable',
+    playable: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.playable === true,
+    listableInFeed: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.listableInFeed === true || v.feedVisible === true,
+    feedVisible: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.listableInFeed === true || v.feedVisible === true,
+    sourceType: playback.sourceType || v.sourceType || v.source_type || (v.playable === false ? 'external_page' : 'approved_stream'),
+    source_type: playback.sourceType || v.sourceType || v.source_type || (v.playable === false ? 'external_page' : 'approved_stream'),
+    embedAllowed: playback.playbackType === 'internal' ? false : (playback.embedAllowed || v.embedAllowed === true || v.embed_allowed === true),
+    embed_allowed: playback.playbackType === 'internal' ? false : (playback.embedAllowed || v.embedAllowed === true || v.embed_allowed === true),
+    validationStatus: v.validationStatus || v.validation_status || (playback.isExternalEmbed ? 'playable' : (v.playable === false ? 'external_page' : 'playable')),
+    validation_status: v.validationStatus || v.validation_status || (playback.isExternalEmbed ? 'playable' : (v.playable === false ? 'external_page' : 'playable')),
   };
 }
 
@@ -311,7 +731,7 @@ export function publicVideoToFeedItem(v, index) {
   if (!v || typeof v !== 'object') return null;
   const duration = Number(v.durationSeconds) || 0;
   const preview = String(v.previewVideo || '').trim();
-  const page = String(v.playbackUrl || v.streamUrl || v.videoUrl || '').trim();
+  const playback = getPublicVideoPlaybackShape(v);
   const id = v.videoId ?? v.id;
   if (!id) return null;
   const accessType = String(v.accessType || v.access_type || '').trim().toLowerCase().replace(/-/g, '_')
@@ -326,12 +746,24 @@ export function publicVideoToFeedItem(v, index) {
     subscriptionAccess;
   return {
     id: String(id),
-    videoUrl: page,
-    streamUrl: page,
-    playbackUrl: page,
-    playback_url: page,
+    videoUrl: playback.pageUrl,
+    video_url: playback.pageUrl,
+    streamUrl: playback.streamUrl,
+    stream_url: playback.streamUrl,
+    playbackUrl: playback.playbackUrl,
+    playback_url: playback.playbackUrl,
+    iframeEmbed: playback.iframeEmbed,
+    iframe_embed: playback.iframeEmbed,
+    playbackType: playback.playbackType,
+    playback_type: playback.playbackType,
     previewVideo: preview,
     thumbnailUrl: String(v.thumbnailUrl || ''),
+    thumbnail_url: String(v.thumbnailUrl || ''),
+    thumbnail: String(v.thumbnailUrl || ''),
+    pageUrl: playback.pageUrl,
+    page_url: playback.pageUrl,
+    externalUrl: playback.externalUrl,
+    external_url: playback.externalUrl,
     duration,
     createdAt: new Date().toISOString(),
     title: v.title || '',
@@ -344,6 +776,9 @@ export function publicVideoToFeedItem(v, index) {
     source: v.source || 'community',
     contentSource: v.contentSource || v.content_source || null,
     userId: v.userId || null,
+    creatorId: v.creatorId || v.creator_id || v.userId || null,
+    creator_id: v.creatorId || v.creator_id || v.userId || null,
+    creatorPriority: hasCreatorPriority(v),
     allowPeopleToComment: v.allowPeopleToComment !== false,
     category: v.category || v.mainOrientationCategory || '',
     mainOrientationCategory: v.mainOrientationCategory || v.category || '',
@@ -360,10 +795,15 @@ export function publicVideoToFeedItem(v, index) {
     subscription_access: subscriptionAccess,
     officialCompanyContent: v.officialCompanyContent === true || v.official_company_content === true,
     official_company_content: v.officialCompanyContent === true || v.official_company_content === true,
-    playable: v.playable !== false,
-    sourceType: v.sourceType || v.source_type || 'approved_stream',
-    embedAllowed: v.embedAllowed === true || v.embed_allowed === true,
-    validationStatus: v.validationStatus || v.validation_status || 'playable',
+    playable: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.playable === true,
+    listableInFeed: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.listableInFeed === true || v.feedVisible === true,
+    feedVisible: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.listableInFeed === true || v.feedVisible === true,
+    sourceType: playback.sourceType || v.sourceType || v.source_type || (v.playable === false ? 'external_page' : 'approved_stream'),
+    source_type: playback.sourceType || v.sourceType || v.source_type || (v.playable === false ? 'external_page' : 'approved_stream'),
+    embedAllowed: playback.playbackType === 'internal' ? false : (playback.embedAllowed || v.embedAllowed === true || v.embed_allowed === true),
+    embed_allowed: playback.playbackType === 'internal' ? false : (playback.embedAllowed || v.embedAllowed === true || v.embed_allowed === true),
+    validationStatus: v.validationStatus || v.validation_status || (playback.isExternalEmbed ? 'playable' : (v.playable === false ? 'external_page' : 'playable')),
+    validation_status: v.validationStatus || v.validation_status || (playback.isExternalEmbed ? 'playable' : (v.playable === false ? 'external_page' : 'playable')),
   };
 }
 
@@ -380,58 +820,113 @@ function uniquePublicVideos(rows) {
     seen.add(key);
     out.push(playable);
   }
-  return out.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  return out.sort((a, b) => {
+    const priority = creatorPriorityRank(a) - creatorPriorityRank(b);
+    if (priority !== 0) return priority;
+    return Number(b.createdAt || 0) - Number(a.createdAt || 0);
+  });
 }
 
-async function fetchSupabaseTiktokPublicVideos({ page = 1, limit = 100, premiumOnly = false } = {}) {
+async function fetchSupabaseTiktokPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
   if (!isConfigured() || !supabase) return [];
   const pageNum = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const from = 0;
   const to = (pageNum * limitNum) - 1;
+  const categoryFilter = normalizeCategoryFilter(category);
 
-  const { data, error } = await runPublicListingQuery((filterPublicRows) => {
-    let query = filterPublicRows(supabase.from('tiktok_videos').select('*'));
-    if (premiumOnly) query = query.eq('is_premium_content', true);
-    return query.order('created_at', { ascending: false }).range(from, to);
-  });
+  const { data, error } = await runSelectWithColumnFallback(
+    TIKTOK_PUBLIC_SELECT_COLUMNS,
+    (selectColumns) => timedDelivery('supabase.tiktok_videos.feed', () => runPublicListingQuery((filterPublicRows) => {
+      let query = filterPublicRows(supabase.from('tiktok_videos').select(selectColumns));
+      if (premiumOnly) query = query.eq('is_premium_content', true);
+      return query.order('created_at', { ascending: false }).range(from, to);
+    }), { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined }),
+    'supabase.tiktok_videos.feed',
+  );
 
   if (error || !Array.isArray(data) || data.length === 0) return [];
-  const mapped = data.map(mapTiktokRowToPublicVideo).filter(Boolean);
+  const mapped = data.map(mapTiktokRowToPublicVideo).filter(Boolean).filter((row) => publicVideoMatchesCategory(row, categoryFilter));
   return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
 }
 
-async function fetchSupabaseMediaPublicVideos({ page = 1, limit = 100, premiumOnly = false } = {}) {
+async function fetchSupabaseImportedPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
+  if (premiumOnly || !isConfigured() || !supabase) return [];
+  const pageNum = Math.max(1, Number(page) || 1);
+  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
+  const from = 0;
+  const to = (pageNum * limitNum) - 1;
+  const categoryFilter = normalizeCategoryFilter(category);
+
+  const { data, error } = await runSelectWithColumnFallback(
+    IMPORTED_PUBLIC_SELECT_COLUMNS,
+    (selectColumns) => timedDelivery('supabase.videos.imported_feed', () => {
+      let query = supabase
+        .from('videos')
+        .select(selectColumns);
+      if (categoryFilter) query = applyCategoryFilter(query, 'category', categoryFilter);
+      return query
+        .order('created_at', { ascending: false })
+        .range(from, to);
+    }, { page: pageNum, limit: limitNum, category: categoryFilter || undefined }),
+    'supabase.videos.imported_feed',
+  );
+  if (error) {
+    if (isMissingTableError(error)) return [];
+    return [];
+  }
+  return (data || []).map(mapImportedVideoRowToPublicVideo).filter(Boolean);
+}
+
+async function fetchSupabaseMediaPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
   if (!isConfigured() || !supabase) return [];
   const pageNum = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const to = (pageNum * limitNum) - 1;
+  const categoryFilter = normalizeCategoryFilter(category);
   try {
-    let query = supabase.from('media').select('*').order('created_at', { ascending: false }).range(0, to);
-    if (!premiumOnly) {
-      query = query.eq('type', 'video');
-    }
-    const { data, error } = await query;
+    const { data, error } = await runSelectWithColumnFallback(
+      MEDIA_PUBLIC_SELECT_COLUMNS,
+      (selectColumns) => {
+        let query = supabase.from('media').select(selectColumns).order('created_at', { ascending: false }).range(0, to);
+        if (!premiumOnly) query = query.eq('type', 'video');
+        return timedDelivery('supabase.media.feed', () => query, { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined });
+      },
+      'supabase.media.feed',
+    );
     if (error) {
       if (isMissingTableError(error)) return [];
-      let fallback = supabase.from('media').select('*').order('created_at', { ascending: false }).range(0, to);
-      const retry = await fallback;
+      const retry = await runSelectWithColumnFallback(
+        MEDIA_PUBLIC_SELECT_COLUMNS,
+        (selectColumns) => timedDelivery('supabase.media.feed_fallback', () => {
+          const retryQuery = supabase
+            .from('media')
+            .select(selectColumns);
+          return retryQuery
+            .order('created_at', { ascending: false })
+            .range(0, to);
+        }, { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined }),
+        'supabase.media.feed_fallback',
+      );
       if (retry.error) return [];
       const mappedRetry = (retry.data || []).map((row) => mapMediaRowToPublicVideo(row, 'media')).filter(Boolean);
-      const filteredRetry = premiumOnly ? mappedRetry.filter((v) => v.isPremiumContent === true) : mappedRetry;
+      const filteredRetry = (premiumOnly ? mappedRetry.filter((v) => v.isPremiumContent === true) : mappedRetry)
+        .filter((row) => publicVideoMatchesCategory(row, categoryFilter));
       return Promise.all(filteredRetry.map((m) => mergeCreatorIntoPublicVideo(m)));
     }
     const mapped = (data || []).map((row) => mapMediaRowToPublicVideo(row, 'media')).filter(Boolean);
-    const filtered = premiumOnly ? mapped.filter((v) => v.isPremiumContent === true) : mapped;
+    const filtered = (premiumOnly ? mapped.filter((v) => v.isPremiumContent === true) : mapped)
+      .filter((row) => publicVideoMatchesCategory(row, categoryFilter));
     return Promise.all(filtered.map((m) => mergeCreatorIntoPublicVideo(m)));
   } catch {
     return [];
   }
 }
 
-async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false } = {}) {
+async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false, category = null } = {}) {
   const rtdb = getFirebaseRtdb();
   if (!rtdb) return [];
+  const categoryFilter = normalizeCategoryFilter(category);
   try {
     const snap = await rtdb.ref('videos').once('value');
     const val = snap.val();
@@ -440,6 +935,7 @@ async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false } = {}) 
       .map(([id, row]) => mapRtdbVideoRowToPublicVideo(id, row))
       .filter(Boolean)
       .filter((v) => !premiumOnly || v.isPremiumContent === true)
+      .filter((v) => publicVideoMatchesCategory(v, categoryFilter))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
       .slice(0, Math.min(500, Math.max(1, Number(limit) || 500)));
     return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
@@ -448,9 +944,10 @@ async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false } = {}) 
   }
 }
 
-async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false } = {}) {
+async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false, category = null } = {}) {
   const rtdb = getFirebaseRtdb();
   if (!rtdb) return [];
+  const categoryFilter = normalizeCategoryFilter(category);
   try {
     const snap = await rtdb.ref('media').once('value');
     const val = snap.val();
@@ -459,6 +956,7 @@ async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false } =
       .map(([id, row]) => mapMediaRowToPublicVideo({ ...(typeof row === 'object' && row ? row : {}), id: row?.id || id }, 'media'))
       .filter(Boolean)
       .filter((v) => !premiumOnly || v.isPremiumContent === true)
+      .filter((v) => publicVideoMatchesCategory(v, categoryFilter))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
       .slice(0, Math.min(500, Math.max(1, Number(limit) || 500)));
     return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
@@ -467,36 +965,44 @@ async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false } =
   }
 }
 
-async function fetchAllCreatorPublicVideos({ page = 1, limit = 100, premiumOnly = false } = {}) {
+async function fetchAllCreatorPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const fetchLimit = Math.min(500, pageNum * limitNum);
-  const [tiktokRows, mediaRows, rtdbRows, rtdbMediaRows] = await Promise.all([
-    fetchSupabaseTiktokPublicVideos({ page: pageNum, limit: limitNum, premiumOnly }),
-    fetchSupabaseMediaPublicVideos({ page: pageNum, limit: limitNum, premiumOnly }),
-    fetchRtdbPublicVideos({ limit: fetchLimit, premiumOnly }),
-    fetchRtdbMediaPublicVideos({ limit: fetchLimit, premiumOnly }),
+  const categoryFilter = normalizeCategoryFilter(category);
+  const [tiktokRows, importedRows, mediaRows, rtdbRows, rtdbMediaRows] = await Promise.all([
+    fetchSupabaseTiktokPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter }),
+    fetchSupabaseImportedPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter }),
+    fetchSupabaseMediaPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter }),
+    fetchRtdbPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter }),
+    fetchRtdbMediaPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter }),
   ]);
-  return uniquePublicVideos([...tiktokRows, ...mediaRows, ...rtdbRows, ...rtdbMediaRows]);
+  return uniquePublicVideos([...tiktokRows, ...importedRows, ...mediaRows, ...rtdbRows, ...rtdbMediaRows]);
 }
 
-export async function fetchPublishedPublicVideos({ page = 1, limit = 100, premiumOnly = false } = {}) {
+export async function fetchPublishedPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
   const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const from = (pageNum - 1) * limitNum;
-  const rows = await fetchAllCreatorPublicVideos({ page: pageNum, limit: limitNum, premiumOnly });
-  return rows.slice(from, from + limitNum);
+  const categoryFilter = normalizeCategoryFilter(category);
+  const cacheKey = `published:${pageNum}:${limitNum}:${premiumOnly ? 'premium' : 'all'}:${categoryFilter || 'all-categories'}`;
+  const cached = getCachedFeed(cacheKey);
+  if (cached) return cached;
+  const rows = await fetchAllCreatorPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter });
+  const sliced = rows.slice(from, from + limitNum);
+  setCachedFeed(cacheKey, sliced);
+  return cloneRows(sliced);
 }
 
 /**
  * @param {{ page: number, pagesCount: number }} opts page 1-based, pagesCount merged "pages" width
  * @returns {Promise<Array>} home-card shaped rows
  */
-export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = null }) {
+export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = null, category = null }) {
   const pageNum = Math.max(1, Number(page) || 1);
   const pages = Math.min(5, Math.max(1, Number(pagesCount) || 1));
   const pageSize = Math.min(200, 20 * pages);
-  const rows = await fetchPublishedPublicVideos({ page: pageNum, limit: pageSize });
+  const rows = await fetchPublishedPublicVideos({ page: pageNum, limit: pageSize, category });
   return rows.map((v, i) => publicVideoToHomeCard(v, i)).filter(Boolean);
 }
 
@@ -519,9 +1025,28 @@ export async function fetchPublishedVideoById(videoId, viewerUid = null) {
   if (!lookup) return null;
 
   if (isConfigured() && supabase) {
+    const imported = await runSelectWithColumnFallback(
+      IMPORTED_PUBLIC_SELECT_COLUMNS,
+      (selectColumns) => timedDelivery('supabase.videos.imported_detail', () => supabase
+        .from('videos')
+        .select(selectColumns)
+        .eq('id', lookup)
+        .maybeSingle(), { videoId: lookup }),
+      'supabase.videos.imported_detail',
+    );
+    if (!imported.error && imported.data) {
+      const m = mapImportedVideoRowToPublicVideo(imported.data);
+      const playable = annotatePlayableVideo(m);
+      if (hasRenderablePublicVideo(playable)) return publicVideoToDetailItem(playable);
+    }
+
     const { data, error } = await runPublicListingQuery((filterPublicRows) => (
-      filterPublicRows(supabase.from('tiktok_videos').select('*').eq('video_id', lookup))
-        .maybeSingle()
+      runSelectWithColumnFallback(
+        TIKTOK_PUBLIC_SELECT_COLUMNS,
+        (selectColumns) => filterPublicRows(supabase.from('tiktok_videos').select(selectColumns).eq('video_id', lookup))
+          .maybeSingle(),
+        'supabase.tiktok_videos.detail',
+      )
     ));
     if (!error && data) {
       const m = mapTiktokRowToPublicVideo(data);
@@ -542,18 +1067,30 @@ export async function fetchPublishedVideoById(videoId, viewerUid = null) {
 }
 
 function publicVideoToDetailItem(v) {
-  const page = String(v.playbackUrl || v.streamUrl || v.videoUrl || '').trim();
+  const playback = getPublicVideoPlaybackShape(v);
   const preview = String(v.previewVideo || '').trim();
   return {
     id: String(v.videoId || v.id),
     videoId: String(v.videoId || v.id),
     video_id: String(v.videoId || v.id),
-    videoUrl: page,
-    streamUrl: page,
-    playbackUrl: page,
-    playback_url: page,
+    videoUrl: playback.pageUrl,
+    video_url: playback.pageUrl,
+    streamUrl: playback.streamUrl,
+    stream_url: playback.streamUrl,
+    playbackUrl: playback.playbackUrl,
+    playback_url: playback.playbackUrl,
+    iframeEmbed: playback.iframeEmbed,
+    iframe_embed: playback.iframeEmbed,
+    playbackType: playback.playbackType,
+    playback_type: playback.playbackType,
     previewVideo: preview,
     thumbnailUrl: String(v.thumbnailUrl || ''),
+    thumbnail_url: String(v.thumbnailUrl || ''),
+    thumbnail: String(v.thumbnailUrl || ''),
+    pageUrl: playback.pageUrl,
+    page_url: playback.pageUrl,
+    externalUrl: playback.externalUrl,
+    external_url: playback.externalUrl,
     duration: Number(v.durationSeconds) || 0,
     createdAt: v.createdAt ? new Date(Number(v.createdAt)).toISOString() : new Date().toISOString(),
     title: v.title || '',
@@ -567,15 +1104,23 @@ function publicVideoToDetailItem(v) {
     totalComments: v.totalComments ?? 0,
     source: v.source || 'community',
     userId: v.userId || null,
+    creatorId: v.creatorId || v.creator_id || v.userId || null,
+    creator_id: v.creatorId || v.creator_id || v.userId || null,
+    creatorPriority: hasCreatorPriority(v),
     allowPeopleToComment: v.allowPeopleToComment !== false,
     isPremiumContent: v.isPremiumContent === true,
     tokenPrice: Number(v.tokenPrice) || 0,
     category: v.category || v.mainOrientationCategory || '',
     mainOrientationCategory: v.mainOrientationCategory || v.category || '',
     tags: Array.isArray(v.tags) ? v.tags : [],
-    playable: v.playable !== false,
-    sourceType: v.sourceType || v.source_type || 'approved_stream',
-    embedAllowed: v.embedAllowed === true || v.embed_allowed === true,
-    validationStatus: v.validationStatus || v.validation_status || 'playable',
+    playable: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.playable === true,
+    listableInFeed: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.listableInFeed === true || v.feedVisible === true,
+    feedVisible: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.listableInFeed === true || v.feedVisible === true,
+    sourceType: playback.sourceType || v.sourceType || v.source_type || (v.playable === false ? 'external_page' : 'approved_stream'),
+    source_type: playback.sourceType || v.sourceType || v.source_type || (v.playable === false ? 'external_page' : 'approved_stream'),
+    embedAllowed: playback.playbackType === 'internal' ? false : (playback.embedAllowed || v.embedAllowed === true || v.embed_allowed === true),
+    embed_allowed: playback.playbackType === 'internal' ? false : (playback.embedAllowed || v.embedAllowed === true || v.embed_allowed === true),
+    validationStatus: v.validationStatus || v.validation_status || (playback.isExternalEmbed ? 'playable' : (v.playable === false ? 'external_page' : 'playable')),
+    validation_status: v.validationStatus || v.validation_status || (playback.isExternalEmbed ? 'playable' : (v.playable === false ? 'external_page' : 'playable')),
   };
 }

@@ -86,10 +86,32 @@ router.post('/send-gift', requireAuth, walletActionLimiter, async (req, res) => 
       gift,
     });
 
-    return res.json({ ok: true, newBalance: result.newBalance, giftId: result.giftId });
+    emitGiftRealtime(req, {
+      streamId,
+      senderId: req.uid,
+      senderName,
+      result,
+    });
+
+    return res.json({
+      ok: true,
+      newBalance: result.newBalance,
+      giftId: result.giftId,
+      liveGiftId: result.liveGiftId,
+      totalGiftsAmount: result.totalGiftsAmount,
+      creatorAmount: result.creatorAmount,
+      platformAmount: result.platformAmount,
+      gift: result.gift,
+    });
   } catch (err) {
     if (err.code === 'INSUFFICIENT_TOKENS') {
       return res.status(402).json({ ok: false, error: err.message, code: 'INSUFFICIENT_TOKENS' });
+    }
+    if (err.code === 'GIFT_NOT_FOUND') {
+      return res.status(400).json({ ok: false, error: err.message, code: err.code });
+    }
+    if (err.code === 'GIFT_SYSTEM_UNAVAILABLE') {
+      return res.status(503).json({ ok: false, error: err.message, code: err.code });
     }
     console.error('[tokens] send-gift error:', err.message);
     return res.status(500).json({ ok: false, error: 'Gift failed. Please try again.' });
@@ -134,3 +156,30 @@ router.post('/purchase', requireAuth, purchaseLimiter, async (req, res) => {
 });
 
 export default router;
+
+function emitGiftRealtime(req, { streamId, senderId, senderName, result }) {
+  const io = req.app?.get?.('io');
+  if (!io || !streamId || !result?.gift) return;
+  const gift = result.gift;
+  const payload = {
+    id: result.liveGiftId || result.giftId || `${Date.now()}`,
+    liveId: result.liveGiftId ? streamId : undefined,
+    roomId: result.liveGiftId ? undefined : streamId,
+    senderId,
+    senderName: senderName || 'Viewer',
+    giftId: gift.id,
+    giftType: gift.id,
+    giftName: gift.name,
+    name: gift.name,
+    emoji: gift.emoji,
+    imageUrl: gift.imageUrl,
+    animationType: gift.animationType,
+    category: gift.category,
+    rarity: gift.rarity,
+    amount: Number(gift.coinCost || gift.price || 0),
+    totalGiftsAmount: result.totalGiftsAmount,
+    createdAt: new Date().toISOString(),
+  };
+  if (result.liveGiftId) io.to(streamId).emit('new-gift', payload);
+  else io.to(streamId).emit('chat:gift', payload);
+}

@@ -9,8 +9,17 @@ function fmt(v) { return Number(v) || 0; }
 const ALLOWED_STATUS = new Set(['pending', 'active', 'paused', 'rejected', 'expired']);
 const SAFE_CAMPAIGN_PLACEMENTS = {
   homepage_banner: { width: 970, height: 120, format: 'banner' },
+  homepage_top: { width: 900, height: 250, format: 'banner' },
+  homepage_bottom: { width: 900, height: 250, format: 'banner' },
   sidebar: { width: 300, height: 250, format: 'banner' },
   feed: { width: 728, height: 90, format: 'native' },
+  feed_native: { width: 300, height: 250, format: 'native' },
+  mobile_inline: { width: 300, height: 100, format: 'native' },
+  category_feed: { width: 300, height: 250, format: 'native' },
+  video_page: { width: 300, height: 250, format: 'banner' },
+  sticky_banner: { width: 728, height: 90, format: 'banner' },
+  native_card: { width: 300, height: 250, format: 'native' },
+  before_footer: { width: 900, height: 250, format: 'banner' },
 };
 
 function normalizeStatusFromBody(body) {

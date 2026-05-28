@@ -7,6 +7,7 @@ import {
   resumeMembership,
 } from '../services/membershipLifecycle.service.js';
 import { createSecurePaymentSession } from '../services/securePayments.service.js';
+import { paymentProviderLabel } from '../services/paymentRegion.service.js';
 
 export async function getCurrentMembership(req, res) {
   try {
@@ -23,20 +24,37 @@ export async function subscribeMembership(req, res) {
     const {
       planId,
       countryCode = 'US',
+      billingCountry = null,
       customerEmail = '',
       customerName = 'Member',
+      customerPhone = '',
     } = req.body || {};
     if (!planId) return res.status(400).json({ ok: false, success: false, error: 'planId is required' });
-    const checkout = await createSecurePaymentSession({
+    const paymentResp = await createSecurePaymentSession({
       userId: req.uid,
       productType: 'membership',
       productId: planId,
       countryCode,
+      billingCountry,
       customerEmail,
       customerName,
+      customerPhone,
       req,
     });
-    return res.json({ ok: true, success: true, ...checkout });
+    return res.json({
+      ok: true,
+      success: true,
+      provider: paymentResp.provider,
+      providerLabel: paymentProviderLabel(paymentResp.provider),
+      checkoutUrl: paymentResp.checkoutUrl,
+      reference: paymentResp.reference,
+      orderId: paymentResp.orderId,
+      orderKey: paymentResp.orderKey,
+      countryCode: paymentResp.countryCode,
+      currency: paymentResp.currency,
+      amount: paymentResp.amount,
+      flutterwave: paymentResp.flutterwave,
+    });
   } catch (error) {
     const status = /unreachable|timed out/i.test(error.message) ? 503 : 500;
     return res.status(status).json({ ok: false, success: false, error: error.message });
@@ -49,24 +67,41 @@ export async function renewMembership(req, res) {
     const {
       planId = current?.planId || current?.plan,
       countryCode = 'US',
+      billingCountry = null,
       customerEmail = '',
       customerName = 'Member',
+      customerPhone = '',
     } = req.body || {};
 
     if (!planId || planId === 'basic') {
       return res.status(400).json({ ok: false, success: false, error: 'No active membership plan to renew.' });
     }
 
-    const checkout = await createSecurePaymentSession({
+    const paymentResp = await createSecurePaymentSession({
       userId: req.uid,
       productType: 'membership',
       productId: planId,
       countryCode,
+      billingCountry,
       customerEmail,
       customerName,
+      customerPhone,
       req,
     });
-    return res.json({ ok: true, success: true, ...checkout });
+    return res.json({
+      ok: true,
+      success: true,
+      provider: paymentResp.provider,
+      providerLabel: paymentProviderLabel(paymentResp.provider),
+      checkoutUrl: paymentResp.checkoutUrl,
+      reference: paymentResp.reference,
+      orderId: paymentResp.orderId,
+      orderKey: paymentResp.orderKey,
+      countryCode: paymentResp.countryCode,
+      currency: paymentResp.currency,
+      amount: paymentResp.amount,
+      flutterwave: paymentResp.flutterwave,
+    });
   } catch (error) {
     const status = /unreachable|timed out/i.test(error.message) ? 503 : 500;
     return res.status(status).json({ ok: false, success: false, error: error.message });

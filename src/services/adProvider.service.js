@@ -45,7 +45,15 @@ const EXOCLICK_DISPLAY_PLACEMENTS = new Set(EXOCLICK_DISPLAY_ZONE_SPECS.map((z) 
 
 function isMissingTable(err) {
   const msg = String(err?.message || err?.code || '');
-  return msg.includes('does not exist') || err?.code === '42P01' || err?.code === 'PGRST205';
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('schema cache') ||
+    err?.code === '42P01' ||
+    err?.code === '42703' ||
+    err?.code === 'PGRST200' ||
+    err?.code === 'PGRST204' ||
+    err?.code === 'PGRST205'
+  );
 }
 
 export async function listProviders() {
@@ -416,7 +424,11 @@ export async function incrementProviderStats(providerId, { impressions = 0, clic
   if (!supabase || !providerId) return;
   const patch = {};
   if (impressions) patch.impressions = supabase.rpc ? undefined : undefined;
-  const { data: current } = await supabase.from('ad_providers').select('impressions,clicks,failed_requests,revenue_usd').eq('id', providerId).maybeSingle();
+  const { data: current, error: currentError } = await supabase.from('ad_providers').select('impressions,clicks,failed_requests,revenue_usd').eq('id', providerId).maybeSingle();
+  if (currentError) {
+    if (!isMissingTable(currentError)) throw currentError;
+    return;
+  }
   if (!current) return;
   const update = {
     impressions: Number(current.impressions || 0) + impressions,
@@ -427,12 +439,13 @@ export async function incrementProviderStats(providerId, { impressions = 0, clic
   };
   if (success === true) update.last_success_at = new Date().toISOString();
   if (success === false) update.last_failure_at = new Date().toISOString();
-  await supabase.from('ad_providers').update(update).eq('id', providerId);
+  const { error } = await supabase.from('ad_providers').update(update).eq('id', providerId);
+  if (error && !isMissingTable(error)) throw error;
 }
 
 async function logAudit({ providerId, admin, action, before, after }) {
   if (!supabase) return;
-  await supabase.from('ad_provider_audit_log').insert({
+  const { error } = await supabase.from('ad_provider_audit_log').insert({
     provider_id: providerId,
     admin_id: admin?.id || null,
     admin_email: admin?.email || null,
@@ -440,6 +453,7 @@ async function logAudit({ providerId, admin, action, before, after }) {
     before_state: before,
     after_state: after,
   });
+  if (error && !isMissingTable(error)) throw error;
 }
 
 export async function getAuditLog(limit = 50) {

@@ -29,6 +29,7 @@ const DETAIL_LOG_LIMIT = readPositiveInteger('API_MONITOR_DETAIL_LOG_LIMIT', 200
 const CACHE_TTL_SECONDS = readPositiveInteger('API_MONITOR_CACHE_TTL_SECONDS', 10);
 const OFFLINE_AFTER_MS = readPositiveInteger('API_MONITOR_OFFLINE_AFTER_MS', 15 * 60 * 1000);
 const HEALTH_CHECK_TIMEOUT_MS = readPositiveInteger('API_MONITOR_HEALTH_CHECK_TIMEOUT_MS', 8000);
+const REDIS_BUFFER_ENABLED = readBoolean('API_MONITOR_REDIS_BUFFER_ENABLED', false);
 
 const localQueue = [];
 const recentLogs = [];
@@ -55,6 +56,12 @@ const serviceState = {
 function readPositiveInteger(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function readBoolean(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
 }
 
 function clamp(value, min, max) {
@@ -283,7 +290,7 @@ function pushLocalEvent(event) {
 }
 
 async function pushRedisEvent(event) {
-  if (!upstashRedis) {
+  if (!upstashRedis || !REDIS_BUFFER_ENABLED) {
     pushLocalEvent(event);
     return;
   }
@@ -310,8 +317,9 @@ export function recordApiRequest(event) {
   updateRouteStats(normalized);
   addRecentLog(normalized);
 
-  // Do not await Redis from the request path. Failures are captured and moved
-  // to the bounded local queue so monitoring can degrade without breaking API traffic.
+  // Monitoring is non-critical. By default this stays in process-local memory
+  // and is flushed by the monitoring workflow; Redis buffering can be enabled
+  // explicitly for multi-instance aggregation.
   pushRedisEvent(normalized).catch((error) => {
     serviceState.redisWriteFailures += 1;
     serviceState.lastRedisErrorAt = new Date().toISOString();
@@ -323,7 +331,7 @@ export function recordApiRequest(event) {
 }
 
 async function drainRedisEvents(maxEvents = REDIS_DRAIN_BATCH_SIZE) {
-  if (!upstashRedis) return [];
+  if (!upstashRedis || !REDIS_BUFFER_ENABLED) return [];
 
   try {
     const drained = await upstashRedis.rpop(REDIS_EVENT_KEY, maxEvents);
@@ -615,6 +623,7 @@ export function getMonitoringIngestionState() {
     recentLogSize: recentLogs.length,
     memoryRouteCount: memoryRoutes.size,
     redisConfigured: Boolean(upstashRedis),
+    redisBufferEnabled: REDIS_BUFFER_ENABLED,
     supabaseConfigured: Boolean(supabase),
   };
 }

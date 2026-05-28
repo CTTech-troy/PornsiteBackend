@@ -11,8 +11,9 @@
   },
   "queues": {
     "prefix": "xstream",
-    "maxLocalFallbackItems": 5000,
-    "deadLetterPrefix": "xstream:dead-letter"
+    "enterpriseImportPrefix": "xstream:enterprise-import",
+    "deadLetterPrefix": "xstream:enterprise-import:dead-letter",
+    "memoryFallback": false
   }
 }
 

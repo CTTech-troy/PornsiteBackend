@@ -87,10 +87,10 @@ async function debitWallet(ownerId, amount, meta = {}) {
  */
 async function processGiftPayment({ liveId, senderId, giftType, quantity = 1 }) {
   if (!isConfigured()) throw new Error('Supabase not configured');
-  const gift = giftCtrl.getGift(giftType);
+  const gift = await giftCtrl.getGift(giftType);
   if (!gift) throw new Error('Invalid gift type');
   const qty = Number(quantity) || 1;
-  const totalAmount = +(gift.price * qty).toFixed(2);
+  const totalAmount = +(Number(gift.coinCost || gift.price || 0) * qty).toFixed(2);
 
   // Atomic debit — will throw if insufficient balance
   await debitWallet(senderId, totalAmount, { reason: 'gift_purchase', giftType, quantity: qty, liveId });

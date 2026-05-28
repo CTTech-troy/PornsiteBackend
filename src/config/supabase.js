@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import fs from 'fs';
+import { Readable } from 'stream';
 
 dotenv.config({ quiet: true });
 
@@ -14,6 +15,7 @@ const SUPABASE_STORAGE_S3_URL =
 
 const IMAGE_BUCKET = process.env.SUPABASE_IMAGE_BUCKET || 'images';
 const VIDEO_BUCKET = process.env.SUPABASE_VIDEO_BUCKET || 'videos';
+const IMPORT_STAGING_BUCKET = process.env.IMPORT_STAGING_BUCKET || 'imports-staging';
 
 let supabase = null;
 let supabaseUnavailableUntil = 0;
@@ -122,17 +124,87 @@ function isConfigured() {
 async function uploadFileToBucket(bucket, destPath, file, contentType) {
   if (!isConfigured()) throw new Error('Supabase not configured');
   let body;
-  if (file.buffer) {
+  let streamUpload = false;
+  if (file?.buffer) {
     body = file.buffer;
-  } else if (file.path) {
+  } else if (file?.path) {
     body = fs.createReadStream(file.path);
+    streamUpload = true;
+  } else if (file?.stream) {
+    body = file.stream;
+    streamUpload = true;
+  } else if (file?.body) {
+    body = file.body;
+    streamUpload = typeof file.body?.pipe === 'function';
+  } else if (Buffer.isBuffer(file) || typeof file === 'string') {
+    body = file;
   } else {
     throw new Error('Unsupported file object for upload');
   }
 
-  const { data, error } = await supabase.storage.from(bucket).upload(destPath, body, { contentType, upsert: false });
+  if (streamUpload) {
+    const url = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/${bucket}/${encodeStoragePath(destPath)}`;
+    const res = await supabaseFetch(url, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseServiceRoleKey,
+        Authorization: `Bearer ${supabaseServiceRoleKey}`,
+        'Content-Type': contentType || 'application/octet-stream',
+        ...(file?.upsert === true ? { 'x-upsert': 'true' } : {}),
+      },
+      body,
+      duplex: 'half',
+    });
+    const text = await res.text().catch(() => '');
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text || null;
+    }
+    if (!res.ok) {
+      const message = typeof data === 'object' && data ? (data.message || data.error || JSON.stringify(data)) : String(data || '');
+      throw new Error(`Storage upload failed (${res.status}): ${message || destPath}`);
+    }
+    return data || { path: destPath };
+  }
+
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .upload(destPath, body, {
+      contentType,
+      upsert: file?.upsert === true,
+    });
   if (error) throw error;
   return data;
+}
+
+function encodeStoragePath(path) {
+  return String(path || '').split('/').map(encodeURIComponent).join('/');
+}
+
+async function downloadFileFromBucketStream(bucket, sourcePath) {
+  if (!isConfigured()) throw new Error('Supabase not configured');
+  const url = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/${bucket}/${encodeStoragePath(sourcePath)}`;
+  const res = await supabaseFetch(url, {
+    headers: {
+      apikey: supabaseServiceRoleKey,
+      Authorization: `Bearer ${supabaseServiceRoleKey}`,
+    },
+  });
+  if (!res.ok) {
+    const message = await res.text().catch(() => '');
+    throw new Error(`Storage download failed (${res.status}): ${message || sourcePath}`);
+  }
+  if (!res.body) throw new Error('Storage download returned an empty stream');
+  const stream = typeof Readable.fromWeb === 'function'
+    ? Readable.fromWeb(res.body)
+    : res.body;
+  return {
+    stream,
+    contentLength: Number(res.headers.get('content-length') || 0) || null,
+    contentType: res.headers.get('content-type') || null,
+  };
 }
 
 function getPublicUrl(bucket, path) {
@@ -146,31 +218,43 @@ function getPublicUrl(bucket, path) {
   }
 }
 
-async function ensureBuckets() {
-  if (!isConfigured()) return;
-  for (const bucket of [VIDEO_BUCKET, IMAGE_BUCKET]) {
-    try {
-      const { error } = await supabase.storage.createBucket(bucket, { public: true });
-      const alreadyExists = error && /resource already exists/i.test(error.message || '');
-      if (error && !alreadyExists) {
-        const msg = error.message || '';
-        if (!/row-level security|RLS|policy|fetch failed/i.test(msg)) {
-          console.warn(`Supabase bucket "${bucket}" create:`, msg);
-        }
-      }
-      if (!error || alreadyExists) {
-        const { error: updateError } = await supabase.storage.updateBucket(bucket, { public: true });
-        if (updateError && !/row-level security|RLS|policy|fetch failed/i.test(updateError.message || '')) {
-          console.warn(`Supabase bucket "${bucket}" public update:`, updateError.message || updateError);
-        }
-      }
-    } catch (err) {
-      const msg = err?.message || String(err);
-      if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
+function isBucketAlreadyExistsError(error) {
+  return /resource already exists|bucket already exists|already exists|duplicate/i.test(String(error?.message || error || ''));
+}
+
+async function ensureStorageBucket(bucket, { public: isPublic = false } = {}) {
+  if (!isConfigured()) return false;
+  try {
+    const { error } = await supabase.storage.createBucket(bucket, { public: isPublic });
+    const alreadyExists = error && isBucketAlreadyExistsError(error);
+    if (error && !alreadyExists) {
+      const msg = error.message || '';
+      if (!/row-level security|RLS|policy|fetch failed/i.test(msg)) {
         console.warn(`Supabase bucket "${bucket}" create:`, msg);
       }
     }
+    if (!error || alreadyExists) {
+      const { error: updateError } = await supabase.storage.updateBucket(bucket, { public: isPublic });
+      if (updateError && !/row-level security|RLS|policy|fetch failed/i.test(updateError.message || '')) {
+        console.warn(`Supabase bucket "${bucket}" update:`, updateError.message || updateError);
+      }
+    }
+    const { error: readError } = await supabase.storage.getBucket(bucket);
+    return !readError;
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (!/fetch failed|timeout|ECONNREFUSED|ENOTFOUND/i.test(msg)) {
+      console.warn(`Supabase bucket "${bucket}" create:`, msg);
+    }
+    return false;
   }
+}
+
+async function ensureBuckets() {
+  if (!isConfigured()) return;
+  await ensureStorageBucket(VIDEO_BUCKET, { public: true });
+  await ensureStorageBucket(IMAGE_BUCKET, { public: true });
+  await ensureStorageBucket(IMPORT_STAGING_BUCKET, { public: false });
 }
 
 export {
@@ -181,9 +265,12 @@ export {
   markSupabaseUnavailable,
   getSupabaseStatus,
   uploadFileToBucket,
+  downloadFileFromBucketStream,
   getPublicUrl,
+  ensureStorageBucket,
   ensureBuckets,
   IMAGE_BUCKET,
   VIDEO_BUCKET,
+  IMPORT_STAGING_BUCKET,
   SUPABASE_STORAGE_S3_URL,
 };

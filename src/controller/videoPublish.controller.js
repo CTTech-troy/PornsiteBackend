@@ -35,6 +35,7 @@ import { getPathSafeVideoId } from '../utils/videoPathId.js';
 import { annotatePlayableVideo, validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
 import { validateEmbedWithProbe } from '../services/videoSourceProbe.service.js';
 import { creditCoins as creditCoinWallet, spendCoins as debitCoinWallet } from '../services/coinWallet.service.js';
+import { getPlatformSettingsMap } from '../services/platformSettings.service.js';
 
 async function resolvePlaybackValidation(videoInput) {
   const base = validateVideoPlaybackSource(videoInput);
@@ -50,6 +51,44 @@ function invalidateCreatorLeaderboard() {
   try {
     invalidateTopCreatorsCache();
   } catch (_) {}
+}
+
+function normalizeClientWatermark(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return {
+    required: true,
+    editorPosition: String(value.position || '').slice(0, 32) || undefined,
+    editorLogoUrl: String(value.logoUrl || '').slice(0, 500) || undefined,
+    editorSizePx: Number(value.size || value.sizePx || 0) || undefined,
+  };
+}
+
+async function buildWatermarkMetadata(clientWatermark = null) {
+  try {
+    const settings = await getPlatformSettingsMap();
+    const enabled = String(settings.video_watermark_enabled ?? 'true').toLowerCase() !== 'false';
+    const burnInEnabled = String(settings.video_watermark_burn_in_enabled ?? 'true').toLowerCase() !== 'false';
+    return {
+      watermark_required: enabled && burnInEnabled,
+      watermark_burned_in: false,
+      watermark_updated_at: new Date().toISOString(),
+      watermark_config: {
+        logoUrl: settings.video_watermark_logo_url || settings.platform_logo_url || '/logo1.png',
+        position: settings.video_watermark_position || 'bottom-right',
+        sizePx: Number(settings.video_watermark_size_px || 92) || 92,
+        opacity: Number(settings.video_watermark_opacity || 0.72) || 0.72,
+        marginPx: Number(settings.video_watermark_margin_px || 16) || 16,
+        editor: normalizeClientWatermark(clientWatermark),
+      },
+    };
+  } catch (_) {
+    return {
+      watermark_required: true,
+      watermark_burned_in: false,
+      watermark_updated_at: new Date().toISOString(),
+      watermark_config: { logoUrl: '/logo1.png', position: 'bottom-right', sizePx: 92, opacity: 0.72, marginPx: 16 },
+    };
+  }
 }
 
 // ── Supabase row → API response shape ─────────────────────────────────────────
@@ -87,9 +126,17 @@ function mapVideo(row) {
     tags:                   row.tags                   || [],
     allowPeopleToComment:   row.allow_people_to_comment !== false,
     videoUrl:               row.storage_url            || row.stream_url || '',
+    video_url:              row.storage_url            || row.stream_url || '',
     streamUrl:              row.stream_url             || row.storage_url || '',
+    stream_url:             row.stream_url             || row.storage_url || '',
     thumbnailUrl:           row.thumbnail_url          || null,
+    thumbnail_url:          row.thumbnail_url          || null,
+    iframeEmbed:            '',
+    iframe_embed:           '',
+    playbackType:           'internal',
+    playback_type:          'internal',
     durationSeconds:        resolvedDuration,
+    duration:               resolvedDuration,
     creatorDisplayName:     row.creator_display_name   || null,
     creatorAvatarUrl:       row.creator_avatar_url     || null,
     consentQuestion:        CONSENT_QUESTION,
@@ -442,12 +489,16 @@ export async function prepareUpload(req, res) {
       if (thumbData) thumbnailUploadUrl = thumbData.signedUrl;
     }
 
+    const watermarkFields = await buildWatermarkMetadata();
+
     return res.json({
       success: true,
       videoUploadUrl: videoData.signedUrl,
       videoPath,
       thumbnailUploadUrl,
       thumbnailPath: thumbPath,
+      watermarkRequired: watermarkFields.watermark_required,
+      watermarkConfig: watermarkFields.watermark_config,
     });
   } catch (err) {
     console.error('[prepareUpload] error:', err?.message || err);
@@ -531,6 +582,7 @@ export async function publishFromStoragePath(req, res) {
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
     const videoId = crypto.randomUUID();
     const isLive  = consentGiven;
+    const watermarkFields = await buildWatermarkMetadata(req.body?.watermark);
 
     const insertRow = {
       video_id:                 videoId,
@@ -555,6 +607,7 @@ export async function publishFromStoragePath(req, res) {
       embed_allowed:            playbackValidation.embedAllowed,
       validation_status:        playbackValidation.validationStatus,
       playback_url:             playbackValidation.playbackUrl,
+      ...watermarkFields,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
     await enqueueSearchIndex(videoId, 'upsert').catch(() => null);
@@ -654,6 +707,7 @@ export async function uploadAndPublish(req, res) {
 
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
     const isLive = consentGiven === true;
+    const watermarkFields = await buildWatermarkMetadata(req.body?.watermark);
     const embedUrl = String(req.body?.embedUrl || req.body?.embed_url || '').trim();
     const playbackValidation = await resolvePlaybackValidation({
       source: 'community',
@@ -692,6 +746,7 @@ export async function uploadAndPublish(req, res) {
       embed_allowed:            playbackValidation.embedAllowed,
       validation_status:        playbackValidation.validationStatus,
       playback_url:             playbackValidation.playbackUrl,
+      ...watermarkFields,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
     await enqueueSearchIndex(videoId, isLive ? 'upsert' : 'delete').catch(() => null);

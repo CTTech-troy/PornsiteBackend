@@ -46,20 +46,19 @@ export async function resolveMediaUrls({ mediaDir, mediaFile, importJobId }) {
   if (!filePath) return { storageUrl: null, thumbnailUrl: null };
 
   const ext = path.extname(filePath).toLowerCase();
-  const buffer = await fs.promises.readFile(filePath);
   const uid = `import-${importJobId || 'system'}`;
   const stamp = Date.now();
   const safeName = path.basename(filePath).replace(/[^a-zA-Z0-9._-]/g, '_');
 
   if (IMAGE_EXT.has(ext)) {
     const thumbPath = `imports/${uid}/${stamp}-${safeName}`;
-    await uploadFileToBucket(IMAGE_BUCKET, thumbPath, buffer, contentTypeForExt(ext));
+    await uploadFileToBucket(IMAGE_BUCKET, thumbPath, { path: filePath }, contentTypeForExt(ext));
     return { storageUrl: null, thumbnailUrl: getPublicUrl(IMAGE_BUCKET, thumbPath) };
   }
 
   if (VIDEO_EXT.has(ext)) {
     const videoPath = `imports/${uid}/${stamp}-${safeName}`;
-    const { publicUrl } = await uploadFileToBucket(VIDEO_BUCKET, videoPath, buffer, contentTypeForExt(ext));
+    const { publicUrl } = await uploadFileToBucket(VIDEO_BUCKET, videoPath, { path: filePath }, contentTypeForExt(ext));
     return { storageUrl: publicUrl, thumbnailUrl: null };
   }
 

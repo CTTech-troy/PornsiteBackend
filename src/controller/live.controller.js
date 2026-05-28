@@ -382,19 +382,42 @@ async function commentLive(liveId, userId, message) {
   return data;
 }
 
-async function sendGift(liveId, senderId, giftType, amount) {
+async function sendGift(liveId, senderId, giftType, amount, details = {}) {
   const live = await getLive(liveId, { includeSource: true });
   if (!live) throw new Error('Live not found');
   const next = +(Number(live.total_gifts_amount) || 0) + Number(amount);
   if (live._fromCache) {
     await liveCache.updateInCache(liveId, { total_gifts_amount: next });
-    return { live_id: liveId, sender_id: senderId, gift_type: giftType, amount };
+    return { live_id: liveId, sender_id: senderId, gift_type: giftType, amount, total_gifts_amount: next };
   }
   if (!isConfigured() || !supabase) throw new Error('Supabase not configured');
-  const { data, error } = await supabase.from('live_gifts').insert([{ live_id: liveId, sender_id: senderId, gift_type: giftType, amount }]).select().maybeSingle();
+  const row = {
+    live_id: liveId,
+    sender_id: senderId,
+    gift_type: giftType,
+    amount,
+    token_price: amount,
+    gift_name: details.giftName || null,
+    gift_emoji: details.giftEmoji || null,
+    sender_name: details.senderName || null,
+    gift_image_url: details.imageUrl || null,
+    gift_animation_type: details.animationType || null,
+    gift_category: details.category || null,
+    gift_rarity: details.rarity || null,
+  };
+  let { data, error } = await supabase.from('live_gifts').insert([row]).select().maybeSingle();
+  if (error && (error.code === '42703' || error.code === 'PGRST204' || /schema cache|column/i.test(error.message || ''))) {
+    const retry = await supabase
+      .from('live_gifts')
+      .insert([{ live_id: liveId, sender_id: senderId, gift_type: giftType, amount }])
+      .select()
+      .maybeSingle();
+    data = retry.data;
+    error = retry.error;
+  }
   if (error) throw error;
   await supabase.from('lives').update({ total_gifts_amount: next }).eq('id', liveId);
-  return data;
+  return { ...data, total_gifts_amount: next };
 }
 
 export {

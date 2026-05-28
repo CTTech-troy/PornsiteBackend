@@ -10,7 +10,7 @@ import {
   homeCardToFeedVideoItem,
 } from '../utils/xnxxRapidApi.js';
 import { fetchPublishedHomeCards, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
-import { annotatePlayableVideo, isListableInHomeFeed, isPlayableVideo } from '../utils/videoPlaybackValidation.js';
+import { annotatePlayableVideo, isDirectPlayableStreamUrl, isListableInHomeFeed, isPlayableVideo } from '../utils/videoPlaybackValidation.js';
 
 const CACHE_MAX_ITEMS = 500;
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -60,13 +60,41 @@ function feedItemHasRenderableMedia(item) {
 
 function mapCachedHomeFeedRow(hf) {
   if (!hf) return null;
-  const page = String(hf.playbackUrl || hf.streamUrl || hf.videoUrl || hf.videoSrc || hf.url || '');
+  const iframeEmbed = String(hf.iframeEmbed || hf.iframe_embed || '').trim();
+  const playbackType = iframeEmbed
+    ? 'external_embed'
+    : String(hf.playbackType || hf.playback_type || 'internal').trim();
+  const isExternalEmbed = playbackType.toLowerCase() === 'external_embed' || iframeEmbed.length > 0;
+  const page = String(
+    isExternalEmbed
+      ? (hf.videoUrl || hf.video_url || hf.pageUrl || hf.page_url || hf.externalUrl || hf.external_url || hf.url || hf.videoSrc || '')
+      : (hf.playbackUrl || hf.playback_url || hf.streamUrl || hf.stream_url || hf.videoUrl || hf.video_url || hf.videoSrc || hf.url || '')
+  );
+  const directCandidate = String(hf.playbackUrl || hf.playback_url || hf.streamUrl || hf.stream_url || hf.storageUrl || hf.storage_url || hf.file_url || hf.videoSrc || '').trim();
+  const allowImportedDirectHost = String(hf.source || hf.contentSource || hf.content_source || hf.sourceType || hf.source_type || '').toLowerCase().includes('imported');
+  const directPlayableUrl = isDirectPlayableStreamUrl(directCandidate, { allowUnapprovedDirectHost: allowImportedDirectHost }) ? directCandidate : '';
+  const playableUrl = directPlayableUrl || (isExternalEmbed ? '' : page);
+  const effectivePlaybackType = directPlayableUrl ? 'internal' : playbackType;
+  const effectiveSourceType = directPlayableUrl ? 'imported_direct_stream' : (hf.sourceType || hf.source_type || (isExternalEmbed ? 'external_embed' : ''));
   return {
     id: String(hf.id),
     videoUrl: page,
-    streamUrl: page,
-    playbackUrl: page,
-    thumbnailUrl: String(hf.thumbnail || ''),
+    video_url: page,
+    streamUrl: playableUrl,
+    stream_url: playableUrl,
+    playbackUrl: playableUrl,
+    playback_url: playableUrl,
+    iframeEmbed,
+    iframe_embed: iframeEmbed,
+    playbackType: effectivePlaybackType,
+    playback_type: effectivePlaybackType,
+    pageUrl: page,
+    page_url: page,
+    externalUrl: hf.externalUrl || hf.external_url || hf.pageUrl || hf.page_url || page,
+    external_url: hf.externalUrl || hf.external_url || hf.pageUrl || hf.page_url || page,
+    thumbnailUrl: String(hf.thumbnail || hf.thumbnailUrl || hf.thumbnail_url || ''),
+    thumbnail_url: String(hf.thumbnail_url || hf.thumbnailUrl || hf.thumbnail || ''),
+    thumbnail: String(hf.thumbnail || hf.thumbnailUrl || hf.thumbnail_url || ''),
     duration: Number(hf.durationSeconds) || 0,
     createdAt: new Date().toISOString(),
     title: hf.title || '',
@@ -84,11 +112,63 @@ function mapCachedHomeFeedRow(hf) {
     category: hf.category || hf.mainOrientationCategory || '',
     mainOrientationCategory: hf.mainOrientationCategory || hf.category || '',
     tags: Array.isArray(hf.tags) ? hf.tags : [],
-    playable: hf.playable === true,
-    sourceType: hf.sourceType || hf.source_type || '',
-    embedAllowed: hf.embedAllowed === true || hf.embed_allowed === true,
-    validationStatus: hf.validationStatus || hf.validation_status || (hf.playable ? 'playable' : 'unsupported'),
+    playable: isExternalEmbed || hf.playable === true,
+    sourceType: effectiveSourceType,
+    source_type: effectiveSourceType,
+    embedAllowed: hf.embedAllowed === true || hf.embed_allowed === true || isExternalEmbed,
+    embed_allowed: hf.embedAllowed === true || hf.embed_allowed === true || isExternalEmbed,
+    validationStatus: hf.validationStatus || hf.validation_status || (isExternalEmbed ? 'playable' : (hf.playable ? 'playable' : 'unsupported')),
+    validation_status: hf.validationStatus || hf.validation_status || (isExternalEmbed ? 'playable' : (hf.playable ? 'playable' : 'unsupported')),
   };
+}
+
+function firstString(...values) {
+  return values
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .find(Boolean) || '';
+}
+
+function hasInlineEmbed(item = {}) {
+  return Boolean(firstString(item.iframeEmbed, item.iframe_embed));
+}
+
+function isImportedOrExternalEmbedDetail(item = {}) {
+  const source = firstString(
+    item.source,
+    item.contentSource,
+    item.content_source,
+    item.sourceType,
+    item.source_type,
+  ).toLowerCase();
+  const playbackType = firstString(item.playbackType, item.playback_type).toLowerCase();
+  return (
+    source.includes('imported') ||
+    source.includes('external_catalog') ||
+    playbackType === 'external_embed' ||
+    playbackType === 'external_redirect'
+  );
+}
+
+function shouldHydrateDetailFromPublished(item = {}) {
+  if (!item || hasInlineEmbed(item)) return false;
+  if (!isImportedOrExternalEmbedDetail(item)) return false;
+  const pageUrl = firstString(item.videoUrl, item.video_url, item.pageUrl, item.page_url, item.externalUrl, item.external_url, item.url);
+  const direct = firstString(item.playbackUrl, item.playback_url, item.streamUrl, item.stream_url, item.storageUrl, item.storage_url, item.file_url, item.videoSrc);
+  return Boolean(pageUrl) && !isDirectPlayableStreamUrl(direct, { allowUnapprovedDirectHost: true });
+}
+
+async function hydratePublishedDetail(video, videoId, viewerUid) {
+  if (!shouldHydrateDetailFromPublished(video)) return video;
+  try {
+    const published = await fetchPublishedVideoById(videoId, viewerUid);
+    const hydrated = published ? annotatePlayableVideo(published) : null;
+    if (feedItemHasRenderableMedia(hydrated) && (hasInlineEmbed(hydrated) || !hasInlineEmbed(video))) {
+      return hydrated;
+    }
+  } catch (err) {
+    console.warn('videoFeed detail hydration:', err?.message || err);
+  }
+  return video;
 }
 
 export function encodeFeedCursor(page) {
@@ -108,7 +188,7 @@ export function decodeFeedCursor(cursor) {
 }
 
 export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, options = {}) {
-  const { viewerUid = null, cursor = null } = options;
+  const { viewerUid = null, cursor = null, category = null } = options;
   const cursorPage = decodeFeedCursor(cursor)?.page;
   const pageNum = cursorPage || Math.max(1, parseInt(String(page), 10) || 1);
   const limitNum = Math.min(MAX_LIMIT, Math.max(1, parseInt(String(limit), 10) || DEFAULT_LIMIT));
@@ -126,7 +206,7 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
   };
 
   try {
-    const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid });
+    const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid, category });
     if (cards.length) ingestHomeFeedVideos(cards);
     cards.forEach((card, index) => addItem(homeCardToFeedVideoItem(card, index)));
   } catch (err) {
@@ -176,6 +256,61 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
   });
 }
 
+export async function getLatestVideos(req, res) {
+  const page = req.query.page || 1;
+  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+  try {
+    const result = await getVideosPaginated(page, limit, {
+      viewerUid: req.uid || null,
+      cursor: req.query.cursor || null,
+    });
+    res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=20, stale-while-revalidate=60');
+    return res.json(result);
+  } catch (err) {
+    console.error('videos latest feed error', err?.message || err);
+    res.set('X-API-Fallback', 'videos-latest-feed');
+    return res.status(200).json({
+      data: [],
+      total: 0,
+      page: Math.max(1, parseInt(req.query.page, 10) || 1),
+      totalPages: 0,
+      hasMore: false,
+      nextCursor: null,
+      recoverable: true,
+      requestId: req.requestId,
+    });
+  }
+}
+
+export async function getCategoryVideos(req, res) {
+  const page = req.query.page || 1;
+  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+  const category = String(req.params.slug || req.query.category || '').trim();
+  try {
+    const result = await getVideosPaginated(page, limit, {
+      viewerUid: req.uid || null,
+      cursor: req.query.cursor || null,
+      category,
+    });
+    res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=20, stale-while-revalidate=60');
+    return res.json({ ...result, category: category || null });
+  } catch (err) {
+    console.error('videos category feed error', err?.message || err);
+    res.set('X-API-Fallback', 'videos-category-feed');
+    return res.status(200).json({
+      data: [],
+      total: 0,
+      page: Math.max(1, parseInt(req.query.page, 10) || 1),
+      totalPages: 0,
+      hasMore: false,
+      nextCursor: null,
+      category: category || null,
+      recoverable: true,
+      requestId: req.requestId,
+    });
+  }
+}
+
 async function withRtdbMerge(result) {
   const { data } = result;
   const rtdb = getFirebaseRtdb();
@@ -193,11 +328,7 @@ async function withRtdbMerge(result) {
       data.map(async (item) => {
         const ref = rtdbRef.child(String(item.id));
         const snap = await ref.once('value');
-        let val = snap.val();
-        if (!val) {
-          await ref.set({ externalId: String(item.id), totalLikes: 0, totalComments: 0 });
-          val = { totalLikes: 0, totalComments: 0 };
-        }
+        const val = snap.val() || {};
         item.totalLikes = val.totalLikes ?? 0;
         item.totalComments = val.totalComments ?? 0;
         return item;
@@ -220,8 +351,9 @@ export async function getVideoById(id, options = {}) {
 
   const cachedHomeFeedRow = lookupHomeFeedRow(videoId);
   if (cachedHomeFeedRow) {
-    const video = annotatePlayableVideo(mapCachedHomeFeedRow(cachedHomeFeedRow));
+    let video = annotatePlayableVideo(mapCachedHomeFeedRow(cachedHomeFeedRow));
     if (!feedItemHasRenderableMedia(video)) return null;
+    video = await hydratePublishedDetail(video, videoId, viewerUid);
     return await withRtdbMerge({ data: [video] }).then((result) => result.data[0]);
   }
 
@@ -247,6 +379,10 @@ export async function getVideoById(id, options = {}) {
   if (!video) {
     video = annotatePlayableVideo(mapCachedHomeFeedRow(lookupHomeFeedRow(videoId)));
     if (!feedItemHasRenderableMedia(video)) video = null;
+  }
+
+  if (video) {
+    video = await hydratePublishedDetail(video, videoId, viewerUid);
   }
 
   if (!video) {

@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { Readable } from 'stream';
+import { createGzip } from 'zlib';
 import { supabase } from '../config/supabase.js';
 import { isConfigured, getPublicUrl } from '../config/supabase.js';
 import {
@@ -44,6 +46,13 @@ import {
   getPaymentReconciliationReport,
   getWebhookEvents,
 } from '../services/securePayments.service.js';
+import {
+  getPaymentHistory,
+  getPaymentHistoryExport,
+  paymentHistoryToExcelXml,
+  streamPaymentHistoryCsvGzip,
+  streamPaymentHistoryPdf,
+} from '../services/paymentHistory.service.js';
 import { getGatewayHealth } from '../services/paymentServiceClient.js';
 import { processCreatorFlutterwavePayoutTransfer } from '../services/flutterwaveTransfer.service.js';
 
@@ -431,6 +440,56 @@ export async function getSubscribers(req, res) {
 }
 
 // ── GET /api/admin/finance/payments ──────────────────────────────────────────
+
+export async function getPaymentHistoryAdmin(req, res) {
+  try {
+    const result = await getPaymentHistory(req.query);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[payment-history] load failed:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load payment history.',
+    });
+  }
+}
+
+export async function exportPaymentHistoryCsv(req, res) {
+  try {
+    const { records } = await getPaymentHistoryExport(req.query);
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="payment-history-${new Date().toISOString().slice(0, 10)}.csv.gz"`);
+    return streamPaymentHistoryCsvGzip(res, records);
+  } catch (err) {
+    console.error('[payment-history] csv export failed:', err);
+    return res.status(500).json({ success: false, message: 'Failed to export payment history CSV.' });
+  }
+}
+
+export async function exportPaymentHistoryExcel(req, res) {
+  try {
+    const { records } = await getPaymentHistoryExport(req.query);
+    const xml = paymentHistoryToExcelXml(records);
+    res.setHeader('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="payment-history-${new Date().toISOString().slice(0, 10)}.xls"`);
+    return res.send(xml);
+  } catch (err) {
+    console.error('[payment-history] excel export failed:', err);
+    return res.status(500).json({ success: false, message: 'Failed to export payment history Excel file.' });
+  }
+}
+
+export async function exportPaymentHistoryPdf(req, res) {
+  try {
+    const { records, stats } = await getPaymentHistoryExport(req.query);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="payment-history-${new Date().toISOString().slice(0, 10)}.pdf"`);
+    return streamPaymentHistoryPdf(res, records, stats);
+  } catch (err) {
+    console.error('[payment-history] pdf export failed:', err);
+    return res.status(500).json({ success: false, message: 'Failed to export payment history PDF.' });
+  }
+}
 
 export async function getPaymentsAdmin(req, res) {
   try {
@@ -1080,14 +1139,16 @@ export async function exportPayoutsCsv(req, res) {
 
     const headers = ['reference_id', 'creator_id', 'creator_name', 'creator_email', 'amount_usd', 'amount_ngn', 'bank_name', 'account_name', 'status', 'requested_at', 'processed_at', 'paid_at', 'completed_at', 'transaction_reference'];
     const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    const csv = [
-      headers.join(','),
-      ...(data || []).map((row) => headers.map((key) => escapeCsv(row[key])).join(',')),
-    ].join('\n');
+    function* lines() {
+      yield `${headers.join(',')}\n`;
+      for (const row of data || []) {
+        yield `${headers.map((key) => escapeCsv(row[key])).join(',')}\n`;
+      }
+    }
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="creator-payouts-${new Date().toISOString().slice(0, 10)}.csv"`);
-    return res.send(csv);
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="creator-payouts-${new Date().toISOString().slice(0, 10)}.csv.gz"`);
+    return Readable.from(lines()).pipe(createGzip()).pipe(res);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1155,7 +1216,22 @@ export async function uploadAdImage(req, res) {
 
 // ── POST /api/admin/finance/ads ───────────────────────────────────────────────
 
-const VALID_PLACEMENTS = ['homepage_banner', 'sidebar', 'feed'];
+const VALID_PLACEMENTS = [
+  'homepage_banner',
+  'homepage_top',
+  'homepage_bottom',
+  'sidebar',
+  'feed',
+  'feed_native',
+  'mobile_inline',
+  'category_feed',
+  'video_page',
+  'sticky_banner',
+  'native_card',
+  'before_footer',
+];
+const VALID_AD_SIZES = ['160x600', '300x100', '300x250', '305x99', '315x300', '728x90', '900x250'];
+const VALID_DEVICE_TARGETS = ['all', 'desktop', 'tablet', 'mobile'];
 
 export async function createAdCampaign(req, res) {
   try {
@@ -1167,6 +1243,7 @@ export async function createAdCampaign(req, res) {
       status: requestedStatus,
       source_type, external_platform, network_visible,
       embed_html, embed_sanitized_html,
+      slot_key, placement_type, ad_size, device_target, priority, metadata,
     } = req.body;
 
     if (!name?.trim()) return res.status(400).json({ message: 'Campaign name is required.' });
@@ -1196,6 +1273,12 @@ export async function createAdCampaign(req, res) {
         redirect_url: redirect_url?.trim() || null,
         cta_text:     cta_text?.trim()     || 'Learn More',
         placement:    resolvedPlacement,
+        slot_key:     slot_key?.trim() || null,
+        placement_type: VALID_PLACEMENTS.includes(placement_type) ? placement_type : resolvedPlacement,
+        ad_size:      VALID_AD_SIZES.includes(ad_size) ? ad_size : null,
+        device_target: VALID_DEVICE_TARGETS.includes(device_target) ? device_target : 'all',
+        priority:     Number.isFinite(Number(priority)) ? Number(priority) : 100,
+        metadata:     metadata && typeof metadata === 'object' ? metadata : {},
         image_width:  parseInt(image_width)  || null,
         image_height: parseInt(image_height) || null,
         source_type:  ['image', 'external_link', 'embed'].includes(source_type) ? source_type : 'image',
@@ -1231,6 +1314,7 @@ export async function updateAdCampaign(req, res) {
       status, is_active, start_date, end_date,
       image_url, redirect_url, cta_text, placement,
       image_width, image_height,
+      slot_key, placement_type, ad_size, device_target, priority, metadata,
     } = req.body;
 
     if (redirect_url !== undefined && redirect_url && !/^https?:\/\/.+/i.test(redirect_url.trim())) {
@@ -1256,6 +1340,12 @@ export async function updateAdCampaign(req, res) {
     if (redirect_url !== undefined) updates.redirect_url = redirect_url?.trim() || null;
     if (cta_text     !== undefined) updates.cta_text     = cta_text?.trim() || 'Learn More';
     if (placement    !== undefined && VALID_PLACEMENTS.includes(placement)) updates.placement = placement;
+    if (slot_key     !== undefined) updates.slot_key = slot_key?.trim() || null;
+    if (placement_type !== undefined && VALID_PLACEMENTS.includes(placement_type)) updates.placement_type = placement_type;
+    if (ad_size      !== undefined && VALID_AD_SIZES.includes(ad_size)) updates.ad_size = ad_size;
+    if (device_target !== undefined && VALID_DEVICE_TARGETS.includes(device_target)) updates.device_target = device_target;
+    if (priority     !== undefined && Number.isFinite(Number(priority))) updates.priority = Number(priority);
+    if (metadata     !== undefined && metadata && typeof metadata === 'object') updates.metadata = metadata;
     if (image_width  !== undefined) updates.image_width  = parseInt(image_width)  || null;
     if (image_height !== undefined) updates.image_height = parseInt(image_height) || null;
 

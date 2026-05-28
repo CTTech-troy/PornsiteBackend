@@ -8,10 +8,10 @@ import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils
 import { creditViewMilestone } from './earnings.controller.js';
 import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoIdValidation.js';
 import { annotatePlayableVideo, filterPlayableVideos, validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
+import { getPlatformSettingsMap } from '../services/platformSettings.service.js';
 
 const VIDEOS_TABLE = 'tiktok_videos';
 const LIKES_TABLE = 'tiktok_video_likes';
-const VIEWS_TABLE = 'tiktok_video_views';
 const COMMENTS_TABLE = 'tiktok_video_comments';
 const PLAY_HISTORY_TABLE = 'video_play_history';
 const ADS_TABLE = 'video_ads';
@@ -39,6 +39,55 @@ function cleanCommentText(value) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 1000);
+}
+
+function extractMissingColumnName(error) {
+  const msg = String(error?.message || '');
+  const quoted = msg.match(/'([^']+)'/);
+  if (quoted?.[1]) return quoted[1];
+  const named = msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?/i);
+  return named?.[1] || null;
+}
+
+async function insertVideoRowWithFallback(row) {
+  let attempt = { ...row };
+  let lastError = null;
+  for (let i = 0; i < 12; i += 1) {
+    const { error } = await supabase.from(VIDEOS_TABLE).insert(attempt);
+    if (!error) return;
+    lastError = error;
+    const missingColumn = extractMissingColumnName(error);
+    if (!missingColumn || !(missingColumn in attempt)) throw error;
+    delete attempt[missingColumn];
+  }
+  throw lastError || new Error('Failed to insert video row');
+}
+
+async function buildWatermarkMetadata() {
+  try {
+    const settings = await getPlatformSettingsMap();
+    const enabled = String(settings.video_watermark_enabled ?? 'true').toLowerCase() !== 'false';
+    const burnInEnabled = String(settings.video_watermark_burn_in_enabled ?? 'true').toLowerCase() !== 'false';
+    return {
+      watermark_required: enabled && burnInEnabled,
+      watermark_burned_in: false,
+      watermark_updated_at: new Date().toISOString(),
+      watermark_config: {
+        logoUrl: settings.video_watermark_logo_url || settings.platform_logo_url || '/logo1.png',
+        position: settings.video_watermark_position || 'bottom-right',
+        sizePx: Number(settings.video_watermark_size_px || 92) || 92,
+        opacity: Number(settings.video_watermark_opacity || 0.72) || 0.72,
+        marginPx: Number(settings.video_watermark_margin_px || 16) || 16,
+      },
+    };
+  } catch (_) {
+    return {
+      watermark_required: true,
+      watermark_burned_in: false,
+      watermark_updated_at: new Date().toISOString(),
+      watermark_config: { logoUrl: '/logo1.png', position: 'bottom-right', sizePx: 92, opacity: 0.72, marginPx: 16 },
+    };
+  }
 }
 
 /**
@@ -86,7 +135,7 @@ export async function uploadVideo(req, res) {
       });
     }
 
-    const { error } = await supabase.from(VIDEOS_TABLE).insert({
+    await insertVideoRowWithFallback({
       video_id: videoId,
       user_id: uid,
       storage_url: storageUrl,
@@ -103,9 +152,8 @@ export async function uploadVideo(req, res) {
       embed_allowed: playbackValidation.embedAllowed,
       validation_status: playbackValidation.validationStatus,
       playback_url: playbackValidation.playbackUrl,
+      ...(await buildWatermarkMetadata()),
     });
-
-    if (error) throw error;
 
     return res.status(201).json({
       success: true,
@@ -333,7 +381,12 @@ export async function getLikeStatus(req, res) {
 export async function recordView(req, res) {
   try {
     const uid = req.uid || null;
-    const sessionId = (req.body?.session_id || req.query?.session_id || '').trim() || null;
+    const sessionId = String(req.body?.session_id || req.body?.sessionId || req.query?.session_id || '').trim() || null;
+    const fingerprint = String(req.body?.fingerprint || req.query?.fingerprint || '').trim().slice(0, 160) || null;
+    const watchSeconds = Math.max(0, Math.min(86400, Number(req.body?.watchSeconds ?? req.body?.watch_seconds ?? 0) || 0));
+    const durationSeconds = Math.max(0, Number(req.body?.durationSeconds ?? req.body?.duration_seconds ?? 0) || 0);
+    const rawProgress = Number(req.body?.progressRatio ?? req.body?.progress_ratio ?? 0) || 0;
+    const progressRatio = Math.max(0, Math.min(1, rawProgress || (durationSeconds > 0 ? watchSeconds / durationSeconds : 0)));
     const { videoId } = req.params;
     if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
@@ -342,7 +395,7 @@ export async function recordView(req, res) {
     const { data: video } = await supabase.from(VIDEOS_TABLE).select('views_count').eq('video_id', videoId).single();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
 
-    if (!uid && !sessionId) {
+    if (!uid && !sessionId && !fingerprint) {
       return res.json({
         success: true,
         viewsCount: Math.max(0, Number(video.views_count) || 0),
@@ -350,25 +403,20 @@ export async function recordView(req, res) {
       });
     }
 
-    let inserted = false;
-    if (uid) {
-      const { error } = await supabase.from(VIEWS_TABLE).insert({ video_id: videoId, user_id: uid });
-      inserted = !error;
-      if (error && error.code !== '23505') throw error;
-    } else {
-      const { error } = await supabase.from(VIEWS_TABLE).insert({ video_id: videoId, session_id: sessionId });
-      inserted = !error;
-      if (error && error.code !== '23505') throw error;
-    }
+    const { data: result, error } = await supabase.rpc('record_video_view', {
+      p_video_id: videoId,
+      p_user_id: uid,
+      p_session_id: uid ? null : String(sessionId || '').slice(0, 128),
+      p_fingerprint: fingerprint,
+      p_ip_hash: hashValue(getClientIp(req)),
+      p_watch_seconds: Math.floor(watchSeconds),
+      p_progress_ratio: progressRatio,
+      p_cooldown_days: Number(process.env.VIDEO_VIEW_COOLDOWN_DAYS || 14),
+    });
+    if (error) throw error;
 
-    if (inserted) {
-      // BUG-04: Atomic increment via RPC
-      const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
-        p_video_id: videoId,
-        p_stat_name: 'views_count',
-        p_delta: 1
-      });
-      const updatedViews = newCount || 0;
+    if (result?.counted === true) {
+      const updatedViews = Number(result.views || 0);
 
       // 1000-view milestone: credit $0.65 to the video's creator
       if (updatedViews === 1000) {
@@ -385,7 +433,13 @@ export async function recordView(req, res) {
       return res.json({ success: true, viewsCount: updatedViews, newView: true });
     }
 
-    return res.json({ success: true, viewsCount: Math.max(0, video.views_count || 0), newView: false });
+    return res.json({
+      success: true,
+      viewsCount: Math.max(0, Number(result?.views ?? video.views_count) || 0),
+      newView: false,
+      duplicate: result?.duplicate === true,
+      qualified: result?.qualified !== false,
+    });
   } catch (err) {
     console.error('tiktokVideo.recordView error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });
@@ -410,6 +464,8 @@ export async function getComments(req, res) {
       .from(COMMENTS_TABLE)
       .select('*')
       .eq('video_id', videoId)
+      .is('deleted_at', null)
+      .eq('status', 'visible')
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -439,43 +495,44 @@ export async function addComment(req, res) {
     const uid = req.uid;
     if (!uid) return res.status(401).json({ success: false, message: 'Authentication required' });
     const { videoId } = req.params;
-    const text = (req.body?.comment || req.body?.text || '').trim();
+    const text = cleanCommentText(req.body?.comment || req.body?.text || '');
     if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
     if (!text) return res.status(400).json({ success: false, message: 'Comment text is required' });
+    if (text.length > 1000) return res.status(400).json({ success: false, message: 'Comment is too long' });
 
     ensureSupabase();
 
-    const { data: video } = await supabase.from(VIDEOS_TABLE).select('comments_count').eq('video_id', videoId).single();
+    const { data: video } = await supabase.from(VIDEOS_TABLE).select('comments_count, allow_people_to_comment').eq('video_id', videoId).single();
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    if (video.allow_people_to_comment === false) {
+      return res.status(403).json({ success: false, message: 'Comments are disabled for this video' });
+    }
 
-    const { data: commentRow, error: insertError } = await supabase
-      .from(COMMENTS_TABLE)
-      .insert({ video_id: videoId, user_id: uid, comment: text })
-      .select()
-      .single();
-
-    if (insertError) throw insertError;
-
-    // BUG-04: Atomic increment via RPC
-    const { data: newCount } = await supabase.rpc('adjust_tiktok_stat', {
+    const { data: commenter } = await supabase.from('users').select('username, display_name').eq('id', uid).maybeSingle();
+    const authorName = String(req.body?.authorName || commenter?.display_name || commenter?.username || '').trim().slice(0, 64) || 'Member';
+    const { data: result, error } = await supabase.rpc('add_video_comment', {
       p_video_id: videoId,
-      p_stat_name: 'comments_count',
-      p_delta: 1
+      p_user_id: uid,
+      p_comment: text,
+      p_author_name: authorName,
+      p_parent_comment_id: req.body?.parentCommentId || req.body?.parent_comment_id || null,
     });
-
-    const { data: commenter } = await supabase.from('users').select('username').eq('id', uid).maybeSingle();
+    if (error) throw error;
+    const commentRow = result?.comment || {};
 
     return res.status(201).json({
       success: true,
       comment: {
-        id: commentRow.id,
-        video_id: commentRow.video_id,
-        user_id: commentRow.user_id,
-        username: commenter?.username || null,
-        comment: commentRow.comment,
-        created_at: commentRow.created_at,
+        id: commentRow.commentId,
+        video_id: videoId,
+        user_id: uid,
+        username: commenter?.username || authorName,
+        comment: commentRow.text || text,
+        created_at: commentRow.createdAt ? new Date(Number(commentRow.createdAt)).toISOString() : new Date().toISOString(),
+        parent_comment_id: commentRow.parentCommentId || null,
       },
-      commentsCount: newCount || 0,
+      commentsCount: Number(result?.total_comments || 0),
+      duplicate: result?.duplicate === true,
     });
   } catch (err) {
     console.error('tiktokVideo.addComment error', err?.message || err);
@@ -506,20 +563,15 @@ export async function deleteComment(req, res) {
     if (fetchError || !comment) return res.status(404).json({ success: false, message: 'Comment not found' });
     if (comment.user_id !== uid) return res.status(403).json({ success: false, message: 'Only the comment owner can delete it' });
 
-    const { error: deleteError } = await supabase.from(COMMENTS_TABLE).delete().eq('id', commentId);
-    if (deleteError) throw deleteError;
+    const { data: result, error } = await supabase.rpc('delete_video_comment', {
+      p_video_id: comment.video_id,
+      p_comment_id: commentId,
+      p_user_id: uid,
+    });
+    if (error) throw error;
+    if (!result?.success) return res.status(404).json({ success: false, message: 'Comment not found' });
 
-    const { data: video } = await supabase.from(VIDEOS_TABLE).select('comments_count').eq('video_id', comment.video_id).single();
-    if (video) {
-      // BUG-04: Atomic decrement via RPC
-      await supabase.rpc('adjust_tiktok_stat', {
-        p_video_id: comment.video_id,
-        p_stat_name: 'comments_count',
-        p_delta: -1
-      });
-    }
-
-    return res.json({ success: true, message: 'Comment deleted' });
+    return res.json({ success: true, message: 'Comment deleted', commentsCount: Number(result?.total_comments || 0) });
   } catch (err) {
     console.error('tiktokVideo.deleteComment error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });

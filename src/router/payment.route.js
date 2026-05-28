@@ -130,7 +130,7 @@ router.post('/checkout', requireAuth, checkoutLimiter, async (req, res) => {
     });
   } catch (err) {
     console.error('[payment] checkout error:', err.message);
-    const status = /unreachable|timed out/i.test(err.message) ? 503 : 500;
+    const status = /temporarily unavailable|unreachable|timed out|not configured/i.test(err.message) ? 503 : 500;
     return res.status(status).json({ ok: false, error: err.message });
   }
 });

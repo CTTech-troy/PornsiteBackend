@@ -7,6 +7,7 @@ import { fetchXnxxBestPage, isXnxxApiConfigured } from '../utils/xnxxRapidApi.js
 import { fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
 import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
 import { loadExternalFeedConfig } from '../services/externalFeedConfig.service.js';
+import { buildStructuredFeedLayout } from '../services/feedLayout.service.js';
 import { encodeFeedCursor, decodeFeedCursor } from './videoFeed.controller.js';
 
 const MIN_PAGES = 1;
@@ -30,24 +31,8 @@ function interleaveCreatorCards(creatorCards, defaultCards) {
 
   const out = [];
   const seen = new Set();
-  const gap = Math.max(2, Math.floor(defaults.length / (creators.length + 1)) || 2);
-  let creatorIndex = 0;
-
-  for (let i = 0; i < defaults.length; i += 1) {
-    pushUnique(out, seen, defaults[i]);
-    const shouldInsertCreator =
-      creatorIndex < creators.length &&
-      ((i + 1) % gap === 0 || i === defaults.length - 1);
-    if (shouldInsertCreator) {
-      pushUnique(out, seen, creators[creatorIndex]);
-      creatorIndex += 1;
-    }
-  }
-
-  while (creatorIndex < creators.length) {
-    pushUnique(out, seen, creators[creatorIndex]);
-    creatorIndex += 1;
-  }
+  creators.forEach((card) => pushUnique(out, seen, card));
+  defaults.forEach((card) => pushUnique(out, seen, card));
 
   return out;
 }
@@ -68,12 +53,13 @@ export async function getHomeFeed(req, res) {
       MAX_PAGES,
       Math.max(MIN_PAGES, Number.isFinite(pagesFromQuery) ? pagesFromQuery : feedConfig.pagesPerRequest || 1),
     );
+    const category = String(req.query.category || '').trim();
 
-    const creatorCards = await fetchPublishedHomeCards({ page, pagesCount, viewerUid: req.uid || null });
+    const creatorCards = await fetchPublishedHomeCards({ page, pagesCount, viewerUid: req.uid || null, category });
     const defaultCards = [];
     const seenDefaultIds = new Set();
 
-    if (feedConfig.enabled && isXnxxApiConfigured()) {
+    if (!category && feedConfig.enabled && isXnxxApiConfigured()) {
       const pageNumbers = Array.from({ length: pagesCount }, (_, i) => page + i);
       for (const p of pageNumbers) {
         const { ok, items } = await fetchXnxxBestPage(p);
@@ -97,6 +83,18 @@ export async function getHomeFeed(req, res) {
     );
     const sliced = merged.slice(0, limit);
     ingestHomeFeedVideos(sliced);
+    let feedLayout = { items: sliced.map((video, index) => ({ type: 'video', key: `video:${video?.id || index}`, video, index })), meta: { device: 'desktop', adSlots: [], rules: [] } };
+    try {
+      feedLayout = await buildStructuredFeedLayout({
+        videos: sliced,
+        req,
+        pageKey: category ? 'category' : 'home',
+        category,
+        seed: `${page}:${pagesCount}:${category || 'home'}`,
+      });
+    } catch (layoutErr) {
+      console.warn('[homeFeed] feed layout fallback:', layoutErr?.message || layoutErr);
+    }
 
     const expectedPageSize = Math.min(200, Math.max(limit, 20 * pagesCount));
     const hasMore = merged.length > limit || merged.length >= expectedPageSize;
@@ -107,16 +105,22 @@ export async function getHomeFeed(req, res) {
       page,
       pagesCount,
       count: sliced.length,
+      structuredItems: feedLayout.items.length,
+      adItems: feedLayout.items.filter((item) => item.type === 'ad').length,
       hasMore,
       creatorCount: creatorCards.length,
       defaultCount: defaultCards.length,
       limit,
-      interleaved: true,
+      creatorFirst: true,
+      category: category || undefined,
     });
 
     return res.json({
       success: true,
       data: sliced,
+      feed: feedLayout.items,
+      layout: feedLayout.items,
+      adLayout: feedLayout.meta,
       hasMore,
       nextPage,
       nextCursor,
@@ -125,6 +129,7 @@ export async function getHomeFeed(req, res) {
       batchSize: sliced.length,
       q: feedConfig.enabled && defaultCards.length > 0 ? 'mixed' : 'creators',
       provider: feedConfig.activeProvider,
+      category: category || null,
     });
   } catch (err) {
     console.error('[homeFeed] getHomeFeed error:', err?.message || err);

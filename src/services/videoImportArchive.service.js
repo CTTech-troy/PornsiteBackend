@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { createWriteStream } from 'fs';
@@ -9,21 +8,68 @@ import unzipper from 'unzipper';
 const MAX_UNCOMPRESSED_BYTES = Number(process.env.IMPORT_MAX_UNCOMPRESSED_BYTES || 5 * 1024 * 1024 * 1024);
 const ALLOWED_EXTENSIONS = new Set(['.csv', '.json', '.mp4', '.webm', '.jpg', '.jpeg', '.png', '.webp', '.gif']);
 
+/** Persistent root for import temp files (survives process restarts for resume). */
+export function getImportWorkRoot() {
+  const configured = String(process.env.IMPORT_WORK_ROOT || '').trim();
+  if (configured) return path.resolve(configured);
+  return path.resolve(process.cwd(), 'temp', 'video-imports');
+}
+
+export function getJobWorkDir(jobId) {
+  return path.join(getImportWorkRoot(), String(jobId));
+}
+
+export function getLocalSourcePath(workDir, sourceFormat) {
+  const fmt = String(sourceFormat || 'csv').toLowerCase();
+  if (fmt === 'zip') return path.join(workDir, 'source.zip');
+  if (fmt === 'gz') return path.join(workDir, 'source.gz');
+  return path.join(workDir, 'source.csv.gz');
+}
+
+export function getLocalChunkPath(workDir, batchNo) {
+  const padded = String(batchNo).padStart(6, '0');
+  return path.join(workDir, 'chunks', `chunk-${padded}.ndjson.gz`);
+}
+
 function isPathSafe(baseDir, targetPath) {
-  const resolved = path.resolve(baseDir, targetPath);
-  return resolved.startsWith(path.resolve(baseDir));
+  const base = path.resolve(baseDir);
+  const target = path.resolve(targetPath);
+  return target === base || target.startsWith(`${base}${path.sep}`);
 }
 
 export async function createImportWorkDir(jobId) {
-  const dir = path.join(os.tmpdir(), `video-import-${jobId}`);
+  const dir = getJobWorkDir(jobId);
   await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.mkdir(path.join(dir, 'chunks'), { recursive: true });
   return dir;
 }
 
 export async function cleanupImportWorkDir(workDir) {
+  if (!workDir) return;
   try {
     await fs.promises.rm(workDir, { recursive: true, force: true });
   } catch (_) {}
+}
+
+export async function cleanupImportJobFiles(job) {
+  if (!job) return;
+  const workDir = job.metadata?.workDir || getJobWorkDir(job.id);
+  await cleanupImportWorkDir(workDir);
+}
+
+export function resolveJobSourcePath(job) {
+  const staging = String(job?.staging_path || '').trim();
+  if (staging && path.isAbsolute(staging)) return staging;
+
+  const workDir = job?.metadata?.workDir || getJobWorkDir(job?.id);
+  const fmt = String(job?.source_format || 'csv').toLowerCase();
+  return getLocalSourcePath(workDir, fmt);
+}
+
+export async function statJobSourceFile(job) {
+  const sourcePath = resolveJobSourcePath(job);
+  const stat = await fs.promises.stat(sourcePath);
+  return { sourcePath, size: stat.size };
 }
 
 export async function extractGzToFile(gzPath, destPath) {
