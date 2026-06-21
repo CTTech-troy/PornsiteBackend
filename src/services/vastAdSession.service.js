@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
-import { getPlatformSettingsMap } from './platformSettings.service.js';
+import { getPlatformSettingsMap, resolveVastSettingsFromMap } from './platformSettings.service.js';
 import { resolveActiveProviders } from './adProvider.service.js';
 import { isMissingDbFeature } from './revenueCalculation.service.js';
 import { creditValidAdView } from './creatorAdReward.service.js';
@@ -12,15 +12,18 @@ const UNLOCK_TTL_SEC = Number(process.env.VAST_AD_UNLOCK_TTL_SEC) || 600;
 const AD_METADATA_READ_TIMEOUT_MS = Number(process.env.AD_METADATA_READ_TIMEOUT_MS) || 3500;
 const VAST_PROBE_TIMEOUT_MS = Number(process.env.VAST_PROBE_TIMEOUT_MS) || 4500;
 const VAST_PROBE_CACHE_MS = Number(process.env.VAST_PROBE_CACHE_MS) || 60_000;
-const APPROVED_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
-const LEGACY_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
+const APPROVED_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+const LEGACY_DEFAULT_VAST_TAGS = new Set([
+  'https://s.magsrv.com/v1/vast.php?idzone=5932212',
+  'https://s.magsrv.com/v1/vast.php?idzone=5933056',
+]);
 const DEFAULT_VAST_TAG = process.env.EXOCLICK_VAST_TAG_URL
   || APPROVED_DEFAULT_VAST_TAG;
 const vastProbeCache = new Map();
 
 function normalizeVastTagUrl(url) {
   const value = String(url || '').trim();
-  return value === LEGACY_DEFAULT_VAST_TAG ? APPROVED_DEFAULT_VAST_TAG : value;
+  return LEGACY_DEFAULT_VAST_TAGS.has(value) ? APPROVED_DEFAULT_VAST_TAG : value;
 }
 
 function withTimeout(promise, timeoutMs, label) {
@@ -67,7 +70,7 @@ function analyzeVastXml(xml) {
   if (!body.trim() || !hasVast) {
     return { ok: false, reason: 'malformed_vast', hasAd, hasWrapper, hasMediaFile };
   }
-  if (!hasAd && !hasWrapper && !hasInline && !hasMediaFile) {
+  if (!hasAd) {
     return { ok: false, reason: 'empty_vast', hasAd, hasWrapper, hasMediaFile };
   }
   return { ok: true, reason: null, hasAd, hasWrapper, hasMediaFile };
@@ -391,36 +394,40 @@ async function getVastSettings() {
   } catch (err) {
     console.warn('[vastAd] using default ad settings:', err?.message || err);
   }
-  const enabled = map.ad_revenue_enabled !== 'false' && map.ad_preroll_enabled !== 'false';
+  const resolvedVast = resolveVastSettingsFromMap(map);
+  const enabled = resolvedVast.enabled;
   const skipAfterSeconds = Math.max(0, Number(map.vast_skip_after_seconds_default) || 5);
-  const timeoutSec = Math.max(3, Number(map.vast_ad_timeout_sec) || 8);
+  const timeoutSec = Math.max(3, Number(map.vast_ad_timeout_sec) || 5);
   const estimatedCpmUsd = Math.max(0, Number(map.vast_estimated_cpm_usd) || 2);
   const frequencyVideos = Math.max(1, Number(map.ad_preroll_frequency_videos) || 3);
   const cooldownSec = Math.max(0, Number(map.ad_preroll_cooldown_seconds) || 600);
   const probability = clampProbability(map.ad_preroll_probability ?? 1);
 
-  let vastTagUrl = normalizeVastTagUrl(map.exoclick_vast_tag_url || DEFAULT_VAST_TAG);
+  let vastTagUrl = normalizeVastTagUrl(resolvedVast.url || map.exoclick_vast_tag_url || DEFAULT_VAST_TAG);
   let fallbackVastTags = [];
 
-  try {
-    const { providers } = await withTimeout(
-      resolveActiveProviders({ type: 'vast', placement: 'video_preroll' }),
-      AD_METADATA_READ_TIMEOUT_MS,
-      'active VAST providers',
-    );
-    const tags = providers
-      .flatMap((p) => (p.zones || []).map((z) => z.tag_url).filter(Boolean))
-      .filter(Boolean);
-    if (tags.length) {
-      vastTagUrl = normalizeVastTagUrl(tags[0]);
-      fallbackVastTags = tags.slice(1).map(normalizeVastTagUrl);
+  if (!resolvedVast.url) {
+    try {
+      const { providers } = await withTimeout(
+        resolveActiveProviders({ type: 'vast', placement: 'video_preroll' }),
+        AD_METADATA_READ_TIMEOUT_MS,
+        'active VAST providers',
+      );
+      const tags = providers
+        .flatMap((p) => (p.zones || []).map((z) => z.tag_url).filter(Boolean))
+        .filter(Boolean);
+      if (tags.length) {
+        vastTagUrl = normalizeVastTagUrl(tags[0]);
+        fallbackVastTags = tags.slice(1).map(normalizeVastTagUrl);
+      }
+    } catch {
+      /* use platform default */
     }
-  } catch {
-    /* use platform default */
   }
 
   return {
     enabled,
+    provider: resolvedVast.provider,
     vastTagUrl,
     fallbackVastTags,
     skipAfterSeconds,

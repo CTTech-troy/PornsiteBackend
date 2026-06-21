@@ -6,11 +6,15 @@ const activityClients = new Set();
 const ACTIVITY_STREAM_KEY = process.env.PLATFORM_ACTIVITY_REDIS_STREAM_KEY || 'xstream:platform-activity:events';
 const ACTIVITY_STREAM_MAXLEN = Math.max(1000, Number(process.env.PLATFORM_ACTIVITY_REDIS_STREAM_MAXLEN || 10000));
 const ACTIVITY_STREAM_POLL_MS = Math.max(3000, Number(process.env.PLATFORM_ACTIVITY_REDIS_POLL_MS || 5000));
+const ACTIVITY_REDIS_WRITE_TIMEOUT_MS = Math.max(500, Number(process.env.PLATFORM_ACTIVITY_REDIS_WRITE_TIMEOUT_MS || process.env.PLATFORM_ACTIVITY_REDIS_TIMEOUT_MS || 1000));
+const ACTIVITY_REDIS_READ_TIMEOUT_MS = Math.max(2500, Number(process.env.PLATFORM_ACTIVITY_REDIS_READ_TIMEOUT_MS || process.env.PLATFORM_ACTIVITY_REDIS_TIMEOUT_MS || 4000));
+const ACTIVITY_REDIS_BACKOFF_MS = Math.max(ACTIVITY_STREAM_POLL_MS, Number(process.env.PLATFORM_ACTIVITY_REDIS_BACKOFF_MS || 30000));
 const IMPORT_PROGRESS_REDIS_MIN_MS = Math.max(1000, Number(process.env.PLATFORM_ACTIVITY_IMPORT_PROGRESS_REDIS_MIN_MS || 5000));
 
 let redisCursor = `${Date.now()}-0`;
 let redisPollTimer = null;
 let redisPollInFlight = false;
+let redisBackoffUntil = 0;
 const lastRedisEventAt = new Map();
 
 function isMissingTable(err) {
@@ -72,7 +76,7 @@ async function appendRedisActivityEvent(event, body) {
           },
         },
       ),
-      { timeoutMs: Number(process.env.PLATFORM_ACTIVITY_REDIS_TIMEOUT_MS || 1000) },
+      { timeoutMs: ACTIVITY_REDIS_WRITE_TIMEOUT_MS },
     );
     return written != null;
   } catch (error) {
@@ -110,13 +114,19 @@ function writeSse(client, event, body) {
 
 async function pollRedisActivityEvents(client, cursor) {
   if (!upstashRedis) return cursor;
+  if (Date.now() < redisBackoffUntil) return cursor;
   const start = cursor ? `(${cursor}` : `${Date.now()}-0`;
   try {
     const result = await runRedisOperation(
       'PLATFORM_ACTIVITY_XRANGE',
       () => upstashRedis.xrange(ACTIVITY_STREAM_KEY, start, '+', 100),
-      { timeoutMs: Number(process.env.PLATFORM_ACTIVITY_REDIS_TIMEOUT_MS || 1000) },
+      { timeoutMs: ACTIVITY_REDIS_READ_TIMEOUT_MS, logSlow: false },
     );
+    if (result == null) {
+      redisBackoffUntil = Date.now() + ACTIVITY_REDIS_BACKOFF_MS;
+      return cursor;
+    }
+    redisBackoffUntil = 0;
     let nextCursor = cursor;
     for (const entry of normalizeStreamEntries(result)) {
       const payload = safeJsonParse(entry.fields?.event);

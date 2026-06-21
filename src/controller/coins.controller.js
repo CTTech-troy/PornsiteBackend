@@ -70,6 +70,7 @@ export async function buyCoinPackage(req, res) {
       customerEmail: req.body?.customerEmail || '',
       customerName: req.body?.customerName || 'Member',
       customerPhone: req.body?.customerPhone || '',
+      inlineCheckout: req.body?.inlineCheckout === true,
       req,
     });
     return res.json({ success: true, ok: true, ...checkout });

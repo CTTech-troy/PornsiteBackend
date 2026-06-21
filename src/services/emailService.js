@@ -264,16 +264,6 @@ export async function sendPaymentFailureEmail(payload) {
   });
 }
 
-export async function sendSubscriptionReceiptEmail(payload) {
-  return sendTemplateEmail({
-    to: payload?.to,
-    templateKey: 'subscription_receipt',
-    variables: payload,
-    required: false,
-    logLabel: 'subscription receipt',
-  });
-}
-
 export async function sendPremiumPurchaseReceiptEmail(payload) {
   return sendTemplateEmail({
     to: payload?.to,

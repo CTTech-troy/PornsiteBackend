@@ -355,7 +355,7 @@ async function getFollowStatus(subscriberUserId, creatorId) {
   };
 }
 
-async function toggleFollowSubscription(subscriberUserId, creatorId) {
+async function toggleCreatorFollow(subscriberUserId, creatorId) {
   if (!subscriberUserId) throw new Error('missing subscriber user id');
   if (!creatorId) throw new Error('missing creator id');
   if (String(subscriberUserId) === String(creatorId)) {
@@ -378,7 +378,7 @@ async function toggleFollowSubscription(subscriberUserId, creatorId) {
     } catch (err) {
       const msg = err?.message || String(err);
       if (!/Could not find the function|schema cache|PGRST202|42883/i.test(msg)) {
-        console.warn('Supabase toggleFollowSubscription failed, falling back to RTDB:', msg);
+        console.warn('Supabase toggleCreatorFollow failed, falling back to RTDB:', msg);
       }
     }
   }
@@ -531,7 +531,7 @@ export {
   getPublicProfile, 
   incrementFollow, 
   getFollowStatus,
-  toggleFollowSubscription,
+  toggleCreatorFollow,
   syncRtdbToSupabase, 
   isSupabaseReachable,
   getMediaByUser 

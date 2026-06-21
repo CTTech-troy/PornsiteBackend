@@ -333,7 +333,7 @@ export async function fulfillCoinPurchase({
   if (!pkg) throw new Error(`Unknown coin package: ${packageId}`);
 
   const existingOrder = await findMonetizationOrder({ reference, orderKey });
-  if (existingOrder?.status === 'fulfilled') {
+  if (['fulfilled', 'success', 'paid', 'completed'].includes(String(existingOrder?.status || '').toLowerCase())) {
     return { fulfilled: false, duplicate: true, balance: null, package: pkg };
   }
 
@@ -374,15 +374,24 @@ export async function fulfillCoinPurchase({
 async function findMonetizationOrder({ reference, orderKey }) {
   if (!supabase || (!reference && !orderKey)) return null;
   try {
-    let query = supabase.from('monetization_orders').select('*').limit(1);
-    if (reference) query = query.eq('provider_reference', reference);
-    else query = query.eq('order_key', orderKey);
-    const { data, error } = await query;
-    if (error) {
-      if (isMissingDbFeature(error)) return null;
-      throw error;
+    const candidates = [
+      reference ? { field: 'provider_reference', value: reference } : null,
+      orderKey ? { field: 'order_key', value: orderKey } : null,
+      orderKey ? { field: 'provider_reference', value: orderKey } : null,
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      const { data, error } = await supabase
+        .from('monetization_orders')
+        .select('*')
+        .eq(candidate.field, candidate.value)
+        .limit(1);
+      if (error) {
+        if (isMissingDbFeature(error)) return null;
+        throw error;
+      }
+      if (data?.[0]) return data[0];
     }
-    return data?.[0] || null;
+    return null;
   } catch (error) {
     if (isMissingDbFeature(error)) return null;
     throw error;
@@ -575,6 +584,16 @@ const GIFT_IMAGE_TYPES = new Map([
   ['image/gif', 'gif'],
   ['image/jpeg', 'jpg'],
 ]);
+const STATIC_GIFT_CATALOG = [
+  { id: 'heart_small', name: 'Heart', coin_cost: 5, emoji: 'heart', tone: 'warm', category: 'starter', rarity: 'common', is_active: true, admin_created: true, sort_order: 10 },
+  { id: 'spark_small', name: 'Spark', coin_cost: 10, emoji: 'spark', tone: 'bright', category: 'starter', rarity: 'common', is_active: true, admin_created: true, sort_order: 20 },
+];
+
+function staticGiftCatalog() {
+  return STATIC_GIFT_CATALOG
+    .map(normalizeGiftCatalogRow)
+    .filter((gift) => gift?.id && gift.isActive && gift.adminCreated && gift.coinCost > 0);
+}
 
 function giftUnavailableError(message = 'Gift catalog is not configured') {
   const err = new Error(message);
@@ -584,7 +603,7 @@ function giftUnavailableError(message = 'Gift catalog is not configured') {
 
 export async function getGiftCatalog() {
   if (!isConfigured() || !supabase) {
-    return [];
+    return staticGiftCatalog();
   }
 
   const { data, error } = await supabase
@@ -595,13 +614,14 @@ export async function getGiftCatalog() {
     .order('sort_order', { ascending: true });
 
   if (error) {
-    if (isMissingDbFeature(error)) return [];
+    if (isMissingDbFeature(error)) return staticGiftCatalog();
     throw error;
   }
 
-  return (data || [])
+  const gifts = (data || [])
     .map(normalizeGiftCatalogRow)
     .filter((gift) => gift?.id && gift.isActive && gift.adminCreated && gift.coinCost > 0);
+  return gifts.length ? gifts : staticGiftCatalog();
 }
 
 function normalizeGiftCatalogRow(row) {

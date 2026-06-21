@@ -36,8 +36,8 @@ function extractMissingColumnName(err) {
   return null;
 }
 
-const ACCESS_TYPES = new Set(['free', 'premium', 'members_only', 'coin_unlock']);
-const PREMIUM_VISIBILITY = new Set(['public', 'public_preview', 'members_only', 'hidden']);
+const ACCESS_TYPES = new Set(['free', 'premium', 'coin_unlock']);
+const PREMIUM_VISIBILITY = new Set(['public', 'public_preview', 'hidden']);
 
 function normalizeBool(value, fallback = false) {
   if (typeof value === 'boolean') return value;
@@ -50,14 +50,13 @@ function normalizeBool(value, fallback = false) {
 
 function normalizeAccessType(value, fallback = 'free') {
   const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === 'members_only') return 'coin_unlock';
   return ACCESS_TYPES.has(normalized) ? normalized : fallback;
 }
 
 function normalizePremiumPayload(body = {}) {
   let accessType = normalizeAccessType(body.accessType ?? body.access_type, '');
   const tokenPrice = Math.max(0, Math.floor(Number(body.tokenPrice ?? body.token_price ?? body.coinPrice ?? body.coin_price ?? body.price ?? 0) || 0));
-  const requiresMembershipInput = body.requiresMembership ?? body.requires_membership;
-  const subscriptionAccessInput = body.subscriptionAccess ?? body.subscription_access;
 
   if (!accessType) {
     if (normalizeBool(body.isPremiumContent ?? body.is_premium_content ?? body.premium, false)) {
@@ -67,22 +66,14 @@ function normalizePremiumPayload(body = {}) {
     }
   }
 
-  let requiresMembership = normalizeBool(requiresMembershipInput, accessType === 'members_only');
-  let subscriptionAccess = normalizeBool(subscriptionAccessInput, accessType === 'members_only' || accessType === 'premium');
   let premiumVisibility = String(body.premiumVisibility ?? body.premium_visibility ?? '').trim().toLowerCase().replace(/-/g, '_');
+  if (premiumVisibility === 'members_only') premiumVisibility = 'public_preview';
   if (!PREMIUM_VISIBILITY.has(premiumVisibility)) {
-    premiumVisibility = accessType === 'free' ? 'public' : accessType === 'members_only' ? 'members_only' : 'public_preview';
+    premiumVisibility = accessType === 'free' ? 'public' : 'public_preview';
   }
 
   if (accessType === 'free') {
-    requiresMembership = false;
-    subscriptionAccess = false;
     premiumVisibility = 'public';
-  }
-
-  if (accessType === 'members_only') {
-    requiresMembership = true;
-    subscriptionAccess = true;
   }
 
   if (accessType === 'coin_unlock' && tokenPrice <= 0) {
@@ -93,16 +84,14 @@ function normalizePremiumPayload(body = {}) {
 
   const isPremiumContent =
     accessType !== 'free' ||
-    tokenPrice > 0 ||
-    requiresMembership ||
-    subscriptionAccess;
+    tokenPrice > 0;
 
   return {
     accessType,
     isPremiumContent,
     tokenPrice: accessType === 'free' ? 0 : tokenPrice,
-    requiresMembership,
-    subscriptionAccess,
+    requiresMembership: false,
+    subscriptionAccess: false,
     premiumVisibility,
   };
 }
@@ -192,14 +181,15 @@ function mapSupabaseVideo(v, userMap) {
   const u = userMap[v.user_id] || {};
   const display = u.display_name || u.username || v.creator_display_name;
   const resolvedPrice = Number(v.token_price ?? v.coin_price ?? 0);
+  const rawAccessType = String(v.access_type || '').toLowerCase();
+  const legacyCoinGate = rawAccessType === 'members_only' || v.requires_membership === true || v.subscription_access === true;
   const isPremiumContent =
     v.is_premium_content === true ||
     Number(v.token_price || 0) > 0 ||
     Number(v.coin_price || 0) > 0 ||
-    ['premium', 'members_only', 'coin_unlock'].includes(String(v.access_type || '').toLowerCase()) ||
-    v.requires_membership === true ||
-    v.subscription_access === true;
-  const accessType = normalizeAccessType(v.access_type, isPremiumContent ? (resolvedPrice > 0 ? 'coin_unlock' : 'premium') : 'free');
+    ['premium', 'coin_unlock'].includes(rawAccessType) ||
+    legacyCoinGate;
+  const accessType = normalizeAccessType(legacyCoinGate ? 'coin_unlock' : v.access_type, isPremiumContent ? (resolvedPrice > 0 ? 'coin_unlock' : 'premium') : 'free');
   return {
     id: v.video_id,
     title: v.title || 'Untitled',
@@ -220,10 +210,10 @@ function mapSupabaseVideo(v, userMap) {
     access_type: accessType,
     premiumVisibility: v.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
     premium_visibility: v.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership: v.requires_membership === true,
-    requires_membership: v.requires_membership === true,
-    subscriptionAccess: v.subscription_access === true,
-    subscription_access: v.subscription_access === true,
+    requiresMembership: false,
+    requires_membership: false,
+    subscriptionAccess: false,
+    subscription_access: false,
     officialCompanyContent: v.official_company_content === true,
     official_company_content: v.official_company_content === true,
     contentSource: v.content_source || null,
@@ -245,17 +235,18 @@ function mapSupabaseVideo(v, userMap) {
 // ID is prefixed with "rtdb:" so update/delete handlers can route correctly.
 function mapRtdbVideo(videoId, v) {
   const tokenPrice = Number(v.tokenPrice || v.coinPrice || 0);
+  const rawAccessType = String(v.accessType || '').toLowerCase();
+  const legacyCoinGate = rawAccessType === 'members_only' || v.requiresMembership === true || v.subscriptionAccess === true;
   const isPremiumContent =
     v.isPremiumContent === true ||
     tokenPrice > 0 ||
-    ['premium', 'members_only', 'coin_unlock'].includes(String(v.accessType || '').toLowerCase()) ||
-    v.requiresMembership === true ||
-    v.subscriptionAccess === true;
-  const accessType = normalizeAccessType(v.accessType, isPremiumContent ? (tokenPrice > 0 ? 'coin_unlock' : 'premium') : 'free');
+    ['premium', 'coin_unlock'].includes(rawAccessType) ||
+    legacyCoinGate;
+  const accessType = normalizeAccessType(legacyCoinGate ? 'coin_unlock' : v.accessType, isPremiumContent ? (tokenPrice > 0 ? 'coin_unlock' : 'premium') : 'free');
   return {
     id: `rtdb:${videoId}`,
     title: v.title || 'Untitled',
-    thumbnail: v.thumbnailUrl || null,
+    thumbnail: v.thumbnailUrl || v.thumbnail_url || v.thumbnail || v.posterUrl || v.poster_url || v.poster || v.thumbUrl || v.thumb_url || v.thumb || null,
     creatorName: v.creatorDisplayName || 'Unknown',
     channelName: v.creatorDisplayName || '',
     uploadDate: v.createdAt ? new Date(v.createdAt).toISOString() : null,
@@ -272,10 +263,10 @@ function mapRtdbVideo(videoId, v) {
     access_type: accessType,
     premiumVisibility: v.premiumVisibility || (accessType === 'free' ? 'public' : 'public_preview'),
     premium_visibility: v.premiumVisibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership: v.requiresMembership === true,
-    requires_membership: v.requiresMembership === true,
-    subscriptionAccess: v.subscriptionAccess === true,
-    subscription_access: v.subscriptionAccess === true,
+    requiresMembership: false,
+    requires_membership: false,
+    subscriptionAccess: false,
+    subscription_access: false,
     officialCompanyContent: v.officialCompanyContent === true,
     official_company_content: v.officialCompanyContent === true,
     contentSource: v.contentSource || null,
@@ -434,21 +425,13 @@ function isPremiumRtdbRow(v) {
   );
 }
 
-// Fetch all videos from Firebase RTDB (isLive only), apply filters, return mapped array.
+// Fetch recent videos from Firebase RTDB, apply filters, return mapped array.
 async function fetchRtdbVideos({ search, statusFilter, isPremium }) {
   try {
     const rtdb = getFirebaseRtdb();
     if (!rtdb) return [];
     const ref = rtdb.ref('videos');
-    let snapshots;
-    try {
-      snapshots = await Promise.all([
-        ref.orderByChild('videoUrl').startAt('http').limitToLast(5000).once('value'),
-        ref.orderByChild('streamUrl').startAt('http').limitToLast(5000).once('value'),
-      ]);
-    } catch {
-      snapshots = [await ref.orderByKey().limitToLast(2000).once('value')];
-    }
+    const snapshots = [await ref.orderByKey().limitToLast(5000).once('value')];
 
     const byId = new Map();
     for (const snap of snapshots) {
@@ -802,12 +785,7 @@ export async function cleanupEmptyVideos(req, res) {
 
     const rtdb = getFirebaseRtdb();
     if (rtdb) {
-      const snap = await rtdb
-        .ref('videos')
-        .orderByChild('videoUrl')
-        .equalTo(null)
-        .limitToFirst(maxScan)
-        .once('value');
+      const snap = await rtdb.ref('videos').orderByKey().limitToFirst(maxScan).once('value');
       const val = snap.val();
       const entries = val && typeof val === 'object' ? Object.entries(val) : [];
       rtdbScanned = entries.length;

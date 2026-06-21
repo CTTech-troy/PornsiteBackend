@@ -45,6 +45,25 @@ const OFFICIAL_EMBED_PATTERNS = [
   /^https:\/\/(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/[a-zA-Z0-9_-]+/i,
   /^https:\/\/player\.vimeo\.com\/video\/\d+/i,
   /^https:\/\/www\.dailymotion\.com\/embed\/video\/[a-zA-Z0-9]+/i,
+  /^https:\/\/(?:www\.)?videos\.com\/embedframe\/[a-zA-Z0-9_-]+/i,
+  /^https:\/\/(?:www\.)?xvideos\.com\/embedframe\/[a-zA-Z0-9_-]+/i,
+  /^https:\/\/(?:www\.)?xnxx\.com\/embedframe\/[a-zA-Z0-9_-]+/i,
+  /^https:\/\/(?:www\.)?pornhub\.com\/embed\/[a-zA-Z0-9_-]+/i,
+];
+const TRUSTED_IFRAME_HOST_PATTERNS = [
+  /(?:^|\.)youtube(?:-nocookie)?\.com$/i,
+  /(?:^|\.)vimeo\.com$/i,
+  /(?:^|\.)dailymotion\.com$/i,
+  /(?:^|\.)videos\.com$/i,
+  /(?:^|\.)xvideos\.com$/i,
+  /(?:^|\.)xnxx\.com$/i,
+  /(?:^|\.)pornhub\.com$/i,
+  /(?:^|\.)xhamster\.com$/i,
+  /(?:^|\.)redtube\.com$/i,
+  /(?:^|\.)youporn\.com$/i,
+  /(?:^|\.)spankbang\.com$/i,
+  /(?:^|\.)eporner\.com$/i,
+  /(?:^|\.)tube8\.com$/i,
 ];
 const IMPORTED_SOURCE_VALUES = new Set([
   'imported_csv',
@@ -57,6 +76,19 @@ const IMPORTED_SOURCE_VALUES = new Set([
 function hostname(url) {
   try {
     return new URL(String(url || '').trim()).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function normalizeSecureIframeUrl(url) {
+  if (!url || typeof url !== 'string') return '';
+  const value = url.trim();
+  const normalized = value.startsWith('//') ? `https:${value}` : value;
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.protocol === 'https:' ? parsed.toString() : '';
   } catch {
     return '';
   }
@@ -84,8 +116,16 @@ export function isKnownUnsupportedPageUrl(url) {
 }
 
 export function isApprovedEmbedUrl(url) {
-  if (!isSafeHttpUrl(url)) return false;
-  return OFFICIAL_EMBED_PATTERNS.some((pattern) => pattern.test(url.trim()));
+  const normalized = normalizeSecureIframeUrl(url);
+  if (!normalized) return false;
+  return OFFICIAL_EMBED_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+export function isTrustedIframeEmbedUrl(url) {
+  const normalized = normalizeSecureIframeUrl(url);
+  if (!normalized) return false;
+  const host = hostname(normalized);
+  return TRUSTED_IFRAME_HOST_PATTERNS.some((pattern) => pattern.test(host));
 }
 
 export function isApprovedDirectHost(url) {
@@ -119,8 +159,14 @@ export function isDirectPlayableStreamUrl(url, options = {}) {
 
 function extractIframeSrc(value) {
   if (!value || typeof value !== 'string') return '';
-  const match = value.match(/<iframe[^>]*\bsrc=["']([^"']+)["']/i);
-  return match?.[1]?.trim() || '';
+  const decoded = String(value)
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+  const match = decoded.match(/<iframe\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+  return normalizeSecureIframeUrl(match?.[1] || match?.[2] || match?.[3] || '');
 }
 
 function getPreviewUrl(video = {}) {
@@ -238,19 +284,31 @@ export function validateVideoPlaybackSource(video = {}) {
   }
 
   if (iframeEmbed && (importedCatalogSource || playbackType === 'external_embed')) {
+    const iframeSrc = extractIframeSrc(iframeEmbed);
+    if (!isTrustedIframeEmbedUrl(iframeSrc)) {
+      return {
+        playable: false,
+        sourceType: 'blocked_embed',
+        embedAllowed: false,
+        validationStatus: 'unsupported',
+        playbackUrl: '',
+        reason: 'Iframe embed is not HTTPS or is not on the trusted provider allowlist.',
+      };
+    }
     return {
       playable: true,
       sourceType: 'external_embed',
       embedAllowed: true,
       validationStatus: 'playable',
-      playbackUrl: extractIframeSrc(iframeEmbed) || '',
+      playbackUrl: iframeSrc,
       reason: '',
     };
   }
 
-  const embedSource =
+  const embedSource = normalizeSecureIframeUrl(
     String(video.embed_url || video.embedUrl || '').trim() ||
-    extractIframeSrc(String(video.embed_code || video.embedCode || ''));
+    extractIframeSrc(String(video.embed_code || video.embedCode || ''))
+  );
   if (embedSource) {
     if (isApprovedEmbedUrl(embedSource)) {
       return {
@@ -262,7 +320,7 @@ export function validateVideoPlaybackSource(video = {}) {
         reason: '',
       };
     }
-    if (importedCatalogSource || playbackType === 'external_embed') {
+    if ((importedCatalogSource || playbackType === 'external_embed') && isTrustedIframeEmbedUrl(embedSource)) {
       return {
         playable: true,
         sourceType: 'external_embed',

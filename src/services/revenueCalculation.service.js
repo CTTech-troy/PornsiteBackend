@@ -46,10 +46,6 @@ export async function getCommissionRates(options = {}) {
     const giftCreator = Number(map.live_gift_creator_percent);
     if (Number.isFinite(giftPlatform)) platformPercent = giftPlatform;
     if (Number.isFinite(giftCreator)) creatorPercent = giftCreator;
-  } else if (source === 'subscription' || source === 'membership') {
-    const subPlatform = Number(map.subscription_platform_fee_percent);
-    if (Number.isFinite(subPlatform)) platformPercent = subPlatform;
-    creatorPercent = 100 - platformPercent;
   } else if (source === 'purchase' || source === 'video_purchase' || source === 'premium_video') {
     const vpCreator = Number(map.video_purchase_creator_percent);
     const vpPlatform = Number(map.video_purchase_platform_percent);

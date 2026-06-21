@@ -18,9 +18,8 @@ const COLUMN_ALIASES = {
   provider: ['provider', 'source_provider', 'site'],
   premium: ['premium', 'is_premium', 'is_premium_content', 'premium_status'],
   token_price: ['token_price', 'coin_price', 'tokens', 'price', 'coin_unlock_price'],
-  access_type: ['access_type', 'premium_access', 'access', 'monetization_type'],
+  access_type: ['access_type', 'premium_access', 'access', 'monetization_type', 'members_access', 'membership_access', 'subscriber_access'],
   premium_visibility: ['premium_visibility', 'premium_visibility_mode', 'visibility_mode'],
-  subscription_access: ['subscription_access', 'members_access', 'membership_access', 'subscriber_access'],
   metadata: ['metadata', 'meta', 'extra'],
   external_id: ['external_id', 'externalid', 'id', 'video_id'],
   media_file: ['media_file', 'media_path', 'file', 'filename', 'video_file'],
@@ -116,8 +115,9 @@ function parsePremium(val) {
 
 function parseAccessType(raw, premium, tokenPrice) {
   const s = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (['premium', 'members_only', 'coin_unlock', 'free'].includes(s)) return s;
-  if (['member', 'members', 'membership', 'subscriber', 'subscribers_only'].includes(s)) return 'members_only';
+  if (s === 'members_only') return 'coin_unlock';
+  if (['premium', 'coin_unlock', 'free'].includes(s)) return s;
+  if (['member', 'members', 'membership', 'subscriber', 'subscribers_only'].includes(s)) return 'coin_unlock';
   if (['coin', 'coins', 'paid', 'pay_per_view', 'token', 'tokens'].includes(s)) return 'coin_unlock';
   if (Number(tokenPrice || 0) > 0) return 'coin_unlock';
   return premium ? 'premium' : 'free';
@@ -125,7 +125,7 @@ function parseAccessType(raw, premium, tokenPrice) {
 
 function parseBool(val) {
   const s = String(val || '').trim().toLowerCase();
-  return ['1', 'true', 'yes', 'y', 'member', 'members', 'membership', 'subscriber'].includes(s);
+  return ['1', 'true', 'yes', 'y'].includes(s);
 }
 
 function decodeBasicHtmlEntities(value) {
@@ -353,8 +353,8 @@ export function normalizeImportRow(raw) {
       is_premium_content: premium || accessType !== 'free',
       token_price: accessType === 'coin_unlock' || tokenPrice > 0 ? tokenPrice : 0,
       access_type: accessType,
-      requires_membership: accessType === 'members_only' || parseBool(raw.subscription_access),
-      subscription_access: parseBool(raw.subscription_access) || accessType === 'members_only',
+      requires_membership: false,
+      subscription_access: false,
       premium_visibility: stripHtml(raw.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview')),
       external_id: stripHtml(raw.external_id || '') || null,
       media_file: mediaFile || null,

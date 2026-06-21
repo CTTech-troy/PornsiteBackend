@@ -129,8 +129,10 @@ router.post('/purchase', requireAuth, purchaseLimiter, async (req, res) => {
   const {
     packageId,
     countryCode   = 'US',
+    billingCountry = null,
     customerEmail = '',
     customerName  = 'Member',
+    customerPhone = '',
   } = req.body ?? {};
 
   try {
@@ -138,8 +140,10 @@ router.post('/purchase', requireAuth, purchaseLimiter, async (req, res) => {
       userId: req.uid,
       packageId,
       countryCode,
+      billingCountry,
       customerEmail,
       customerName,
+      customerPhone,
       req,
     });
 

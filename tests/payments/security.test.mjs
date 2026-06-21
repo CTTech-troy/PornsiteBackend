@@ -124,3 +124,50 @@ test('flutterwave webhook accepts legacy verif-hash secret', async () => {
     restoreEnv('FLUTTERWAVE_WEBHOOK_HASH', prev.webhookHash);
   }
 });
+
+test('flutterwave verification supports hosted checkout tx_ref fallback', async () => {
+  const prev = {
+    secretKey: process.env.FLUTTERWAVE_SECRET_KEY,
+  };
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  process.env.FLUTTERWAVE_SECRET_KEY = 'FLWSECK_TEST-unit';
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      async json() {
+        return {
+          status: 'success',
+          data: {
+            id: 987654,
+            tx_ref: 'intent_key_123',
+            status: 'successful',
+            amount: 0.99,
+            currency: 'USD',
+            meta: {
+              userId: 'user_123',
+              productType: 'coins',
+              productId: 'coins_30',
+            },
+          },
+        };
+      },
+    };
+  };
+
+  try {
+    const { verifyProviderTransaction } = await importPaymentGateway('flutterwave-txref');
+    const verified = await verifyProviderTransaction('flutterwave', {
+      reference: 'intent_key_123',
+      orderKey: 'intent_key_123',
+    });
+    assert.equal(verified.reference, '987654');
+    assert.equal(verified.orderKey, 'intent_key_123');
+    assert.equal(verified.productType, 'coins');
+    assert.equal(calls[0], 'https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=intent_key_123');
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv('FLUTTERWAVE_SECRET_KEY', prev.secretKey);
+  }
+});

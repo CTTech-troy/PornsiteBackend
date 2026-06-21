@@ -251,6 +251,21 @@ function formatDurationSeconds(seconds) {
     : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function getCreatorVideoThumbnail(video = {}) {
+  return (
+    video.thumbnailUrl ||
+    video.thumbnail_url ||
+    video.thumbnail ||
+    video.posterUrl ||
+    video.poster_url ||
+    video.poster ||
+    video.thumbUrl ||
+    video.thumb_url ||
+    video.thumb ||
+    null
+  );
+}
+
 function mapSupabaseCreatorVideo(row = {}) {
   const videoId = String(row.video_id || row.id || '').trim();
   if (!videoId) return null;
@@ -270,7 +285,7 @@ function mapSupabaseCreatorVideo(row = {}) {
     views: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
     totalLikes: Number(row.likes_count ?? row.totalLikes ?? 0) || 0,
     totalComments: Number(row.comments_count ?? row.totalComments ?? 0) || 0,
-    thumbnailUrl: row.thumbnail_url || row.thumbnailUrl || row.thumbnail || null,
+    thumbnailUrl: getCreatorVideoThumbnail(row),
     durationSeconds,
     duration: formatDurationSeconds(durationSeconds),
     isPremiumContent,
@@ -528,7 +543,7 @@ export async function getOverview(req, res) {
         title:      v.title || 'Untitled',
         views:      Number(v.totalViews ?? v.views) || 0,
         likes:      Number(v.totalLikes) || 0,
-        thumbnail:  v.thumbnailUrl || v.thumbnail || null,
+        thumbnail:  getCreatorVideoThumbnail(v),
         durationSeconds: Number(v.durationSeconds ?? v.duration_seconds ?? 0) || 0,
         duration: formatDurationSeconds(v.durationSeconds ?? v.duration_seconds ?? v.duration ?? 0),
         isPremium:  Boolean(v.isPremiumContent),
@@ -655,8 +670,8 @@ export async function getVideos(req, res) {
         views:          Number(v.totalViews ?? v.views) || 0,
         likes:          Number(v.totalLikes) || 0,
         comments:       Number(v.totalComments) || 0,
-        thumbnail:      v.thumbnailUrl || v.thumbnail || null,
-        thumbnailUrl:   v.thumbnailUrl || v.thumbnail || null,
+        thumbnail:      getCreatorVideoThumbnail(v),
+        thumbnailUrl:   getCreatorVideoThumbnail(v),
         durationSeconds: Number(v.durationSeconds ?? v.duration_seconds ?? 0) || 0,
         duration:       formatDurationSeconds(v.durationSeconds ?? v.duration_seconds ?? v.duration ?? 0),
         isPremium:      Boolean(v.isPremiumContent),
@@ -1059,7 +1074,7 @@ export async function getContentAnalytics(req, res) {
           views,
           likes,
           comments,
-          thumbnail: v.thumbnailUrl || v.thumbnail || null,
+          thumbnail: getCreatorVideoThumbnail(v),
           isPremium: Boolean(v.isPremiumContent),
           isPublished: v.isLive !== false,
           createdAt: v.createdAt,
@@ -1185,72 +1200,6 @@ export async function getRevenueReport(req, res) {
         },
         withdrawals: withdrawals.slice(0, 50),
       },
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-export async function getSubscriptions(req, res) {
-  try {
-    const uid = req.uid;
-    if (!studioSupabaseReady()) {
-      return res.json({
-        success: true,
-        data: [],
-        summary: { active: 0, mrr: 0 },
-        meta: { page: 1, limit: 20, total: 0, hasMore: false },
-      });
-    }
-
-    let result = await supabase
-      .from('user_memberships')
-      .select('id, user_id, plan_id, amount_paid_usd, status, started_at, expires_at')
-      .eq('creator_id', uid)
-      .eq('status', 'active')
-      .order('started_at', { ascending: false });
-
-    if (result.error && isMissingColumn(result.error)) {
-      return res.json({
-        success: true,
-        data: [],
-        summary: { active: 0, mrr: 0 },
-        meta: { page: 1, limit: 20, total: 0, hasMore: false },
-        note: 'Per-creator subscriptions require creator_id on memberships.',
-      });
-    }
-
-    if (result.error) {
-      if (isMissingTable(result.error)) {
-        return res.json({
-          success: true,
-          data: [],
-          summary: { active: 0, mrr: 0 },
-          meta: { page: 1, limit: 20, total: 0, hasMore: false },
-        });
-      }
-      throw result.error;
-    }
-
-    const rows = result.data || [];
-    const mrr = rows.reduce((s, r) => s + (Number(r.amount_paid_usd) || 0), 0);
-    const paged = paginatedList(
-      rows.map((r) => ({
-        id: r.id,
-        userId: r.user_id,
-        planId: r.plan_id,
-        amountUsd: Number(r.amount_paid_usd) || 0,
-        status: r.status,
-        startedAt: r.started_at,
-        expiresAt: r.expires_at,
-      })),
-      req.query,
-      20,
-    );
-
-    return res.json({
-      ...paged,
-      summary: { active: rows.length, mrr: parseFloat(mrr.toFixed(2)) },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

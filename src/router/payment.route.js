@@ -1,14 +1,9 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/authFirebase.js';
-import {
-  getMembershipPlans,
-  getUserMembership,
-} from '../controller/membership.controller.js';
 import { supabase } from '../config/supabase.js';
 import { createRateLimitStore } from '../middleware/rateLimitStore.js';
 import {
-  createSecurePaymentSession,
   getPaymentIntentStatus,
   processProviderWebhook,
   refreshAndFulfillPaymentIntent,
@@ -38,15 +33,6 @@ function readLimit(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-const checkoutLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: readLimit('PAYMENT_CHECKOUT_MAX_PER_MIN', 12),
-  standardHeaders: 'draft-8',
-  legacyHeaders: false,
-  passOnStoreError: true,
-  store: createRateLimitStore('payments:checkout'),
-});
-
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: readLimit('PAYMENT_WEBHOOK_MAX_PER_MIN', 240),
@@ -54,24 +40,6 @@ const webhookLimiter = rateLimit({
   legacyHeaders: false,
   passOnStoreError: true,
   store: createRateLimitStore('payments:webhook'),
-});
-
-router.get('/plans', async (_req, res) => {
-  try {
-    const plans = await getMembershipPlans();
-    return res.json({ ok: true, data: plans });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-router.get('/membership', requireAuth, async (req, res) => {
-  try {
-    const membership = await getUserMembership(req.uid);
-    return res.json({ ok: true, data: membership });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
-  }
 });
 
 router.get('/region', (req, res) => {
@@ -90,51 +58,6 @@ router.get('/region', (req, res) => {
   });
 });
 
-router.post('/checkout', requireAuth, checkoutLimiter, async (req, res) => {
-  try {
-    const {
-      planId,
-      countryCode = 'US',
-      billingCountry = null,
-      customerEmail = '',
-      customerName = 'Member',
-      customerPhone = '',
-    } = req.body || {};
-
-    if (!planId) return res.status(400).json({ ok: false, error: 'planId is required' });
-
-    const paymentResp = await createSecurePaymentSession({
-      userId: req.uid,
-      productType: 'membership',
-      productId: planId,
-      countryCode,
-      billingCountry,
-      customerEmail,
-      customerName,
-      customerPhone,
-      req,
-    });
-
-    return res.json({
-      ok: true,
-      provider: paymentResp.provider,
-      providerLabel: paymentProviderLabel(paymentResp.provider),
-      checkoutUrl: paymentResp.checkoutUrl,
-      reference: paymentResp.reference,
-      orderId: paymentResp.orderId,
-      orderKey: paymentResp.orderKey,
-      countryCode: paymentResp.countryCode,
-      currency: paymentResp.currency,
-      amount: paymentResp.amount,
-      flutterwave: paymentResp.flutterwave,
-    });
-  } catch (err) {
-    console.error('[payment] checkout error:', err.message);
-    const status = /temporarily unavailable|unreachable|timed out|not configured/i.test(err.message) ? 503 : 500;
-    return res.status(status).json({ ok: false, error: err.message });
-  }
-});
-
 router.get('/verify/:reference', requireAuth, async (req, res) => {
   const reference = String(req.params.reference || '').trim();
   if (!reference) return res.status(400).json({ ok: false, error: 'reference is required' });
@@ -146,11 +69,12 @@ router.get('/verify/:reference', requireAuth, async (req, res) => {
     }
 
     const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
-    if (refresh && status.status !== 'fulfilled') {
+    if (refresh && !status.successful) {
       const refreshed = await refreshAndFulfillPaymentIntent({
         reference,
         orderKey,
         userId: req.uid,
+        io: req.app?.get('io') || null,
       });
       if (refreshed) {
         return res.json({
@@ -170,7 +94,7 @@ router.get('/verify/:reference', requireAuth, async (req, res) => {
 
     return res.json({
       ok: true,
-      verified: status.status === 'fulfilled',
+      verified: status.successful === true,
       payment: status,
       providerStatus: null,
     });

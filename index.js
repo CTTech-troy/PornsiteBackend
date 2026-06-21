@@ -18,7 +18,6 @@ import liveRouter from './src/router/live.route.js';
 import giftRouter from './src/router/gift.route.js';
 import usersRouter from './src/router/users.route.js';
 import creatorsRouter from './src/router/creators.route.js';
-import pornhubRouter from './src/router/pornhubRoutes.js';
 import contentRemovalRouter from './src/router/ContentRemoval.route.js';
 import paymentRouter from './src/router/payment.route.js';
 import tokensRouter  from './src/router/tokens.route.js';
@@ -27,7 +26,6 @@ import messagesRouter from './src/router/messages.route.js';
 import earningsRouter from './src/router/earnings.route.js';
 import adminRouter from './src/router/admin.route.js';
 import adsRouter from './src/router/ads.route.js';
-import { publicMembershipsRouter, adminMembershipsRouter } from './src/router/memberships.route.js';
 import financeRouter from './src/router/finance.route.js';
 import creatorStudioRouter from './src/router/creatorStudio.route.js';
 import adminContentRouter from './src/router/adminContent.route.js';
@@ -35,7 +33,7 @@ import adminModerationRouter from './src/router/adminModeration.route.js';
 import adminSystemRouter from './src/router/adminSystem.route.js';
 import adminCoinsRouter from './src/router/adminCoins.route.js';
 import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
-import { getPublicSettings } from './src/controller/adminSystem.controller.js';
+import { getPublicSettings, getPublicVastSettings } from './src/controller/adminSystem.controller.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
 import * as walletsystem from './src/controller/walletsystem.controller.js';
@@ -98,22 +96,91 @@ const SOCKET_IO_HTTP_ORIGIN = 'https://pornsitebackend.onrender.com';
 const SOCKET_IO_WS_ORIGIN = 'wss://pornsitebackend.onrender.com';
 const PERMISSIONS_POLICY_HEADER = [
   'accelerometer=()',
-  'autoplay=(self)',
+  'autoplay=*',
   'bluetooth=()',
   'browsing-topics=()',
   'camera=()',
   'display-capture=()',
-  'encrypted-media=(self)',
-  'fullscreen=(self)',
+  'encrypted-media=*',
+  'fullscreen=*',
   'geolocation=()',
   'gyroscope=()',
   'magnetometer=()',
   'microphone=()',
   'midi=()',
   'payment=(self)',
+  'picture-in-picture=*',
   'usb=()',
   'xr-spatial-tracking=()',
 ].join(', ');
+
+const TRUSTED_VIDEO_EMBED_SOURCES = [
+  'https://www.xvideos.com',
+  'https://xvideos.com',
+  'https://*.xvideos.com',
+  'https://xhamster.com',
+  'https://www.xhamster.com',
+  'https://*.xhamster.com',
+  'https://www.youtube.com',
+  'https://www.youtube-nocookie.com',
+  'https://player.vimeo.com',
+  'https://www.dailymotion.com',
+  'https://videos.com',
+  'https://www.videos.com',
+  'https://*.videos.com',
+  'https://xnxx.com',
+  'https://www.xnxx.com',
+  'https://*.xnxx.com',
+  'https://redtube.com',
+  'https://www.redtube.com',
+  'https://*.redtube.com',
+  'https://youporn.com',
+  'https://www.youporn.com',
+  'https://*.youporn.com',
+  'https://spankbang.com',
+  'https://www.spankbang.com',
+  'https://*.spankbang.com',
+  'https://eporner.com',
+  'https://www.eporner.com',
+  'https://*.eporner.com',
+  'https://tube8.com',
+  'https://www.tube8.com',
+  'https://*.tube8.com',
+];
+
+const TRUSTED_AD_FRAME_SOURCES = [
+  'https://imasdk.googleapis.com',
+  'https://*.google.com',
+  'https://s.magsrv.com',
+  'https://*.magsrv.com',
+  'https://vast.yomeno.xyz',
+  'https://*.yomeno.xyz',
+  'https://juicyads.com',
+  'https://www.juicyads.com',
+  'https://js.juicyads.com',
+  'https://poweredby.jads.co',
+  'https://*.jads.co',
+  'https://a.adtng.com',
+  'https://*.adtng.com',
+  'https://quge5.com',
+  'https://monetag.com',
+  'https://www.monetag.com',
+  'https://*.monetag.com',
+  'https://*.highperformanceformat.com',
+  'https://*.profitablecpmrate.com',
+  'https://*.profitablecpmgate.com',
+  'https://*.alwingulla.com',
+  'https://5gvci.com',
+  'https://securepubads.g.doubleclick.net',
+  'https://*.doubleclick.net',
+  'https://*.googlesyndication.com',
+];
+
+const TRUSTED_FRAME_SOURCES = [
+  LIVEKIT_HTTP_ORIGIN,
+  ...TRUSTED_VIDEO_EMBED_SOURCES,
+  ...TRUSTED_AD_FRAME_SOURCES,
+];
  
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -131,22 +198,27 @@ app.use(helmet({
         'https://*.supabase.co',
         LIVEKIT_HTTP_ORIGIN,
         LIVEKIT_WS_ORIGIN,
+        ...TRUSTED_VIDEO_EMBED_SOURCES,
         'https://imasdk.googleapis.com',
         'https://s.magsrv.com',
         'https://*.magsrv.com',
+        'https://vast.yomeno.xyz',
+        'https://*.yomeno.xyz',
         'https://googleads.g.doubleclick.net',
         'https://securepubads.g.doubleclick.net',
         'https://pagead2.googlesyndication.com',
         'https://pubads.g.doubleclick.net',
       ],
       imgSrc: ["'self'", 'data:', 'blob:', 'https:', LIVEKIT_HTTP_ORIGIN],
-      mediaSrc: ["'self'", 'blob:', 'https:', LIVEKIT_HTTP_ORIGIN],
+      mediaSrc: ["'self'", 'blob:', 'https:', LIVEKIT_HTTP_ORIGIN, ...TRUSTED_VIDEO_EMBED_SOURCES],
       scriptSrc: [
         "'self'",
         "'unsafe-inline'",
         'https://imasdk.googleapis.com',
         'https://s.magsrv.com',
         'https://*.magsrv.com',
+        'https://vast.yomeno.xyz',
+        'https://*.yomeno.xyz',
         'https://poweredby.jads.co',
         'https://*.jads.co',
         'https://quge5.com',
@@ -156,11 +228,12 @@ app.use(helmet({
         'https://*.profitablecpmrate.com',
         'https://*.profitablecpmgate.com',
         'https://*.alwingulla.com',
+        'https://5gvci.com',
         'https://securepubads.g.doubleclick.net',
         'https://*.googlesyndication.com',
       ],
-      childSrc: ["'self'", 'https:', LIVEKIT_HTTP_ORIGIN],
-      frameSrc: ["'self'", 'https:', LIVEKIT_HTTP_ORIGIN],
+      childSrc: ["'self'", ...TRUSTED_FRAME_SOURCES],
+      frameSrc: ["'self'", ...TRUSTED_FRAME_SOURCES],
       workerSrc: ["'self'", 'blob:', LIVEKIT_HTTP_ORIGIN],
       upgradeInsecureRequests: [],
     },
@@ -368,6 +441,7 @@ app.get('/api/health/import-worker', (_req, res) => {
 });
 
 app.get('/api/config/public', getPublicSettings);
+app.get('/api/settings/vast', getPublicVastSettings);
 
 app.use('/api/keepalive', keepAliveRouter);
 app.use('/api/internal/qstash/monitoring', apiMonitoringWorkflowRouter);
@@ -394,7 +468,6 @@ app.get('/api/videos/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res
 // Videos proxy routes
 app.use('/api/videos', videosRouter);
 app.use('/api/posts', postsRouter);
-app.use('/api/pornhub', pornhubRouter);
 app.use('/api/live', liveRouter);
 app.use('/api/gifts', giftRouter);
 app.use('/api/users', usersRouter);
@@ -421,8 +494,6 @@ app.use('/api/ad-providers', adProvidersRouter);
 app.use('/api/partner', partnerRouter);
 app.use('/api/publisher', publisherRouter);
 app.use('/api/admin/partners', adminPartnersRouter);
-app.use('/api/memberships', publicMembershipsRouter);
-app.use('/api/admin/memberships', adminMembershipsRouter);
 // Creators Main Application
 app.use('/api/creators-main-application', creatorsMainApplicationRouter);
 
@@ -533,9 +604,6 @@ function chatBillingPayload(access = {}) {
     intervalMs: randomChatBilling.RANDOM_CHAT_BILLING_INTERVAL_MS,
     lowBalanceThreshold: randomChatBilling.RANDOM_CHAT_LOW_BALANCE,
     balance: Number(access.balance || 0),
-    membershipActive: access.membershipActive === true,
-    plan: access.plan || 'basic',
-    planStatus: access.planStatus || 'basic',
   };
 }
 
@@ -543,7 +611,7 @@ function emitChatBalance(socket, access = {}) {
   socket.emit('chat:balance', chatBillingPayload(access));
 }
 
-function emitChatPaywall(socket, access = {}, message = 'You have run out of coins. Purchase a membership to continue using Random Chat.') {
+function emitChatPaywall(socket, access = {}, message = 'You have run out of coins. Buy coins to continue using Random Chat.') {
   socket.emit('chat:paywall', {
     ...chatBillingPayload(access),
     reason: access.reason || 'INSUFFICIENT_COINS',
@@ -599,7 +667,7 @@ async function finalizeChatUsage(room, userEntry, reason = 'ended', status = 'en
 
 function emitLowBalance(socket, access = {}) {
   const balance = Number(access.balance || 0);
-  if (access.membershipActive || balance > randomChatBilling.RANDOM_CHAT_LOW_BALANCE) return;
+  if (balance > randomChatBilling.RANDOM_CHAT_LOW_BALANCE) return;
   socket.emit('chat:low-balance', {
     ...chatBillingPayload(access),
     message: `You are running low on coins (${balance.toLocaleString()} left).`,
@@ -780,7 +848,6 @@ async function createChatRoom(requester, peer, requesterAccess, peerAccess) {
       userId,
       peerUserId,
       startedAt: room.createdAt,
-      membershipBypass: billing.access?.membershipActive === true,
       startingBalance: billing.access?.balance || 0,
     }).then((usageId) => {
       const activeRoom = chatRooms.get(roomId);
@@ -821,7 +888,7 @@ function scheduleChatBilling(room) {
   clearTimeout(room.billingTimer);
   room.billingTimer = setTimeout(() => {
     chargeChatRoom(room.roomId).catch((err) => {
-      console.error('[chat] billing cycle failed:', err?.message || err);
+      console.error('[chat] coin billing interval failed:', err?.message || err);
       const activeRoom = chatRooms.get(room.roomId);
       if (activeRoom) scheduleChatBilling(activeRoom);
     });
@@ -862,7 +929,6 @@ async function chargeChatRoom(roomId) {
         charged: result.charged === true,
         amount: Number(result.amount || 0),
         balance: Number(result.balance || 0),
-        membershipActive: result.membershipActive === true,
       };
       billing.events.push(event);
       billing.coinsSpent += event.amount;

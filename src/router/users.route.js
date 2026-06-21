@@ -1,6 +1,6 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { getFollowStatus, getPublicProfile, toggleFollowSubscription } from '../config/dbFallback.js';
+import { getFollowStatus, getPublicProfile, toggleCreatorFollow } from '../config/dbFallback.js';
 import { optionalAuth, requireAuth } from '../middleware/authFirebase.js';
 import { createRateLimitStore } from '../middleware/rateLimitStore.js';
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
@@ -14,7 +14,7 @@ const followLimiter = rateLimit({
   legacyHeaders: false,
   passOnStoreError: true,
   store: createRateLimitStore('users:follows'),
-  message: { ok: false, error: 'Too many subscribe actions. Please slow down.' },
+  message: { ok: false, error: 'Too many follow actions. Please slow down.' },
 });
 
 // GET /api/users/:id - public profile.
@@ -30,7 +30,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// GET /api/users/:id/follow-status - current viewer subscription state.
+// GET /api/users/:id/follow-status - current viewer follow state.
 router.get('/:id/follow-status', optionalAuth, async (req, res) => {
   const { id: creatorId } = req.params;
   try {
@@ -42,14 +42,14 @@ router.get('/:id/follow-status', optionalAuth, async (req, res) => {
   }
 });
 
-// POST /api/users/:id/follow - toggle the signed-in user's creator subscription.
+// POST /api/users/:id/follow - toggle the signed-in user's creator follow.
 router.post('/:id/follow', requireAuth, followLimiter, async (req, res) => {
   const { id: creatorId } = req.params;
   try {
     if (String(req.uid) === String(creatorId)) {
-      return res.status(400).json({ ok: false, error: 'You cannot subscribe to yourself.' });
+      return res.status(400).json({ ok: false, error: 'You cannot follow yourself.' });
     }
-    const result = await toggleFollowSubscription(req.uid, creatorId);
+    const result = await toggleCreatorFollow(req.uid, creatorId);
     invalidateTopCreatorsCache();
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -58,14 +58,14 @@ router.post('/:id/follow', requireAuth, followLimiter, async (req, res) => {
   }
 });
 
-// DELETE /api/users/:id/follow - force unsubscribe without toggling back on.
+// DELETE /api/users/:id/follow - force unfollow without toggling back on.
 router.delete('/:id/follow', requireAuth, followLimiter, async (req, res) => {
   const { id: creatorId } = req.params;
   try {
     const current = await getFollowStatus(req.uid, creatorId);
     let result = current;
     if (current.subscribed) {
-      result = await toggleFollowSubscription(req.uid, creatorId);
+      result = await toggleCreatorFollow(req.uid, creatorId);
       invalidateTopCreatorsCache();
     }
     res.json({ ok: true, ...result, subscribed: false });

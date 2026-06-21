@@ -11,6 +11,13 @@ const QUALITY_OPTIONS = ['auto', '480p', '720p', '1080p'];
 const STORAGE_OPTIONS = ['supabase', 'firebase', 'cloudinary', 's3', 'mux', 'bunny'];
 const WATERMARK_POSITION_OPTIONS = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
 const WATERMARK_ANIMATION_OPTIONS = ['none', 'pulse', 'fade'];
+const VAST_PROVIDER_OPTIONS = ['monetag', 'clickadilla', 'custom'];
+export const FEED_PAGE_SIZE_OPTIONS = [100, 200, 500];
+
+export const VAST_PROVIDER_URLS = Object.freeze({
+  monetag: 'https://s.magsrv.com/v1/vast.php?idz=5932212',
+  clickadilla: 'https://vast.yomeno.xyz/vast?spot_id=1492236',
+});
 
 export const PLATFORM_SETTINGS_CATALOG = [
   // Brand and company
@@ -70,8 +77,6 @@ export const PLATFORM_SETTINGS_CATALOG = [
   // Revenue settings (admin commission & fees)
   { key: 'tax_percent', label: 'Tax Percentage (%)', section: 'Revenue Settings', type: 'number', defaultValue: '0', min: 0, max: 100 },
   { key: 'withdrawal_fee_percent', label: 'Withdrawal Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '0', min: 0, max: 100 },
-  { key: 'subscription_platform_fee_percent', label: 'Subscription Platform Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '30', min: 0, max: 100 },
-  { key: 'subscription_fee_percent', label: 'Subscription Processing Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '0', min: 0, max: 100 },
   { key: 'processing_fee_percent', label: 'Payment Processing Fee (%)', section: 'Revenue Settings', type: 'number', defaultValue: '2.9', min: 0, max: 100 },
   {
     key: 'revenue_commission_rules',
@@ -83,8 +88,6 @@ export const PLATFORM_SETTINGS_CATALOG = [
   },
 
   // Monetization
-  { key: 'subscription_fee_enabled', label: 'Subscriptions Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true', public: true },
-  { key: 'subscription_trial_days', label: 'Subscription Trial Days', section: 'Monetization', type: 'number', defaultValue: '0', min: 0, max: 365 },
   { key: 'ad_revenue_enabled', label: 'Ad Revenue Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true' },
   { key: 'ad_revenue_share_percent', label: 'Legacy Ad Share (%) — unused for preroll', section: 'Monetization', type: 'number', defaultValue: '0', min: 0, max: 100, description: 'Preroll uses flat reward per valid view (Ad Reward Settings).' },
   { key: 'ad_creator_reward_per_1k_views', label: 'Creator Reward per 1K Valid Views (USD)', section: 'Ad Reward Settings', type: 'number', defaultValue: '0.60', min: 0 },
@@ -93,8 +96,11 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'ad_reward_fraud_protection', label: 'Fraud Protection', section: 'Ad Reward Settings', type: 'toggle', defaultValue: 'true' },
   { key: 'ad_reward_max_daily_per_viewer', label: 'Max Rewards per Viewer / Day', section: 'Ad Reward Settings', type: 'number', defaultValue: '100', min: 1, max: 10000 },
   { key: 'ad_reward_min_complete_ms', label: 'Min Complete Duration (ms)', section: 'Ad Reward Settings', type: 'number', defaultValue: '1000', min: 0, max: 30000 },
-  { key: 'exoclick_vast_tag_url', label: 'ExoClick VAST Tag URL', section: 'Monetization', type: 'url', defaultValue: 'https://s.magsrv.com/v1/vast.php?idzone=5933056', public: true },
-  { key: 'vast_ad_timeout_sec', label: 'VAST Ad Load Timeout (sec)', section: 'Monetization', type: 'number', defaultValue: '8', min: 3, max: 30 },
+  { key: 'vast_enabled', label: 'Enable VAST Pre-roll Ads', section: 'Video Ad Settings', type: 'toggle', defaultValue: 'true', public: true },
+  { key: 'vast_provider', label: 'Active VAST Provider', section: 'Video Ad Settings', type: 'select', defaultValue: 'monetag', options: VAST_PROVIDER_OPTIONS, public: true },
+  { key: 'vast_url_custom', label: 'Custom VAST URL', section: 'Video Ad Settings', type: 'url', defaultValue: '' },
+  { key: 'exoclick_vast_tag_url', label: 'ExoClick VAST Tag URL', section: 'Monetization', type: 'url', defaultValue: 'https://s.magsrv.com/v1/vast.php?idz=5932212', public: true },
+  { key: 'vast_ad_timeout_sec', label: 'VAST Ad Load Timeout (sec)', section: 'Monetization', type: 'number', defaultValue: '5', min: 3, max: 30 },
   { key: 'vast_skip_after_seconds_default', label: 'Default Ad Skip After (sec)', section: 'Monetization', type: 'number', defaultValue: '5', min: 0, max: 30, public: true },
   { key: 'vast_estimated_cpm_usd', label: 'Estimated VAST CPM (USD) — platform gross', section: 'Ad Reward Settings', type: 'number', defaultValue: '2', min: 0, description: 'Used to estimate platform gross per valid view (CPM ÷ 1000).' },
   { key: 'ad_preroll_frequency_videos', label: 'Pre-roll Frequency (videos)', section: 'Monetization', type: 'number', defaultValue: '3', min: 1, max: 20, public: true },
@@ -120,7 +126,7 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'ad_feed_ads_enabled', label: 'Feed Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'ad_banner_ads_enabled', label: 'Banner Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'ad_allowed_placements', label: 'Allowed Placements (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["video_preroll","feed","native_card","between_content","sidebar","home_after_subheader_900x250","home_sidebar","home_softcore_160x600","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]' },
-  { key: 'ad_allowed_domains', label: 'Allowed Ad Domains (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["juicyads.com","www.juicyads.com","js.juicyads.com","poweredby.jads.co","jads.co","exoclick.com","magsrv.com","a.magsrv.com","s.magsrv.com","googleads.g.doubleclick.net","securepubads.g.doubleclick.net","googlesyndication.com","adtng.com","a.adtng.com","quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com"]' },
+  { key: 'ad_allowed_domains', label: 'Allowed Ad Domains (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["juicyads.com","www.juicyads.com","js.juicyads.com","poweredby.jads.co","jads.co","exoclick.com","magsrv.com","a.magsrv.com","s.magsrv.com","vast.yomeno.xyz","yomeno.xyz","googleads.g.doubleclick.net","securepubads.g.doubleclick.net","googlesyndication.com","adtng.com","a.adtng.com","quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]' },
   { key: 'juicyads_enabled', label: 'JuicyAds Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'juicyads_script_url', label: 'JuicyAds Script URL', section: 'Monetization', type: 'url', defaultValue: 'https://poweredby.jads.co/js/jads.js' },
   { key: 'juicyads_sidebar_zone_id', label: 'JuicyAds Sidebar Zone ID', section: 'Monetization', type: 'text', defaultValue: '1118510' },
@@ -137,7 +143,7 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'monetag_banner_zone_id', label: 'Monetag Banner Zone ID', section: 'Monetization', type: 'text', defaultValue: '242279' },
   { key: 'monetag_allowed_pages', label: 'Monetag Allowed Pages (JSON)', section: 'Monetization', type: 'json', defaultValue: '["home","video","creator","feed","search","live"]' },
   { key: 'monetag_allowed_slots', label: 'Monetag Allowed Slots (JSON)', section: 'Monetization', type: 'json', defaultValue: '["home_feed_native","home_mobile_inline_300x100","category_feed_native","feed_native","mobile_inline","category_feed","home_after_subheader_900x250","home_sidebar","home_bottom_900x250","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","homepage_top","homepage_bottom","leaderboard","banner"]' },
-  { key: 'monetag_allowed_domains', label: 'Monetag Allowed Domains (JSON)', section: 'Monetization', type: 'json', defaultValue: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com"]' },
+  { key: 'monetag_allowed_domains', label: 'Monetag Allowed Domains (JSON)', section: 'Monetization', type: 'json', defaultValue: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]' },
   { key: 'google_ad_manager_enabled', label: 'Google Ad Manager Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'false' },
   { key: 'coin_to_usd_rate', label: 'Coin to USD Rate', section: 'Monetization', type: 'number', defaultValue: '0.01', min: 0 },
   { key: 'video_purchase_creator_percent', label: 'Premium Video Creator Share (%)', section: 'Monetization', type: 'number', defaultValue: '70', min: 0, max: 100 },
@@ -184,6 +190,18 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'default_video_quality', label: 'Default Video Quality', section: 'Uploads', type: 'select', defaultValue: 'auto', options: QUALITY_OPTIONS, public: true },
   { key: 'max_video_quality', label: 'Max Video Quality', section: 'Uploads', type: 'select', defaultValue: '1080p', options: QUALITY_OPTIONS },
   { key: 'hls_transcoding_enabled', label: 'HLS Transcoding Enabled', section: 'Uploads', type: 'toggle', defaultValue: 'false' },
+
+  // Discovery feed
+  {
+    key: 'feed_videos_per_page',
+    label: 'Videos Per Feed Page',
+    section: 'Discovery Feed',
+    type: 'select',
+    defaultValue: '100',
+    options: FEED_PAGE_SIZE_OPTIONS.map(String),
+    public: true,
+    description: 'Controls public homepage, category, and search feed pagination. Minimum is 100 videos per page.',
+  },
 
   // Verification and creator onboarding
   { key: 'registration_open', label: 'Registration Open', section: 'Verification', type: 'toggle', defaultValue: 'true', public: true },
@@ -458,6 +476,44 @@ export async function getPublicPlatformSettings() {
   );
 }
 
+function normalizeVastPlaybackUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:') return '';
+    url.username = '';
+    url.password = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+export function resolveVastSettingsFromMap(map = {}) {
+  const rawProvider = String(map.vast_provider || 'monetag').trim().toLowerCase();
+  const provider = VAST_PROVIDER_OPTIONS.includes(rawProvider) ? rawProvider : 'monetag';
+  const url = provider === 'custom'
+    ? normalizeVastPlaybackUrl(map.vast_url_custom)
+    : VAST_PROVIDER_URLS[provider];
+  const revenueEnabled = normalizeBoolean(map.ad_revenue_enabled ?? 'true') === 'true';
+  const prerollEnabled = normalizeBoolean(map.ad_preroll_enabled ?? 'true') === 'true';
+  const vastEnabled = normalizeBoolean(map.vast_enabled ?? 'true') === 'true';
+
+  return {
+    enabled: Boolean(url) && revenueEnabled && prerollEnabled && vastEnabled,
+    provider,
+    url,
+    customUrl: normalizeVastPlaybackUrl(map.vast_url_custom),
+    providers: VAST_PROVIDER_URLS,
+  };
+}
+
+export async function getResolvedVastSettings() {
+  const map = await getPlatformSettingsMap();
+  return resolveVastSettingsFromMap(map);
+}
+
 export async function getStringSetting(key, fallback = '') {
   const map = await getPlatformSettingsMap();
   return String(map[key] ?? fallback);
@@ -470,6 +526,17 @@ export async function getNumberSetting(key, fallback = 0) {
     : map[key];
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+export function normalizeFeedPageSize(value, fallback = 100) {
+  const requested = Number(value);
+  const fallbackValue = FEED_PAGE_SIZE_OPTIONS.includes(Number(fallback)) ? Number(fallback) : 100;
+  return FEED_PAGE_SIZE_OPTIONS.includes(requested) ? requested : fallbackValue;
+}
+
+export async function getFeedPageSizeSetting(fallback = 100) {
+  const value = await getNumberSetting('feed_videos_per_page', fallback);
+  return normalizeFeedPageSize(value, fallback);
 }
 
 export async function getBooleanSetting(key, fallback = false) {

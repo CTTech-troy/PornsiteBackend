@@ -32,7 +32,6 @@ const REGISTRY = [
   ['withdrawal_receipt_rejected', 'Withdrawal rejected receipt', 'Receipts', 'Invoice-style receipt for rejected withdrawals.'],
   ['payment_success', 'Payment success', 'Payments', 'Customer payment success receipt.'],
   ['payment_failure', 'Payment failure', 'Payments', 'Customer payment failure notice.'],
-  ['subscription_receipt', 'Subscription receipt', 'Subscriptions', 'Membership subscription receipt.'],
   ['premium_purchase_receipt', 'Premium purchase receipt', 'Premium', 'Receipt for premium video purchases.'],
   ['premium_sale_creator', 'Premium sale creator earning', 'Premium', 'Creator earning notification after a premium sale.'],
   ['gift_notification', 'Gift notification', 'Live', 'Creator gift received notice.'],
@@ -141,8 +140,8 @@ const SAMPLE_DATA = {
   },
   payment_success: {
     name: 'Member',
-    productName: 'Monthly Membership',
-    amountUsd: 19.99,
+    productName: '300 Coins',
+    amountUsd: 7.99,
     transactionId: 'PAY-2026-0042',
     paidAt: new Date().toISOString(),
     provider: 'Flutterwave',
@@ -150,20 +149,11 @@ const SAMPLE_DATA = {
   },
   payment_failure: {
     name: 'Member',
-    productName: 'Monthly Membership',
-    amountUsd: 19.99,
+    productName: '300 Coins',
+    amountUsd: 7.99,
     transactionId: 'PAY-2026-0043',
     failedAt: new Date().toISOString(),
     reason: 'The payment provider declined the transaction.',
-  },
-  subscription_receipt: {
-    name: 'Member',
-    planName: 'Creator Plus',
-    amountUsd: 19.99,
-    transactionId: 'SUB-9912',
-    periodStart: new Date().toISOString(),
-    periodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    status: 'Active',
   },
   premium_purchase_receipt: {
     name: 'Member',
@@ -620,28 +610,6 @@ const builders = {
       { type: 'notice', variant: 'danger', title: 'Reason', body: vars.reason || 'The payment provider declined the transaction.' },
     ],
     cta: { label: 'Try again', url: homeUrl() },
-  }),
-
-  subscription_receipt: (vars) => ({
-    subject: `Subscription receipt - ${vars.planName || 'Membership'}`,
-    title: 'Subscription receipt',
-    preheader: `Your ${vars.planName || 'membership'} subscription is ${vars.status || 'active'}.`,
-    eyebrow: 'Subscriptions',
-    heading: 'Subscription receipt',
-    badge: { label: vars.status || 'Active', variant: 'success' },
-    intro: `Hi ${vars.name || 'there'},\n\nThanks for subscribing. Your membership details are below.`,
-    sections: [{
-      type: 'keyValue',
-      title: 'Subscription',
-      rows: rows([
-        { label: 'Plan', value: vars.planName },
-        { label: 'Amount', value: formatUsd(vars.amountUsd) },
-        { label: 'Transaction ID', value: vars.transactionId },
-        { label: 'Period start', value: formatDateTime(vars.periodStart) },
-        { label: 'Period end', value: formatDateTime(vars.periodEnd) },
-      ]),
-    }],
-    cta: { label: 'Manage subscription', url: `${homeUrl()}/dashboard` },
   }),
 
   premium_purchase_receipt: (vars) => ({

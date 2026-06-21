@@ -5,8 +5,6 @@ const REVENUE_SETTING_KEYS = new Set([
   'creator_revenue_share_percent',
   'tax_percent',
   'withdrawal_fee_percent',
-  'subscription_platform_fee_percent',
-  'subscription_fee_percent',
   'processing_fee_percent',
   'min_payout_usd',
   'default_currency',

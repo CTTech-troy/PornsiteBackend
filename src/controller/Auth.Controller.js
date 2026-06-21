@@ -240,10 +240,7 @@ function buildAuthUserProfile({
     role,
     creator,
     creatorStatus,
-    isPremium:
-      firestoreProfile.isPremium === true ||
-      firestoreProfile.membership === 'active' ||
-      firestoreProfile.membershipStatus === 'active',
+    isPremium: firestoreProfile.isPremium === true,
     followers,
     following,
     tokenBalance,

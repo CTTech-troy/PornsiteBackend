@@ -4,16 +4,38 @@
  */
 import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
 import { fetchXnxxBestPage, isXnxxApiConfigured } from '../utils/xnxxRapidApi.js';
-import { fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
+import { countPublishedPublicVideos, fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
 import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
 import { loadExternalFeedConfig } from '../services/externalFeedConfig.service.js';
 import { buildStructuredFeedLayout } from '../services/feedLayout.service.js';
 import { encodeFeedCursor, decodeFeedCursor } from './videoFeed.controller.js';
+import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platformSettings.service.js';
 
 const MIN_PAGES = 1;
 const MAX_PAGES = 5;
-const DEFAULT_LIMIT = 10;
-const MAX_LIMIT = 30;
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
+const HOME_FEED_COUNT_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_COUNT_TIMEOUT_MS || 1200));
+const HOME_FEED_LAYOUT_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_LAYOUT_TIMEOUT_MS || 1200));
+const HOME_FEED_EXTERNAL_TIMEOUT_MS = Math.max(500, Number(process.env.HOME_FEED_EXTERNAL_TIMEOUT_MS || 2500));
+const HOME_FEED_CONFIG_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_CONFIG_TIMEOUT_MS || 1000));
+const HOME_FEED_SETTINGS_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_SETTINGS_TIMEOUT_MS || 1000));
+
+function withTimeout(promise, timeoutMs, fallback, label) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => {
+      timer = setTimeout(() => {
+        console.warn(`[homeFeed] ${label} timed out after ${timeoutMs}ms`);
+        resolve(fallback);
+      }, timeoutMs);
+      timer.unref?.();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 function pushUnique(out, seenIds, card) {
   if (!card) return;
@@ -44,10 +66,23 @@ function interleaveCreatorCards(creatorCards, defaultCards) {
  */
 export async function getHomeFeed(req, res) {
   try {
-    const feedConfig = await loadExternalFeedConfig();
+    const feedConfig = await withTimeout(
+      loadExternalFeedConfig(),
+      HOME_FEED_CONFIG_TIMEOUT_MS,
+      { enabled: false, pagesPerRequest: 1, mixCreatorsFirst: true, activeProvider: 'disabled' },
+      'external feed config',
+    );
     const cursorPage = decodeFeedCursor(req.query.cursor || null)?.page;
     const page = cursorPage || Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+    const adminPageSize = await withTimeout(
+      getFeedPageSizeSetting(DEFAULT_LIMIT),
+      HOME_FEED_SETTINGS_TIMEOUT_MS,
+      DEFAULT_LIMIT,
+      'feed page size setting',
+    );
+    const limit = req.query.limit == null
+      ? adminPageSize
+      : Math.min(MAX_LIMIT, normalizeFeedPageSize(parseInt(req.query.limit, 10), adminPageSize));
     const pagesFromQuery = parseInt(req.query.pages, 10);
     const pagesCount = Math.min(
       MAX_PAGES,
@@ -55,14 +90,27 @@ export async function getHomeFeed(req, res) {
     );
     const category = String(req.query.category || '').trim();
 
-    const creatorCards = await fetchPublishedHomeCards({ page, pagesCount, viewerUid: req.uid || null, category });
+    const [creatorCards, totalCount] = await Promise.all([
+      fetchPublishedHomeCards({ page, pagesCount, viewerUid: req.uid || null, category, limit }),
+      withTimeout(
+        countPublishedPublicVideos({ category }),
+        HOME_FEED_COUNT_TIMEOUT_MS,
+        null,
+        'public video count',
+      ),
+    ]);
     const defaultCards = [];
     const seenDefaultIds = new Set();
 
     if (!category && feedConfig.enabled && isXnxxApiConfigured()) {
       const pageNumbers = Array.from({ length: pagesCount }, (_, i) => page + i);
       for (const p of pageNumbers) {
-        const { ok, items } = await fetchXnxxBestPage(p);
+        const { ok, items } = await withTimeout(
+          fetchXnxxBestPage(p),
+          HOME_FEED_EXTERNAL_TIMEOUT_MS,
+          { ok: false, items: [] },
+          `external feed page ${p}`,
+        );
         if (!ok || !items?.length) continue;
         for (let i = 0; i < items.length; i++) {
           const card = items[i];
@@ -85,19 +133,27 @@ export async function getHomeFeed(req, res) {
     ingestHomeFeedVideos(sliced);
     let feedLayout = { items: sliced.map((video, index) => ({ type: 'video', key: `video:${video?.id || index}`, video, index })), meta: { device: 'desktop', adSlots: [], rules: [] } };
     try {
-      feedLayout = await buildStructuredFeedLayout({
-        videos: sliced,
-        req,
-        pageKey: category ? 'category' : 'home',
-        category,
-        seed: `${page}:${pagesCount}:${category || 'home'}`,
-      });
+      feedLayout = await withTimeout(
+        buildStructuredFeedLayout({
+          videos: sliced,
+          req,
+          pageKey: category ? 'category' : 'home',
+          category,
+          seed: `${page}:${pagesCount}:${category || 'home'}`,
+        }),
+        HOME_FEED_LAYOUT_TIMEOUT_MS,
+        feedLayout,
+        'structured feed layout',
+      );
     } catch (layoutErr) {
       console.warn('[homeFeed] feed layout fallback:', layoutErr?.message || layoutErr);
     }
 
-    const expectedPageSize = Math.min(200, Math.max(limit, 20 * pagesCount));
-    const hasMore = merged.length > limit || merged.length >= expectedPageSize;
+    const hasKnownTotal = Number.isFinite(Number(totalCount)) && Number(totalCount) > 0;
+    const estimatedTotal = ((page - 1) * limit) + sliced.length + (sliced.length >= limit ? limit : 0);
+    const total = hasKnownTotal ? Math.max(Number(totalCount), merged.length) : estimatedTotal;
+    const totalPages = total > 0 ? Math.max(1, Math.ceil(total / limit)) : 0;
+    const hasMore = totalPages > 0 ? page < totalPages : merged.length > limit;
     const nextPage = page + pagesCount;
     const nextCursor = hasMore ? encodeFeedCursor(nextPage) : null;
 
@@ -122,6 +178,8 @@ export async function getHomeFeed(req, res) {
       layout: feedLayout.items,
       adLayout: feedLayout.meta,
       hasMore,
+      total,
+      totalPages,
       nextPage,
       nextCursor,
       page,

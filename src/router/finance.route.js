@@ -3,11 +3,6 @@ import multer from 'multer';
 import { requireAdminAuth, requireFinanceAccess } from '../middleware/adminAuth.js';
 import {
   getFinanceSummary,
-  getMembershipPlansAdmin,
-  createMembershipPlan,
-  toggleMembershipPlan,
-  deleteMembershipPlan,
-  getSubscribers,
   getPaymentsAdmin,
   getPaymentHistoryAdmin,
   exportPaymentHistoryCsv,
@@ -61,15 +56,6 @@ router.use(requireFinanceAccess);
 // Finance Hub
 router.get('/summary', getFinanceSummary);
 router.get('/activity', getFinanceActivityAdmin);
-
-// Membership Plans
-router.get('/membership-plans', getMembershipPlansAdmin);
-router.post('/membership-plans', createMembershipPlan);
-router.put('/membership-plans/:id/toggle', toggleMembershipPlan);
-router.delete('/membership-plans/:id', deleteMembershipPlan);
-
-// Subscribers
-router.get('/subscribers', getSubscribers);
 
 // Payments
 router.get('/payment-history', getPaymentHistoryAdmin);

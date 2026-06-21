@@ -21,10 +21,13 @@ const QUGE5_HOST_PATTERN = /quge5\.com/i;
 export const EXOCLICK_DISPLAY_SCRIPT_URL = 'https://a.magsrv.com/ad-provider.js';
 export const EXOCLICK_DISPLAY_ZONE_ID = '5933054';
 export const EXOCLICK_DISPLAY_INS_CLASS = 'eas6a97888e6';
-export const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
-export const EXOCLICK_VAST_ZONE_ID = '5933056';
-const LEGACY_EXOCLICK_VAST_ZONE_ID = '5932212';
-const LEGACY_EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
+export const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+export const EXOCLICK_VAST_ZONE_ID = '5932212';
+const LEGACY_EXOCLICK_VAST_ZONE_IDS = new Set(['5932212', '5933056']);
+const LEGACY_EXOCLICK_VAST_TAG_URLS = new Set([
+  'https://s.magsrv.com/v1/vast.php?idzone=5932212',
+  'https://s.magsrv.com/v1/vast.php?idzone=5933056',
+]);
 const EXOCLICK_DISPLAY_CONFIG = {
   insClass: EXOCLICK_DISPLAY_INS_CLASS,
   keywords: 'keywords',
@@ -255,7 +258,7 @@ function normalizeExoClickZone(zone) {
   if (zone.placement === 'video_preroll') {
     const zoneId = String(zone.zone_id || zone.zoneId || '');
     const tagUrl = String(zone.tag_url || zone.tagUrl || '');
-    if (zoneId === LEGACY_EXOCLICK_VAST_ZONE_ID || tagUrl === LEGACY_EXOCLICK_VAST_TAG_URL) {
+    if (LEGACY_EXOCLICK_VAST_ZONE_IDS.has(zoneId) || LEGACY_EXOCLICK_VAST_TAG_URLS.has(tagUrl)) {
       return {
         ...zone,
         zone_id: EXOCLICK_VAST_ZONE_ID,
@@ -405,7 +408,7 @@ export async function getPublicAdConfig() {
       })),
     })),
     vast: {
-      timeoutSec: Number(settings.vast_ad_timeout_sec || 8),
+      timeoutSec: Number(settings.vast_ad_timeout_sec || 5),
       skipAfterSeconds: Number(settings.vast_skip_after_seconds_default || 5),
       estimatedCpmUsd: Number(settings.vast_estimated_cpm_usd || 2),
     },
@@ -472,7 +475,7 @@ export async function getAuditLog(limit = 50) {
 
 function getDefaultProviders() {
   return [
-    { id: 'exoclick', name: 'ExoClick', slug: 'exoclick', provider_type: 'vast', is_enabled: true, is_maintenance: false, priority: 10, script_url: null, config: { displayScriptUrl: EXOCLICK_DISPLAY_SCRIPT_URL, displayZoneId: EXOCLICK_DISPLAY_ZONE_ID, ...EXOCLICK_DISPLAY_CONFIG }, estimated_cpm_usd: 2, skip_after_seconds: 5, skippable: true, ad_frequency: 3, retry_limit: 2, timeout_ms: 8000, last_health_status: 'unknown', impressions: 0, clicks: 0, failed_requests: 0, revenue_usd: 0 },
+    { id: 'exoclick', name: 'ExoClick', slug: 'exoclick', provider_type: 'vast', is_enabled: true, is_maintenance: false, priority: 10, script_url: null, config: { displayScriptUrl: EXOCLICK_DISPLAY_SCRIPT_URL, displayZoneId: EXOCLICK_DISPLAY_ZONE_ID, vastZoneId: EXOCLICK_VAST_ZONE_ID, vastTagUrl: EXOCLICK_VAST_TAG_URL, ...EXOCLICK_DISPLAY_CONFIG }, estimated_cpm_usd: 2, skip_after_seconds: 5, skippable: true, ad_frequency: 3, retry_limit: 2, timeout_ms: 5000, last_health_status: 'unknown', impressions: 0, clicks: 0, failed_requests: 0, revenue_usd: 0 },
     { id: 'juicyads', name: 'JuicyAds', slug: 'juicyads', provider_type: 'display', is_enabled: true, is_maintenance: false, priority: 20, script_url: 'https://poweredby.jads.co/js/jads.js', config: { queueKey: 'adsbyjuicy', defaultZoneId: '1118510', defaultWidth: 300, defaultHeight: 250 }, estimated_cpm_usd: 1.5, skip_after_seconds: 5, skippable: true, ad_frequency: 3, retry_limit: 2, timeout_ms: 8000, last_health_status: 'unknown', impressions: 0, clicks: 0, failed_requests: 0, revenue_usd: 0 },
     { id: 'monetag', name: 'Monetag', slug: 'monetag', provider_type: 'display', is_enabled: true, is_maintenance: false, priority: 30, script_url: APPROVED_MONETAG_SCRIPT_URL, config: { safeMode: true, sandboxed: true, allowedFormats: ['native', 'banner', 'display'] }, estimated_cpm_usd: 1.2, skip_after_seconds: 5, skippable: true, ad_frequency: 3, retry_limit: 2, timeout_ms: 8000, last_health_status: 'unknown', impressions: 0, clicks: 0, failed_requests: 0, revenue_usd: 0 },
     { id: 'google_ad_manager', name: 'Google Ad Manager', slug: 'google_ad_manager', provider_type: 'gam', is_enabled: false, is_maintenance: false, priority: 40, script_url: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js', config: {}, estimated_cpm_usd: 3, skip_after_seconds: 5, skippable: true, ad_frequency: 3, retry_limit: 2, timeout_ms: 8000, last_health_status: 'unknown', impressions: 0, clicks: 0, failed_requests: 0, revenue_usd: 0 },

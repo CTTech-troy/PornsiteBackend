@@ -83,6 +83,8 @@ const SAFE_AD_DOMAINS = [
   'magsrv.com',
   'a.magsrv.com',
   's.magsrv.com',
+  'vast.yomeno.xyz',
+  'yomeno.xyz',
   'googleads.g.doubleclick.net',
   'securepubads.g.doubleclick.net',
   'googlesyndication.com',
@@ -95,6 +97,7 @@ const SAFE_AD_DOMAINS = [
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
+  '5gvci.com',
 ];
 const SAFE_AD_DOMAINS_JSON = JSON.stringify(SAFE_AD_DOMAINS);
 const SAFE_PROVIDER_PRIORITY_JSON = JSON.stringify(['exoclick', 'juicyads', 'monetag', 'google_ad_manager']);
@@ -140,7 +143,7 @@ function defaultZoneDimensions(placement) {
   const specs = {
     video_preroll: { width: 1920, height: 1080 },
     sidebar: { width: 300, height: 250 },
-    home_after_subheader_900x250: { width: 900, height: 250 },
+    home_after_subheader_900x250: { width: 728, height: 90 },
     home_sidebar: { width: 300, height: 250 },
     home_softcore_160x600: { width: 160, height: 600 },
     feed_native: { width: 300, height: 250 },

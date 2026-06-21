@@ -48,6 +48,10 @@ function clampRisk(value) {
   return Math.max(0, Math.min(100, Math.round(number(value) * 100) / 100));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function severityFromRisk(score) {
   if (score >= DEFAULT_THRESHOLDS.critical) return 'critical';
   if (score >= DEFAULT_THRESHOLDS.alert) return 'high';
@@ -568,50 +572,49 @@ export async function recordModerationSignal({
   return { event, alert };
 }
 
-async function callInferenceService(task) {
+async function callAiService(path, task) {
   const baseUrl = String(process.env.AI_MODERATION_SERVICE_URL || '').replace(/\/+$/, '');
   if (!baseUrl) return null;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), readPositiveInteger('AI_MODERATION_SERVICE_TIMEOUT_MS', 12000));
-  try {
-    const res = await fetch(`${baseUrl}/v1/moderate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(process.env.AI_WORKER_API_KEY ? { 'X-AI-Worker-Key': process.env.AI_WORKER_API_KEY } : {}),
-      },
-      body: JSON.stringify(task),
-      signal: controller.signal,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || data.error || `AI service returned ${res.status}`);
-    return data;
-  } finally {
-    clearTimeout(timeout);
+
+  const retries = readPositiveInteger('AI_MODERATION_SERVICE_RETRIES', 2);
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), readPositiveInteger('AI_MODERATION_SERVICE_TIMEOUT_MS', 12000));
+    try {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(process.env.AI_WORKER_API_KEY ? { 'X-AI-Worker-Key': process.env.AI_WORKER_API_KEY } : {}),
+        },
+        body: JSON.stringify(task),
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `AI service returned ${res.status}`);
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) break;
+      await sleep(Math.min(1500, 150 * 2 ** attempt));
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw lastError || new Error('AI service request failed.');
+}
+
+async function callInferenceService(task) {
+  const result = await callAiService('/v1/moderate', task);
+  if (!result) throw new Error('AI moderation service not configured.');
+  return result;
 }
 
 async function callTrainingService(task) {
   const baseUrl = String(process.env.AI_MODERATION_SERVICE_URL || '').replace(/\/+$/, '');
   if (!baseUrl) return { queued: false, reason: 'AI moderation service not configured.' };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), readPositiveInteger('AI_MODERATION_SERVICE_TIMEOUT_MS', 12000));
-  try {
-    const res = await fetch(`${baseUrl}/v1/retrain`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(process.env.AI_WORKER_API_KEY ? { 'X-AI-Worker-Key': process.env.AI_WORKER_API_KEY } : {}),
-      },
-      body: JSON.stringify(task),
-      signal: controller.signal,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || data.error || `AI service returned ${res.status}`);
-    return data;
-  } finally {
-    clearTimeout(timeout);
-  }
+  return callAiService('/v1/retrain', task);
 }
 
 export async function processAiModerationTask(task = {}, { io = null } = {}) {

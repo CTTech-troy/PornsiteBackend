@@ -5,7 +5,7 @@ import {
   getPriorityOrder,
   invalidateConfigCache,
 } from './adProvider.service.js';
-import { getPlatformSettingsMap } from './platformSettings.service.js';
+import { getPlatformSettingsMap, resolveVastSettingsFromMap } from './platformSettings.service.js';
 import { isApprovedMonetagScriptUrl } from './safeAdPolicy.service.js';
 import { verifyJuicyAdsCspPolicy } from '../utils/juicyAdsCspVerify.js';
 
@@ -17,6 +17,8 @@ const ALLOWED_SCRIPT_HOSTS = [
   'a.magsrv.com',
   's.magsrv.com',
   'magsrv.com',
+  'vast.yomeno.xyz',
+  'yomeno.xyz',
   'securepubads.g.doubleclick.net',
   'googlesyndication.com',
   'quge5.com',
@@ -25,11 +27,15 @@ const ALLOWED_SCRIPT_HOSTS = [
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
+  '5gvci.com',
 ];
 const BLOCKED_SCRIPT_PATTERN =
   /adserver\.juicyads\.com|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|window\.open|top\.location|betway|casino|popads|popcash|propellerads|onclickads/i;
-const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
-const LEGACY_EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5932212';
+const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+const LEGACY_EXOCLICK_VAST_TAG_URLS = new Set([
+  'https://s.magsrv.com/v1/vast.php?idzone=5932212',
+  'https://s.magsrv.com/v1/vast.php?idzone=5933056',
+]);
 
 let scanTimer = null;
 
@@ -49,9 +55,34 @@ export function isAllowedAdUrl(url) {
   }
 }
 
-export async function probeVastTag(tagUrl, timeoutMs = 8000) {
+function isPrivateOrLocalHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host.endsWith('.local')) return true;
+  if (host === '::1' || host === '0.0.0.0') return true;
+  if (/^127\./.test(host) || /^10\./.test(host) || /^169\.254\./.test(host)) return true;
+  if (/^192\.168\./.test(host)) return true;
+  const match172 = host.match(/^172\.(\d{1,3})\./);
+  if (match172) {
+    const octet = Number(match172[1]);
+    if (octet >= 16 && octet <= 31) return true;
+  }
+  return false;
+}
+
+function isAllowedVastProbeUrl(url) {
+  if (!url) return false;
+  if (BLOCKED_SCRIPT_PATTERN.test(String(url).toLowerCase())) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !isPrivateOrLocalHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export async function probeVastTag(tagUrl, timeoutMs = 5000) {
   const start = Date.now();
-  if (!tagUrl || !isAllowedAdUrl(tagUrl)) {
+  if (!tagUrl || !isAllowedVastProbeUrl(tagUrl)) {
     return { status: 'failed', responseMs: 0, errorCode: 'invalid_url', errorMessage: 'Tag URL not allowed' };
   }
   const controller = new AbortController();
@@ -73,6 +104,9 @@ export async function probeVastTag(tagUrl, timeoutMs = 8000) {
     }
     if (!/<VAST/i.test(trimmed) && !/<vast/i.test(trimmed)) {
       return { status: 'degraded', responseMs, errorCode: 'invalid_vast', errorMessage: 'Response is not valid VAST XML' };
+    }
+    if (!/<Ad(?=[\s>])/i.test(trimmed)) {
+      return { status: 'failed', responseMs, errorCode: 'empty_vast', errorMessage: 'VAST response has no Ad blocks' };
     }
     return { status: 'healthy', responseMs, diagnostics: { bytes: trimmed.length } };
   } catch (err) {
@@ -117,18 +151,21 @@ export async function probeScriptUrl(scriptUrl, timeoutMs = 8000) {
 
 function normalizeExoClickVastUrl(url) {
   const value = String(url || '').trim();
-  return value === LEGACY_EXOCLICK_VAST_TAG_URL ? EXOCLICK_VAST_TAG_URL : value;
+  return LEGACY_EXOCLICK_VAST_TAG_URLS.has(value) ? EXOCLICK_VAST_TAG_URL : value;
 }
 
 export async function scanProvider(provider, checkType = 'scheduled') {
   let result;
   if (provider.provider_type === 'vast') {
+    const settings = await getPlatformSettingsMap();
+    const activeVast = resolveVastSettingsFromMap(settings);
     const zones = await import('./adProvider.service.js').then((m) => m.listZones(provider.id));
-    const tagUrl = normalizeExoClickVastUrl(zones.find((z) => z.placement === 'video_preroll' && z.tag_url)?.tag_url
+    const tagUrl = normalizeExoClickVastUrl(activeVast.url
+      || zones.find((z) => z.placement === 'video_preroll' && z.tag_url)?.tag_url
       || zones.find((z) => /\/vast\.php|vast/i.test(String(z.tag_url || '')))?.tag_url
       || process.env.EXOCLICK_VAST_TAG_URL
       || EXOCLICK_VAST_TAG_URL);
-    result = await probeVastTag(tagUrl, provider.timeout_ms || 8000);
+    result = await probeVastTag(tagUrl, provider.timeout_ms || 5000);
   } else if (provider.script_url) {
     result = await probeScriptUrl(provider.script_url, provider.timeout_ms || 8000);
   } else {

@@ -78,6 +78,10 @@ export const AD_PAGE_DEFINITIONS = [
 const FOOTER_BANNER_WIDTH = 900;
 const FOOTER_BANNER_HEIGHT = 250;
 const HOME_AFTER_SUBHEADER_SLOT_KEY = 'home_after_subheader_900x250';
+const HOME_AFTER_SUBHEADER_BANNER_NAME = 'Home After Subheader Banner 728x90';
+const HOME_AFTER_SUBHEADER_BANNER_WIDTH = 728;
+const HOME_AFTER_SUBHEADER_BANNER_HEIGHT = 90;
+const HOME_AFTER_SUBHEADER_BANNER_SIZE = '728x90';
 const SLOT_LOCATIONS = new Set([
   'sidebar',
   'recommended',
@@ -106,6 +110,33 @@ function normalizeSlotLocation(value) {
   return SLOT_LOCATIONS.has(location) ? location : 'sidebar';
 }
 
+function isHomeAfterSubheaderSlot(slot = {}, location = null) {
+  const resolvedLocation = String(location || slot.location || '').toLowerCase();
+  return (
+    slot.slot_key === HOME_AFTER_SUBHEADER_SLOT_KEY ||
+    slot.slotKey === HOME_AFTER_SUBHEADER_SLOT_KEY ||
+    (String(slot.page || '').toLowerCase() === 'home' && resolvedLocation === 'after_subheader')
+  );
+}
+
+function normalizeHomeAfterSubheaderSlot(slot = {}) {
+  if (!isHomeAfterSubheaderSlot(slot)) return slot;
+  return {
+    ...slot,
+    slot_key: HOME_AFTER_SUBHEADER_SLOT_KEY,
+    name: HOME_AFTER_SUBHEADER_BANNER_NAME,
+    page: 'home',
+    location: 'after_subheader',
+    width: HOME_AFTER_SUBHEADER_BANNER_WIDTH,
+    height: HOME_AFTER_SUBHEADER_BANNER_HEIGHT,
+    size_label: HOME_AFTER_SUBHEADER_BANNER_SIZE,
+    provider_type: slot.provider_type || 'custom',
+    provider_id: slot.provider_id || 'juicyads',
+    display_mode: slot.display_mode || 'custom_only',
+    device_target: slot.device_target || 'all',
+  };
+}
+
 function slotDimensionLimits(location) {
   if (['before_footer', 'after_subheader', 'homepage_top', 'homepage_bottom', 'sticky_banner'].includes(location)) {
     return { width: 970, height: 280 };
@@ -116,6 +147,12 @@ function slotDimensionLimits(location) {
 }
 
 function normalizeSlotDimensions(slot, location) {
+  if (isHomeAfterSubheaderSlot(slot, location)) {
+    return {
+      width: HOME_AFTER_SUBHEADER_BANNER_WIDTH,
+      height: HOME_AFTER_SUBHEADER_BANNER_HEIGHT,
+    };
+  }
   const limits = slotDimensionLimits(location);
   return {
     width: Math.min(Number(slot.width) || 300, limits.width),
@@ -229,6 +266,9 @@ function isSafeAdSlot(slot) {
   const location = normalizeSlotLocation(slot.location);
   const width = Number(slot.width) || 300;
   const height = Number(slot.height) || 250;
+  if (isHomeAfterSubheaderSlot(slot, location)) {
+    return width <= HOME_AFTER_SUBHEADER_BANNER_WIDTH && height <= HOME_AFTER_SUBHEADER_BANNER_HEIGHT;
+  }
   if (['before_footer', 'after_subheader', 'homepage_top', 'homepage_bottom', 'sticky_banner'].includes(location)) {
     return width <= 970 && height <= 280;
   }
@@ -255,27 +295,28 @@ export async function getAdSlotByKey(slotKey) {
 export async function upsertAdSlot(slot, admin = null) {
   if (!supabase) throw new Error('Database unavailable');
   const location = normalizeSlotLocation(slot.location);
+  const isHomeAfterSubheader = isHomeAfterSubheaderSlot(slot, location);
   const dimensions = normalizeSlotDimensions(slot, location);
   const row = {
-    slot_key: slot.slot_key,
-    name: slot.name,
-    page: slot.page,
-    location,
+    slot_key: isHomeAfterSubheader ? HOME_AFTER_SUBHEADER_SLOT_KEY : slot.slot_key,
+    name: isHomeAfterSubheader ? HOME_AFTER_SUBHEADER_BANNER_NAME : slot.name,
+    page: isHomeAfterSubheader ? 'home' : slot.page,
+    location: isHomeAfterSubheader ? 'after_subheader' : location,
     width: dimensions.width,
     height: dimensions.height,
-    size_label: slot.size_label || `${dimensions.width}x${dimensions.height}`,
-    provider_type: slot.provider_type || 'mixed',
+    size_label: isHomeAfterSubheader ? HOME_AFTER_SUBHEADER_BANNER_SIZE : (slot.size_label || `${dimensions.width}x${dimensions.height}`),
+    provider_type: isHomeAfterSubheader ? 'custom' : (slot.provider_type || 'mixed'),
     provider_id: ['juicyads', 'monetag', 'exoclick', 'google_ad_manager'].includes(String(slot.provider_id || '').toLowerCase())
       ? String(slot.provider_id).toLowerCase()
       : (slot.provider_id || 'juicyads'),
     zone_id: slot.zone_id || null,
     embed_code: slot.embed_code || null,
     custom_enabled: slot.custom_enabled !== false,
-    third_party_enabled: slot.third_party_enabled !== false,
-    display_mode: slot.display_mode || 'custom_first',
+    third_party_enabled: isHomeAfterSubheader ? false : slot.third_party_enabled !== false,
+    display_mode: isHomeAfterSubheader ? 'custom_only' : (slot.display_mode || 'custom_first'),
     is_active: slot.is_active !== false,
     priority: Number(slot.priority) || 100,
-    device_target: slot.device_target || 'desktop',
+    device_target: isHomeAfterSubheader ? 'all' : (slot.device_target || 'desktop'),
     frequency_cap: Number(slot.frequency_cap) || 0,
     schedule_start: slot.schedule_start || null,
     schedule_end: slot.schedule_end || null,
@@ -524,7 +565,7 @@ export async function incrementSlotStats(slotKey, { impressions = 0, clicks = 0 
 
 function getDefaultSlots() {
   return [
-    { slot_key: HOME_AFTER_SUBHEADER_SLOT_KEY, name: 'Home After Subheader Banner 900x250', page: 'home', location: 'after_subheader', width: FOOTER_BANNER_WIDTH, height: FOOTER_BANNER_HEIGHT, size_label: '900x250', provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: true, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_only', device_target: 'all', priority: 8, impressions: 0, clicks: 0, config: {} },
+    { slot_key: HOME_AFTER_SUBHEADER_SLOT_KEY, name: HOME_AFTER_SUBHEADER_BANNER_NAME, page: 'home', location: 'after_subheader', width: HOME_AFTER_SUBHEADER_BANNER_WIDTH, height: HOME_AFTER_SUBHEADER_BANNER_HEIGHT, size_label: HOME_AFTER_SUBHEADER_BANNER_SIZE, provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: true, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_only', device_target: 'all', priority: 8, impressions: 0, clicks: 0, config: {} },
     { slot_key: 'home_feed_native', name: 'Home Feed Native Card', page: 'home', location: 'feed_native', width: 300, height: 250, size_label: '300x250', provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: true, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_first', device_target: 'all', priority: 9, frequency_cap: 6, impressions: 0, clicks: 0, config: { placement_type: 'feed_native', insertion_frequency: 6, start_after: 6, max_per_page: 4, card_size: '300x250' } },
     { slot_key: 'home_sidebar', name: 'Home Sidebar MPU', page: 'home', location: 'sidebar', width: 300, height: 250, size_label: '300x250', provider_type: 'mixed', provider_id: 'monetag', zone_id: APPROVED_MONETAG_ZONE_ID, is_active: true, custom_enabled: true, third_party_enabled: true, display_mode: 'third_party_first', device_target: 'all', priority: 10, impressions: 0, clicks: 0, config: {} },
     { slot_key: 'home_right_leaderboard_728x90', name: 'Home Right Rail Leaderboard 728x90', page: 'home', location: 'sidebar', width: 728, height: 90, size_label: '728x90', provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: false, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_only', device_target: 'desktop', priority: 11, impressions: 0, clicks: 0, config: { placement_type: 'homepage_banner' } },
@@ -575,7 +616,7 @@ function mergeDefaultSlots(rows = []) {
     const existing = byKey.get(slot.slot_key) || {};
     const location = normalizeSlotLocation(slot.location || existing.location);
     const dimensions = normalizeSlotDimensions({ ...existing, ...slot }, location);
-    byKey.set(slot.slot_key, {
+    const merged = {
       ...existing,
       ...slot,
       location,
@@ -590,7 +631,8 @@ function mergeDefaultSlots(rows = []) {
       display_mode: slot.display_mode || existing.display_mode || 'third_party_first',
       device_target: slot.device_target || existing.device_target || 'all',
       config: parseSlotConfig(slot),
-    });
+    };
+    byKey.set(slot.slot_key, normalizeHomeAfterSubheaderSlot(merged));
   }
   return [...byKey.values()].sort((a, b) => Number(a.priority || 100) - Number(b.priority || 100));
 }

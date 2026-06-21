@@ -10,22 +10,28 @@ import {
   suggestSearchQueries,
 } from '../services/searchIndex.service.js';
 import { fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
+import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platformSettings.service.js';
 
 export async function searchVideos(req, res) {
   try {
     const q = String(req.query.q || '').trim();
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const adminPageSize = await getFeedPageSizeSetting(100);
+    const limit = req.query.limit == null
+      ? adminPageSize
+      : Math.min(500, normalizeFeedPageSize(parseInt(req.query.limit, 10), adminPageSize));
     const contentSource = req.query.source || null;
     const premium = req.query.premium === 'true';
 
     if (!q) {
-      const cards = await fetchPublishedHomeCards({ page, pagesCount: 1, viewerUid: req.uid || null });
+      const cards = await fetchPublishedHomeCards({ page, pagesCount: 1, viewerUid: req.uid || null, limit });
       return res.json({
         success: true,
         data: cards,
         hasMore: cards.length >= limit,
         page,
+        total: cards.length,
+        totalPages: cards.length ? Math.ceil(cards.length / limit) : 0,
       });
     }
 
@@ -63,6 +69,7 @@ export async function searchVideos(req, res) {
       hasMore: platform.hasMore || merged.length >= limit,
       page,
       total: platform.total,
+      totalPages: platform.total ? Math.ceil(platform.total / limit) : 0,
     });
   } catch (err) {
     console.error('[search] searchVideos error:', err?.message || err);

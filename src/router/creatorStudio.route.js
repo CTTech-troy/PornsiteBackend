@@ -19,7 +19,6 @@ import {
   getContentAnalytics,
   getAudience,
   getRevenueReport,
-  getSubscriptions,
   getVerification,
   updateVideo,
   getAnnouncements,
@@ -52,7 +51,6 @@ router.post('/notifications/read-all', markAllNotificationsRead);
 router.get('/content-analytics', getContentAnalytics);
 router.get('/audience', getAudience);
 router.get('/revenue-report', getRevenueReport);
-router.get('/subscriptions', getSubscriptions);
 router.get('/verification', getVerification);
 router.get('/announcements', getAnnouncements);
 router.get('/activity', getActivity);

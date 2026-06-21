@@ -105,20 +105,22 @@ function mapVideo(row) {
   const resolvedDuration =
     Number(row.duration_seconds ?? row.duration ?? row.duration_sec ?? 0) || 0;
   const tokenPrice = Number(row.token_price || row.coin_price || 0);
-  const accessType = String(row.access_type || '').trim().toLowerCase().replace(/-/g, '_')
+  const rawAccessType = String(row.access_type || '').trim().toLowerCase().replace(/-/g, '_')
     || (row.is_premium_content === true || tokenPrice > 0 ? 'premium' : 'free');
-  const requiresMembership = row.requires_membership === true || accessType === 'members_only';
-  const subscriptionAccess = row.subscription_access === true || accessType === 'members_only';
+  const legacyCoinGate = row.requires_membership === true || row.subscription_access === true || rawAccessType === 'members_only';
+  const accessType = legacyCoinGate ? 'coin_unlock' : rawAccessType;
   const isPremiumContent =
     row.is_premium_content === true ||
     tokenPrice > 0 ||
-    ['premium', 'members_only', 'coin_unlock'].includes(accessType) ||
-    requiresMembership ||
-    subscriptionAccess;
+    ['premium', 'coin_unlock'].includes(accessType) ||
+    legacyCoinGate;
   return annotatePlayableVideo({
     id:                     row.video_id,
     videoId:                row.video_id,
-    userId:                 row.user_id,
+    userId:                 row.user_id || row.creator_id,
+    user_id:                row.user_id || row.creator_id,
+    creatorId:              row.creator_id || row.user_id,
+    creator_id:             row.creator_id || row.user_id,
     title:                  row.title                  || '',
     description:            row.description            || '',
     mainOrientationCategory: row.main_orientation_category || '',
@@ -146,8 +148,8 @@ function mapVideo(row) {
     tokenPrice,
     accessType,
     premiumVisibility:      row.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership,
-    subscriptionAccess,
+    requiresMembership:       false,
+    subscriptionAccess:       false,
     officialCompanyContent: row.official_company_content === true,
     totalLikes:             Number(row.likes_count     || 0),
     totalComments:          Number(row.comments_count  || 0),
@@ -587,6 +589,7 @@ export async function publishFromStoragePath(req, res) {
     const insertRow = {
       video_id:                 videoId,
       user_id:                  uid,
+      creator_id:               uid,
       storage_url:              videoUrl,
       stream_url:               videoUrl,
       title,
@@ -726,6 +729,7 @@ export async function uploadAndPublish(req, res) {
     const insertRow = {
       video_id:                 videoId,
       user_id:                  uid,
+      creator_id:               uid,
       storage_url:              videoUrl,
       stream_url:               videoUrl,
       title,
@@ -1201,23 +1205,22 @@ function normalizePurchasablePublicVideo(row = {}, fallbackId = '') {
     row.coinPrice ??
     0
   ) || 0;
-  const accessType = String(row.access_type || row.accessType || '').trim().toLowerCase().replace(/-/g, '_')
+  const rawAccessType = String(row.access_type || row.accessType || '').trim().toLowerCase().replace(/-/g, '_')
     || (row.requires_membership === true || row.requiresMembership === true
-      ? 'members_only'
+      ? 'coin_unlock'
       : tokenPrice > 0
         ? 'coin_unlock'
         : 'free');
-  const requiresMembership = row.requires_membership === true || row.requiresMembership === true || accessType === 'members_only';
-  const subscriptionAccess = row.subscription_access === true || row.subscriptionAccess === true || accessType === 'members_only';
+  const legacyCoinGate = row.requires_membership === true || row.requiresMembership === true || row.subscription_access === true || row.subscriptionAccess === true || rawAccessType === 'members_only';
+  const accessType = legacyCoinGate ? 'coin_unlock' : rawAccessType;
   const isPremiumContent =
     row.is_premium_content === true ||
     row.isPremiumContent === true ||
     row.isPremium === true ||
     row.premium === true ||
     tokenPrice > 0 ||
-    ['premium', 'members_only', 'coin_unlock'].includes(accessType) ||
-    requiresMembership ||
-    subscriptionAccess;
+    ['premium', 'coin_unlock'].includes(accessType) ||
+    legacyCoinGate;
 
   return {
     publicVideoId,
@@ -1229,8 +1232,8 @@ function normalizePurchasablePublicVideo(row = {}, fallbackId = '') {
     tokenPrice,
     accessType,
     premiumVisibility: row.premium_visibility || row.premiumVisibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership,
-    subscriptionAccess,
+    requiresMembership: false,
+    subscriptionAccess: false,
     publiclyListed: row.video_id ? isPubliclyListedRow(row) : row.isLive !== false,
   };
 }

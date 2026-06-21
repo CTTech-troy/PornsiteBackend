@@ -9,7 +9,6 @@ const MAX_EXPORT_ROWS = 5000;
 
 const PAYMENT_TYPES = new Set([
   'coin_purchase',
-  'membership_purchase',
   'creator_video_purchase',
   'creator_payout',
 ]);
@@ -101,15 +100,6 @@ async function fetchUsers(ids) {
   return new Map(rows.map((row) => [String(row.id), row]));
 }
 
-async function fetchMembershipPlans(ids) {
-  const unique = [...new Set(ids.filter(Boolean).map(String))].slice(0, 500);
-  if (!unique.length) return new Map();
-  const rows = await safeRows('membership_plans', (from) => from
-    .select('id,name,duration_days,price_usd,coins')
-    .in('id', unique));
-  return new Map(rows.map((row) => [String(row.id), row]));
-}
-
 async function fetchVideos(ids) {
   const unique = [...new Set(ids.filter(Boolean).map(String))].slice(0, 500);
   if (!unique.length) return new Map();
@@ -123,7 +113,7 @@ function normalizeStatus(status, type = '') {
   const raw = lower(status);
   if (!raw) return 'pending';
   if (['completed', 'complete', 'fulfilled', 'paid', 'success', 'successful', 'active', 'grace', 'verified'].includes(raw)) {
-    return 'completed';
+    return 'success';
   }
   if (['pending', 'created', 'checkout_created', 'processing', 'approved', 'queued', 'in_review'].includes(raw)) {
     return 'pending';
@@ -132,7 +122,7 @@ function normalizeStatus(status, type = '') {
     return 'refunded';
   }
   if (['cancelled', 'canceled', 'void', 'expired', 'revoked'].includes(raw)) {
-    return type === 'membership_purchase' && raw === 'expired' ? 'completed' : 'cancelled';
+    return 'cancelled';
   }
   if (['failed', 'declined', 'suspicious', 'rejected', 'error'].includes(raw)) {
     return 'failed';
@@ -143,6 +133,10 @@ function normalizeStatus(status, type = '') {
 function statusLabel(status) {
   const normalized = normalizeStatus(status);
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function isSuccessfulHistoryStatus(status) {
+  return ['success', 'completed'].includes(normalizeStatus(status));
 }
 
 function displayName(user, fallback) {
@@ -197,7 +191,6 @@ function typeFromIntent(row) {
   const snapshot = productSnapshot(row);
   const value = lower(firstValue(row.product_type, snapshot.productType, snapshot.product_type, row.metadata?.productType));
   if (/coin|token/.test(value)) return 'coin_purchase';
-  if (/membership|subscription|plan/.test(value)) return 'membership_purchase';
   return null;
 }
 
@@ -207,15 +200,13 @@ function itemFromIntent(row, type) {
     snapshot.name,
     snapshot.productName,
     snapshot.product_name,
-    snapshot.planName,
     snapshot.packageName,
     row.metadata?.productName,
-    row.metadata?.planName,
     row.product_id,
   );
   if (productName) return text(productName);
   if (type === 'coin_purchase') return `${money(row.official_units || row.metadata?.coins)} coins`;
-  return type === 'membership_purchase' ? 'Membership purchase' : 'Payment';
+  return 'Payment';
 }
 
 function coinAmount(row) {
@@ -259,13 +250,12 @@ function addRecord(records, seen, record) {
   });
 }
 
-function enrichRecord(record, userMap, creatorMap, approvedByMap, planMap, videoMap) {
+function enrichRecord(record, userMap, creatorMap, approvedByMap, videoMap) {
   const user = userMap.get(String(record.userId || ''));
   const creator = creatorMap.get(String(record.creatorId || ''));
   const approver = approvedByMap.get(String(record.approvedById || ''));
-  const plan = planMap.get(String(record.planId || ''));
   const video = videoMap.get(String(record.videoId || ''));
-  const item = firstValue(record.item, record.videoTitle, video?.title, plan?.name);
+  const item = firstValue(record.item, record.videoTitle, video?.title);
 
   return {
     ...record,
@@ -356,23 +346,21 @@ function sortRecords(records, query) {
 }
 
 function computeStats(records) {
-  const completedIncoming = records.filter((record) => record.direction === 'in' && normalizeStatus(record.status) === 'completed');
-  const completedPayouts = records.filter((record) => record.type === 'creator_payout' && normalizeStatus(record.status) === 'completed');
+  const completedIncoming = records.filter((record) => record.direction === 'in' && isSuccessfulHistoryStatus(record.status));
+  const completedPayouts = records.filter((record) => record.type === 'creator_payout' && isSuccessfulHistoryStatus(record.status));
   const pendingPayouts = records.filter((record) => record.type === 'creator_payout' && normalizeStatus(record.status) === 'pending');
-  const memberships = records.filter((record) => record.type === 'membership_purchase' && normalizeStatus(record.status) === 'completed');
-  const coins = records.filter((record) => record.type === 'coin_purchase' && normalizeStatus(record.status) === 'completed');
+  const coins = records.filter((record) => record.type === 'coin_purchase' && isSuccessfulHistoryStatus(record.status));
 
   return {
     totalTransactions: records.length,
     totalRevenue: completedIncoming.reduce((sum, record) => sum + money(record.amountUsd), 0),
     totalCreatorPayouts: completedPayouts.reduce((sum, record) => sum + money(record.amountUsd), 0),
-    totalMembershipsSold: memberships.length,
     totalCoinsSold: coins.reduce((sum, record) => sum + money(record.coins), 0),
     pendingWithdrawals: pendingPayouts.length,
     pendingWithdrawalsAmount: pendingPayouts.reduce((sum, record) => sum + money(record.amountUsd), 0),
     failedTransactions: records.filter((record) => normalizeStatus(record.status) === 'failed').length,
     refundedTransactions: records.filter((record) => normalizeStatus(record.status) === 'refunded').length,
-    completedTransactions: records.filter((record) => normalizeStatus(record.status) === 'completed').length,
+    completedTransactions: records.filter((record) => isSuccessfulHistoryStatus(record.status)).length,
   };
 }
 
@@ -381,16 +369,12 @@ async function buildRecords() {
     paymentIntents,
     tokenCredits,
     walletTransactions,
-    userMemberships,
-    membershipBillingLogs,
     premiumPurchases,
     payoutRequests,
   ] = await Promise.all([
     fetchRecent('payment_intents', 'created_at'),
     fetchRecent('token_credits', 'created_at'),
     fetchRecent('coin_wallet_transactions', 'created_at'),
-    fetchRecent('user_memberships', 'started_at'),
-    fetchRecent('membership_billing_logs', 'created_at'),
     fetchRecent('premium_video_purchases', 'purchased_at'),
     fetchRecent('creator_payout_requests', 'requested_at'),
   ]);
@@ -398,7 +382,6 @@ async function buildRecords() {
   const records = [];
   const seen = new Set();
   const seenIntentIds = new Set();
-  const seenMembershipRefs = new Set();
   const seenCoinRefs = new Set();
 
   for (const row of paymentIntents) {
@@ -406,7 +389,6 @@ async function buildRecords() {
     if (!type) continue;
     seenIntentIds.add(String(row.id));
     const ref = firstValue(row.provider_reference, row.intent_key, row.id);
-    if (type === 'membership_purchase') seenMembershipRefs.add(lower(ref));
     if (type === 'coin_purchase') seenCoinRefs.add(lower(ref));
     addRecord(records, seen, {
       id: `intent-${row.id}`,
@@ -414,7 +396,6 @@ async function buildRecords() {
       sourceId: row.id,
       type,
       userId: row.user_id,
-      planId: type === 'membership_purchase' ? row.product_id : null,
       item: itemFromIntent(row, type),
       amountUsd: amountUsd(row),
       amountOriginal: originalAmount(row),
@@ -448,8 +429,8 @@ async function buildRecords() {
       coins: coinAmount(row),
       provider: row.provider || '',
       transactionId: ref,
-      status: 'completed',
-      rawStatus: 'completed',
+      status: 'success',
+      rawStatus: 'success',
       date: recordDate(row.created_at),
       metadata: row.metadata || {},
     });
@@ -477,55 +458,6 @@ async function buildRecords() {
       rawStatus: row.status,
       walletBalanceBefore: money(row.balance_before),
       walletBalanceAfter: money(row.balance_after),
-      date: recordDate(row.created_at),
-      metadata: row.metadata || {},
-    });
-  }
-
-  for (const row of userMemberships) {
-    const ref = firstValue(row.payment_reference, row.id);
-    if (seenMembershipRefs.has(lower(ref))) continue;
-    seenMembershipRefs.add(lower(ref));
-    addRecord(records, seen, {
-      id: `membership-${row.id}`,
-      sourceTable: 'user_memberships',
-      sourceId: row.id,
-      type: 'membership_purchase',
-      userId: row.user_id,
-      planId: row.plan_id,
-      item: 'Membership purchase',
-      amountUsd: amountUsd(row, ['amount_paid_usd']),
-      amountOriginal: money(row.amount_paid_usd),
-      currency: 'USD',
-      coins: row.coins_received == null ? null : money(row.coins_received),
-      provider: row.payment_provider || '',
-      transactionId: ref,
-      status: normalizeStatus(row.status, 'membership_purchase'),
-      rawStatus: row.status,
-      date: recordDate(row.started_at, row.created_at),
-      expiresAt: row.expires_at || null,
-      metadata: row.metadata || {},
-    });
-  }
-
-  for (const row of membershipBillingLogs) {
-    const ref = firstValue(row.provider_reference, row.id);
-    if (seenMembershipRefs.has(lower(ref))) continue;
-    seenMembershipRefs.add(lower(ref));
-    addRecord(records, seen, {
-      id: `membership-billing-${row.id}`,
-      sourceTable: 'membership_billing_logs',
-      sourceId: row.id,
-      type: 'membership_purchase',
-      userId: row.user_id,
-      item: row.billing_reason || 'Membership billing',
-      amountUsd: amountUsd(row),
-      amountOriginal: originalAmount(row),
-      currency: firstValue(row.currency, 'USD'),
-      provider: row.provider || '',
-      transactionId: ref,
-      status: normalizeStatus(row.status, 'membership_purchase'),
-      rawStatus: row.status,
       date: recordDate(row.created_at),
       metadata: row.metadata || {},
     });
@@ -594,17 +526,15 @@ async function buildRecords() {
   const userIds = records.map((record) => record.userId).filter(Boolean);
   const creatorIds = records.map((record) => record.creatorId).filter(Boolean);
   const approverIds = records.map((record) => record.approvedById).filter(Boolean);
-  const planIds = records.map((record) => record.planId).filter(Boolean);
   const videoIds = records.map((record) => record.videoId).filter(Boolean);
-  const [userMap, creatorMap, approvedByMap, planMap, videoMap] = await Promise.all([
+  const [userMap, creatorMap, approvedByMap, videoMap] = await Promise.all([
     fetchUsers(userIds),
     fetchUsers(creatorIds),
     fetchUsers(approverIds),
-    fetchMembershipPlans(planIds),
     fetchVideos(videoIds),
   ]);
 
-  return records.map((record) => enrichRecord(record, userMap, creatorMap, approvedByMap, planMap, videoMap));
+  return records.map((record) => enrichRecord(record, userMap, creatorMap, approvedByMap, videoMap));
 }
 
 export async function getPaymentHistory(query = {}) {
@@ -720,7 +650,6 @@ export function streamPaymentHistoryPdf(res, records, stats) {
 
   doc.fillColor('#111').fontSize(10).text(`Total revenue: $${money(stats.totalRevenue).toFixed(2)}`);
   doc.text(`Creator payouts: $${money(stats.totalCreatorPayouts).toFixed(2)}`);
-  doc.text(`Memberships sold: ${stats.totalMembershipsSold}`);
   doc.text(`Coins sold: ${stats.totalCoinsSold}`);
   doc.text(`Pending withdrawals: ${stats.pendingWithdrawals}`);
   doc.text(`Failed transactions: ${stats.failedTransactions}`);

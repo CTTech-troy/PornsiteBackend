@@ -26,17 +26,15 @@ export async function getPayoutMetrics(query = {}) {
 
   const rates = await getCommissionRates();
 
-  const [payoutsRes, earningsRes, membershipsRes] = await Promise.all([
+  const [payoutsRes, earningsRes] = await Promise.all([
     supabase.from('creator_payout_requests').select('amount_usd,status,requested_at,processed_at,paid_at,completed_at,risk_score,creator_id'),
     supabase.from('creator_earnings').select('amount_usd,gross_usd,platform_fee_usd,creator_id,created_at,reference_id'),
-    supabase.from('user_memberships').select('amount_paid_usd,status,started_at'),
   ]);
 
   if (payoutsRes.error && !isMissingDbFeature(payoutsRes.error)) throw payoutsRes.error;
 
   const payouts = payoutsRes.data || [];
   const earnings = earningsRes.error ? [] : (earningsRes.data || []);
-  const memberships = membershipsRes.error ? [] : (membershipsRes.data || []);
 
   const periodPayouts = payouts.filter((r) => inRange(r.requested_at, from, to));
   const prevPayouts = payouts.filter((r) => inRange(r.requested_at, prevFrom, prevTo));
@@ -62,16 +60,8 @@ export async function getPayoutMetrics(query = {}) {
     }
   }
 
-  const periodMembershipGross = memberships
-    .filter((r) => inRange(r.started_at, from, to) && ['active', 'completed'].includes(r.status))
-    .reduce((s, r) => s + Number(r.amount_paid_usd || 0), 0);
-
-  const prevMembershipGross = memberships
-    .filter((r) => inRange(r.started_at, prevFrom, prevTo) && ['active', 'completed'].includes(r.status))
-    .reduce((s, r) => s + Number(r.amount_paid_usd || 0), 0);
-
-  const periodRevenue = money(periodMembershipGross + periodEarningsGross);
-  const prevRevenue = money(prevMembershipGross + prevEarningsGross);
+  const periodRevenue = money(periodEarningsGross);
+  const prevRevenue = money(prevEarningsGross);
 
   const completedInPeriod = payouts.filter((r) => {
     const doneAt = r.completed_at || r.paid_at || r.processed_at;
@@ -140,8 +130,7 @@ export async function getPayoutMetrics(query = {}) {
       .reduce((s, r) => s + Number(r.amount_usd || 0), 0),
   );
 
-  const membershipPlatformFees = money(periodMembershipGross * (rates.platformPercent / 100));
-  const platformFees = money(periodPlatformFromEarnings + membershipPlatformFees);
+  const platformFees = money(periodPlatformFromEarnings);
   const netPayoutTotals = money(completedAmount);
 
   return {
@@ -180,11 +169,6 @@ export async function getPayoutMetrics(query = {}) {
     ),
     revenueDaily: (() => {
       const map = new Map();
-      for (const r of memberships.filter((row) => inRange(row.started_at, from, to))) {
-        const day = String(r.started_at || '').slice(0, 10);
-        if (!day) continue;
-        map.set(day, money((map.get(day) || 0) + Number(r.amount_paid_usd || 0)));
-      }
       for (const row of earnings) {
         if (!inRange(row.created_at, from, to)) continue;
         const day = String(row.created_at || '').slice(0, 10);

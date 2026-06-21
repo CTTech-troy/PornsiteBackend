@@ -3,9 +3,10 @@ import { getFirebaseRtdb } from '../config/firebase.js';
 
 export function getVideoAccessType(row = {}) {
   const raw = String(row.access_type || row.accessType || '').trim().toLowerCase().replace(/-/g, '_');
-  if (['free', 'premium', 'members_only', 'coin_unlock'].includes(raw)) return raw;
+  if (raw === 'members_only') return 'coin_unlock';
+  if (['free', 'premium', 'coin_unlock'].includes(raw)) return raw;
   const tokenPrice = Number(row.token_price ?? row.tokenPrice ?? row.coin_price ?? row.coinPrice ?? 0) || 0;
-  if (row.requires_membership === true || row.requiresMembership === true) return 'members_only';
+  if (row.requires_membership === true || row.requiresMembership === true) return 'coin_unlock';
   if (tokenPrice > 0) return 'coin_unlock';
   if (row.is_premium_content === true || row.isPremiumContent === true || row.isPremium === true || row.premium === true) return 'premium';
   return 'free';
@@ -25,25 +26,6 @@ export function isPremiumVideoRow(row) {
       row.subscription_access === true ||
       row.subscriptionAccess === true)
   );
-}
-
-export async function hasActivePremiumAccess(uid) {
-  if (!uid || !supabase) return false;
-  try {
-    const { data } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', uid)
-      .maybeSingle();
-    if (!data) return false;
-    const activeMembership =
-      data.membership === 'active' ||
-      data.membership_status === 'active' ||
-      data.membershipStatus === 'active';
-    return data.is_premium === true || data.isPremium === true || activeMembership;
-  } catch {
-    return false;
-  }
 }
 
 export async function hasPurchasedVideo(uid, videoId) {
@@ -90,15 +72,11 @@ export async function canAccessPremiumVideo(uid, row) {
 
   const accessType = getVideoAccessType(row);
   const videoId = row?.video_id || row?.videoId || row?.id;
-  const activePremium = await hasActivePremiumAccess(uid);
 
-  if (accessType === 'members_only') return activePremium;
   if (accessType === 'coin_unlock') {
     if (videoId && (await hasPurchasedVideo(uid, videoId))) return true;
-    if ((row.subscription_access === true || row.subscriptionAccess === true) && activePremium) return true;
     return false;
   }
-  if (activePremium) return true;
   if (videoId && (await hasPurchasedVideo(uid, videoId))) return true;
   return false;
 }

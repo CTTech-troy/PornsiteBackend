@@ -2,11 +2,6 @@ import { supabase } from '../config/supabase.js';
 import { getRawRequestBody } from '../middleware/qstashSignature.js';
 import { getCoinAnalytics } from '../services/coinWallet.service.js';
 import {
-  createRenewalReminderEvents,
-  expireDueMemberships,
-  getMembershipAnalytics,
-} from '../services/membershipLifecycle.service.js';
-import {
   runFailedPaymentRetry,
   runFraudAnalysis,
   runPaymentIntentExpiration,
@@ -24,40 +19,6 @@ function readWorkflowPayload(req) {
     console.warn('[monetization-workflow] ignored invalid JSON payload:', error.message);
     return {};
   }
-}
-
-export async function expireMembershipsWorkflow(req, res) {
-  try {
-    const payload = readWorkflowPayload(req);
-    const result = await expireDueMemberships({ limit: Number(payload.limit) || 500 });
-    return res.json({ success: true, workflow: 'membership_expiration', ...result });
-  } catch (error) {
-    console.error('[monetization-workflow] expiration failed:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-}
-
-export async function renewalRemindersWorkflow(req, res) {
-  try {
-    const payload = readWorkflowPayload(req);
-    const days = Array.isArray(payload.days) ? payload.days.map(Number).filter(Boolean) : [7, 3, 1];
-    const result = await createRenewalReminderEvents({ days, limit: Number(payload.limit) || 500 });
-    return res.json({ success: true, workflow: 'renewal_reminders', ...result });
-  } catch (error) {
-    console.error('[monetization-workflow] reminders failed:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-}
-
-export async function recurringBillingWorkflow(_req, res) {
-  // Lifecycle-ready recurring billing records renewal_due work without charging
-  // saved payment methods. Provider mandate/authorization support can attach here.
-  return res.json({
-    success: true,
-    workflow: 'recurring_billing',
-    mode: 'lifecycle_ready',
-    message: 'Automatic provider charges are not enabled for this deployment.',
-  });
 }
 
 export async function failedPaymentRetryWorkflow(req, res) {
@@ -118,10 +79,7 @@ export async function walletVerificationWorkflow(_req, res) {
 
 export async function analyticsWorkflow(_req, res) {
   try {
-    const [coinAnalytics, membershipAnalytics] = await Promise.all([
-      getCoinAnalytics(),
-      getMembershipAnalytics(),
-    ]);
+    const coinAnalytics = await getCoinAnalytics();
 
     if (supabase) {
       await supabase.from('coin_analytics_daily').upsert({
@@ -129,9 +87,9 @@ export async function analyticsWorkflow(_req, res) {
         coins_sold: coinAnalytics.totalCoinsSold || 0,
         coins_spent: coinAnalytics.totalCoinsSpent || 0,
         coins_transferred: 0,
-        revenue_usd: membershipAnalytics.revenueUsd || 0,
+        revenue_usd: coinAnalytics.revenueUsd || 0,
         transactions: coinAnalytics.transactionCount || 0,
-        metadata: { coinAnalytics, membershipAnalytics },
+        metadata: { coinAnalytics },
         updated_at: new Date().toISOString(),
       }, { onConflict: 'period_date' }).catch(() => {});
     }
@@ -140,7 +98,6 @@ export async function analyticsWorkflow(_req, res) {
       success: true,
       workflow: 'monetization_analytics',
       coinAnalytics,
-      membershipAnalytics,
     });
   } catch (error) {
     console.error('[monetization-workflow] analytics failed:', error.message);

@@ -12,6 +12,7 @@ import {
   getApiHealth,
   getRouteLatency,
   getPlatformActivity,
+  testVastTag,
 } from '../controller/adminSystem.controller.js';
 import {
   getAdminEmailTemplate,
@@ -47,6 +48,7 @@ router.get('/platform-activity', getPlatformActivity);
 router.get('/settings', getSettings);
 router.put('/settings', updateSettings);
 router.put('/settings/:key', updateSetting);
+router.post('/vast/test', testVastTag);
 
 router.get('/health', getSystemHealth);
 router.get('/api-health', getApiHealth);

@@ -427,7 +427,6 @@ async function cleanupSupabaseUserData(userIds) {
       if (!isIgnorableCleanupError(err)) cleanup.push({ table: 'conversations', column: 'participant_ids', ok: false, reason: err?.message || String(err) });
     }
   }
-  await deleteSupabaseRows('user_memberships', 'user_id', ids, { cleanup });
   await deleteSupabaseRows('token_transactions', 'user_id', ids, { cleanup });
   await deleteSupabaseRows('creator_payout_requests', 'creator_id', ids, { cleanup });
   await deleteSupabaseRows('creator_earnings', 'creator_id', ids, { cleanup });
@@ -533,14 +532,6 @@ export async function getUserById(req, res) {
 
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
-    // Membership record
-    const { data: membership } = await supabase
-      .from('user_memberships')
-      .select('plan_id, amount_paid_usd, status, started_at, expires_at')
-      .eq('user_id', id)
-      .eq('status', 'active')
-      .maybeSingle();
-
     // Creator earnings if creator
     let earnings = null;
     if (user.isCreator) {
@@ -559,7 +550,7 @@ export async function getUserById(req, res) {
       .order('created_at', { ascending: false })
       .limit(10);
 
-    return res.json({ user, membership, earnings, adminHistory: history || [] });
+    return res.json({ user, earnings, adminHistory: history || [] });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

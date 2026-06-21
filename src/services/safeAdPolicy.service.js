@@ -2,7 +2,7 @@ import { getPlatformSettingsMap } from './platformSettings.service.js';
 
 export const APPROVED_PLACEMENTS = {
   sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
-  home_after_subheader_900x250: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
+  home_after_subheader_900x250: { maxWidth: 728, maxHeight: 90, formats: ['banner', 'display'] },
   homepage_top: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
   homepage_bottom: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
   sticky_banner: { maxWidth: 970, maxHeight: 280, formats: ['banner', 'display'] },
@@ -33,6 +33,7 @@ export const SAFE_DISPLAY_FORMATS = ['banner', 'display', 'native', 'vast', 'vid
 
 export const APPROVED_MONETAG_SCRIPT_URL = 'https://quge5.com/88/tag.min.js';
 export const APPROVED_MONETAG_ZONE_ID = '242279';
+export const APPROVED_JUICYADS_SCRIPT_URL = 'https://poweredby.jads.co/js/jads.js';
 
 export const MONETAG_SAFE_DOMAINS = [
   'quge5.com',
@@ -42,6 +43,7 @@ export const MONETAG_SAFE_DOMAINS = [
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
+  '5gvci.com',
 ];
 
 export const BLOCKED_SCRIPT_HOSTS_STRICT = [
@@ -71,6 +73,9 @@ const PLACEMENT_ALIASES = {
   video_recommended: 'sidebar',
   recommended_sidebar: 'sidebar',
   feed_native: 'native_card',
+  homepage_feed: 'native_card',
+  in_feed: 'native_card',
+  feed_side_widget: 'native_card',
   category_feed: 'native_card',
   mobile_inline: 'native_card',
 };
@@ -85,6 +90,8 @@ const ALLOWED_AD_DOMAINS = [
   'magsrv.com',
   'a.magsrv.com',
   's.magsrv.com',
+  'vast.yomeno.xyz',
+  'yomeno.xyz',
   'googleads.g.doubleclick.net',
   'securepubads.g.doubleclick.net',
   'googlesyndication.com',
@@ -114,9 +121,12 @@ const BLOCKED_HTML_PATTERNS = [
   /interstitial/i,
 ];
 
+const BLOCKED_JUICY_SNIPPET_PATTERN =
+  /top\.location|window\.top|window\.open|document\.location|<meta[^>]+http-equiv=["']refresh|on(load|click|mouseover)\s*=|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|adserver\.juicyads\.com|betway|casino|gambling/i;
+
 const BLOCKED_FORMATS = ['popunder', 'clickunder', 'floating', 'fullscreen_takeover', 'interstitial', 'popup', 'modal'];
 const MONETAG_ALLOWED_FORMATS = ['banner', 'display', 'native'];
-const MONETAG_NATIVE_PLACEMENTS = new Set(['feed', 'feed_native', 'category_feed', 'mobile_inline', 'native_card', 'between_content']);
+const MONETAG_NATIVE_PLACEMENTS = new Set(['feed', 'feed_native', 'homepage_feed', 'in_feed', 'feed_side_widget', 'category_feed', 'mobile_inline', 'native_card', 'between_content']);
 const MONETAG_SIDEBAR_PLACEMENTS = new Set([
   'sidebar',
   'home_sidebar',
@@ -228,6 +238,78 @@ function parseDomainList(raw, fallback) {
   return uniqueList(parseJsonList(raw, fallback)).filter(isSafeDomainValue);
 }
 
+function readHtmlAttr(tag, name) {
+  const match = String(tag || '').match(new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return match ? String(match[1] || match[2] || match[3] || '').trim() : '';
+}
+
+function normalizeJuicyScriptUrl(src) {
+  const value = String(src || '').trim().replace(/^\/\//, 'https://');
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:') return '';
+    if (parsed.hostname.toLowerCase() !== 'poweredby.jads.co') return '';
+    if (parsed.pathname !== '/js/jads.js') return '';
+    return APPROVED_JUICYADS_SCRIPT_URL;
+  } catch {
+    return '';
+  }
+}
+
+function isJuicyPushBody(body, zoneId) {
+  const re = new RegExp(
+    `^\\(?\\s*adsbyjuicy\\s*=\\s*window\\.adsbyjuicy\\s*\\|\\|\\s*\\[\\]\\s*\\)?\\s*\\.push\\s*\\(\\s*\\{\\s*['"]?adzone['"]?\\s*:\\s*['"]?${zoneId}['"]?\\s*\\}\\s*\\)\\s*;?\\s*$`,
+    'i',
+  );
+  return re.test(String(body || '').trim());
+}
+
+export function parseTrustedJuicyEmbedHtml(html) {
+  const raw = String(html || '').trim().replace(/\b(src|href)=(["'])\/\//gi, '$1=$2https://');
+  if (!raw || BLOCKED_JUICY_SNIPPET_PATTERN.test(raw)) return null;
+
+  const insMatch = raw.match(/<ins\b[^>]*>/i);
+  if (!insMatch) return null;
+
+  const insTag = insMatch[0];
+  const zoneFromIns = readHtmlAttr(insTag, 'id');
+  const pushMatch = raw.match(/\.push\s*\(\s*\{\s*['"]?adzone['"]?\s*:\s*['"]?(\d+)['"]?\s*\}\s*\)/i);
+  const zoneId = String(pushMatch?.[1] || zoneFromIns || '').trim();
+
+  if (!/^\d+$/.test(zoneId)) return null;
+  if (zoneFromIns && zoneFromIns !== zoneId) return null;
+
+  const scriptTags = [...raw.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+  if (scriptTags.length > 2) return null;
+
+  let hasJuicyPush = false;
+  for (const scriptTag of scriptTags) {
+    const attrs = scriptTag[1] || '';
+    const body = scriptTag[2] || '';
+    const src = readHtmlAttr(attrs, 'src');
+
+    if (src) {
+      if (!normalizeJuicyScriptUrl(src) || body.trim()) return null;
+      continue;
+    }
+
+    if (!isJuicyPushBody(body, zoneId)) return null;
+    hasJuicyPush = true;
+  }
+
+  if (scriptTags.length && !hasJuicyPush) return null;
+  if (!scriptTags.length && !pushMatch) return null;
+
+  return {
+    provider: 'juicyads',
+    zoneId,
+    width: Number(readHtmlAttr(insTag, 'data-width')) || 300,
+    height: Number(readHtmlAttr(insTag, 'data-height')) || 250,
+    scriptUrl: APPROVED_JUICYADS_SCRIPT_URL,
+  };
+}
+
 export function isApprovedMonetagScriptUrl(url) {
   try {
     const parsed = new URL(String(url || '').trim());
@@ -314,6 +396,8 @@ export function isDomainAllowed(url, settings) {
 export function validateEmbedHtml(html, settings = {}) {
   const s = String(html || '');
   if (!s.trim()) return { ok: false, reason: 'empty_embed' };
+  const trustedJuicyEmbed = parseTrustedJuicyEmbedHtml(s);
+  if (trustedJuicyEmbed) return { ok: true, ...trustedJuicyEmbed };
   for (const pattern of BLOCKED_HTML_PATTERNS) {
     if (pattern.test(s)) return { ok: false, reason: 'unsafe_embed_pattern' };
   }

@@ -1,5 +1,5 @@
 import { supabase, isConfigured } from '../config/supabase.js';
-import { getUserMembership, spendCoins } from '../controller/membership.controller.js';
+import { getCoinWallet, spendCoins } from './coinWallet.service.js';
 
 export const RANDOM_CHAT_BILLING_INTERVAL_MS = 30_000;
 export const RANDOM_CHAT_BILLING_COST = 10;
@@ -18,63 +18,47 @@ function isMissingSchema(err) {
 }
 
 function insufficientCoinsError(balance = 0) {
-  const err = new Error('You have run out of coins. Purchase a membership to continue using Random Chat.');
+  const err = new Error('You have run out of coins. Buy coins to continue using Random Chat.');
   err.code = 'INSUFFICIENT_COINS';
   err.balance = Number(balance) || 0;
   return err;
 }
 
-function isPaidMembership(membership) {
-  const plan = String(membership?.plan || 'basic').toLowerCase();
-  const status = String(membership?.planStatus || '').toLowerCase();
-  return plan !== 'basic' && (status === 'active' || status === 'grace');
-}
-
 export async function getRandomChatAccess(userId) {
-  if (!userId) return { allowed: false, reason: 'AUTH_REQUIRED', balance: 0, membershipActive: false };
+  if (!userId) return { allowed: false, reason: 'AUTH_REQUIRED', balance: 0 };
   if (!isConfigured() || !supabase) {
     if (process.env.NODE_ENV !== 'production') {
       return {
         allowed: true,
         reason: 'DEV_BILLING_BYPASS',
         balance: 999999,
-        membershipActive: true,
-        plan: 'dev',
-        planStatus: 'active',
         cost: RANDOM_CHAT_BILLING_COST,
         intervalMs: RANDOM_CHAT_BILLING_INTERVAL_MS,
         lowBalanceThreshold: RANDOM_CHAT_LOW_BALANCE,
       };
     }
-    return { allowed: false, reason: 'BILLING_UNAVAILABLE', balance: 0, membershipActive: false };
+    return { allowed: false, reason: 'BILLING_UNAVAILABLE', balance: 0 };
   }
 
   try {
-    const membership = await getUserMembership(userId);
-    const membershipActive = isPaidMembership(membership);
-    const balance = Number(membership?.coinBalance || 0);
+    const wallet = await getCoinWallet(userId);
+    const balance = Number(wallet?.balance || 0);
     return {
-      allowed: membershipActive || balance >= RANDOM_CHAT_BILLING_COST,
-      reason: membershipActive || balance >= RANDOM_CHAT_BILLING_COST ? 'OK' : 'INSUFFICIENT_COINS',
+      allowed: balance >= RANDOM_CHAT_BILLING_COST,
+      reason: balance >= RANDOM_CHAT_BILLING_COST ? 'OK' : 'INSUFFICIENT_COINS',
       balance,
-      membershipActive,
-      plan: membership?.plan || 'basic',
-      planStatus: membership?.planStatus || 'basic',
       cost: RANDOM_CHAT_BILLING_COST,
       intervalMs: RANDOM_CHAT_BILLING_INTERVAL_MS,
       lowBalanceThreshold: RANDOM_CHAT_LOW_BALANCE,
     };
   } catch (err) {
     console.warn('[randomChatBilling] access check failed:', err?.message || err);
-    return { allowed: false, reason: 'BILLING_UNAVAILABLE', balance: 0, membershipActive: false };
+    return { allowed: false, reason: 'BILLING_UNAVAILABLE', balance: 0 };
   }
 }
 
 export async function chargeRandomChatInterval({ userId, roomId, peerUserId, intervalIndex }) {
   const access = await getRandomChatAccess(userId);
-  if (access.membershipActive) {
-    return { charged: false, balance: access.balance, membershipActive: true, plan: access.plan };
-  }
   if (!access.allowed) throw insufficientCoinsError(access.balance);
 
   if (!isConfigured() || !supabase) throw insufficientCoinsError(access.balance);
@@ -92,7 +76,6 @@ export async function chargeRandomChatInterval({ userId, roomId, peerUserId, int
     return {
       charged: true,
       balance: Number(rpc.data || 0),
-      membershipActive: false,
       amount,
     };
   }
@@ -102,7 +85,20 @@ export async function chargeRandomChatInterval({ userId, roomId, peerUserId, int
     throw rpc.error;
   }
 
-  const result = await spendCoins(userId, amount).catch((err) => {
+  const result = await spendCoins({
+    userId,
+    amount,
+    type: 'random_chat',
+    reference: roomId || null,
+    relatedUserId: peerUserId || null,
+    metadata: {
+      room_id: roomId,
+      peer_user_id: peerUserId || null,
+      interval_index: Number(intervalIndex) || 1,
+    },
+    sourceType: 'random_chat_interval',
+    sourceId: roomId || null,
+  }).catch((err) => {
     if (/insufficient/i.test(err?.message || '')) throw insufficientCoinsError(access.balance);
     throw err;
   });
@@ -125,8 +121,7 @@ export async function chargeRandomChatInterval({ userId, roomId, peerUserId, int
 
   return {
     charged: true,
-    balance: Number(result?.coinBalance || 0),
-    membershipActive: false,
+    balance: Number(result?.balance || 0),
     amount,
   };
 }
@@ -137,7 +132,6 @@ export async function createUsageRecord({
   peerUserId,
   startedAt,
   connectedAt = null,
-  membershipBypass = false,
   startingBalance = 0,
 }) {
   if (!isConfigured() || !supabase || !roomId || !userId) return null;
@@ -147,7 +141,7 @@ export async function createUsageRecord({
     peer_user_id: peerUserId || null,
     started_at: new Date(startedAt || Date.now()).toISOString(),
     connected_at: connectedAt ? new Date(connectedAt).toISOString() : null,
-    membership_bypass: membershipBypass === true,
+    membership_bypass: false,
     starting_balance: Number(startingBalance) || 0,
     billing_interval_seconds: RANDOM_CHAT_BILLING_INTERVAL_MS / 1000,
     coin_cost_per_interval: RANDOM_CHAT_BILLING_COST,

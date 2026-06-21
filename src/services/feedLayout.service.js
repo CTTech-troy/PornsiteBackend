@@ -2,7 +2,47 @@ import { getPublicSlotsConfig } from './adSlot.service.js';
 import { listActiveCampaigns, mapCampaignRow, pickRotatedCampaign } from './adCampaign.service.js';
 import { validateAdForRender } from './safeAdPolicy.service.js';
 
-const FEED_NATIVE_PLACEMENTS = new Set(['feed_native', 'category_feed', 'mobile_inline', 'native_card', 'feed']);
+const FEED_NATIVE_PLACEMENTS = new Set([
+  'feed_native',
+  'homepage_feed',
+  'in_feed',
+  'feed_side_widget',
+  'category_feed',
+  'mobile_inline',
+  'native_card',
+  'feed',
+]);
+
+const FEED_CAMPAIGN_PLACEMENT_ALIASES = {
+  feed_native: ['feed_native', 'homepage_feed', 'in_feed', 'feed', 'native_card', 'feed_side_widget'],
+  homepage_feed: ['homepage_feed', 'feed_native', 'in_feed', 'feed', 'native_card', 'feed_side_widget'],
+  in_feed: ['in_feed', 'feed_native', 'homepage_feed', 'feed', 'native_card', 'feed_side_widget'],
+  feed_side_widget: ['feed_side_widget', 'feed_native', 'homepage_feed', 'in_feed', 'feed', 'native_card'],
+  feed: ['feed', 'feed_native', 'homepage_feed', 'in_feed', 'native_card'],
+  native_card: ['native_card', 'feed_native', 'homepage_feed', 'in_feed', 'feed'],
+  category_feed: ['category_feed', 'feed_native', 'native_card'],
+  mobile_inline: ['mobile_inline', 'feed_native', 'native_card'],
+};
+
+function uniqueStrings(values = []) {
+  return [...new Set(values.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+function campaignPlacementCandidates(placement) {
+  const key = String(placement || 'feed_native').toLowerCase();
+  return uniqueStrings(FEED_CAMPAIGN_PLACEMENT_ALIASES[key] || [key]);
+}
+
+function summarizeCampaign(row) {
+  return {
+    id: row?.id,
+    placement: row?.placement,
+    slotKey: row?.slot_key || null,
+    status: row?.status,
+    active: row?.is_active,
+    endDate: row?.end_date || row?.expiry_date || null,
+  };
+}
 
 function numberFrom(...values) {
   for (const value of values) {
@@ -85,7 +125,23 @@ function shouldInjectAfter(videoCount, rule) {
 
 async function creativeForSlot(slot, seed) {
   const placement = String(slot.placementType || slot.placement || 'feed_native').toLowerCase();
-  const rows = await listActiveCampaigns(placement);
+  const campaignPlacements = campaignPlacementCandidates(placement);
+  const rowGroups = await Promise.all(campaignPlacements.map((candidate) => listActiveCampaigns(candidate)));
+  const byId = new Map();
+  for (const group of rowGroups) {
+    for (const row of group || []) {
+      const key = row?.id || `${row?.placement || 'placement'}:${row?.slot_key || 'slot'}:${row?.name || row?.title || byId.size}`;
+      if (!byId.has(key)) byId.set(key, row);
+    }
+  }
+  const rows = [...byId.values()];
+  console.log('[ADS] Active campaigns:', {
+    slotKey: slot.slotKey,
+    placement,
+    campaignPlacements,
+    count: rows.length,
+    campaigns: rows.map(summarizeCampaign),
+  });
   const slotRows = rows.filter((row) => !row.slot_key || row.slot_key === slot.slotKey);
   const picked = pickRotatedCampaign(slotRows.length ? slotRows : rows, { seed });
   const campaign = mapCampaignRow(picked);
@@ -156,6 +212,12 @@ async function creativeForSlot(slot, seed) {
       paymentStatus: 'waived',
     };
   }
+  console.log('[ADS] No creative available for placement:', {
+    slotKey: slot.slotKey,
+    placement,
+    campaignPlacements,
+    hasSlotEmbed: Boolean(slot.embedCode),
+  });
   return null;
 }
 
@@ -166,6 +228,7 @@ function buildAdItem({ slot, creative, sequence, afterVideoKey }) {
     key: `ad:${slot.slotKey}:${sequence}:${afterVideoKey}`,
     slotKey: slot.slotKey,
     slotIndex: sequence,
+    afterVideoIdentity: afterVideoKey,
     placement,
     placementType: placement,
     label: 'Ads',
@@ -189,6 +252,12 @@ export async function buildStructuredFeedLayout({
   const publicPage = pageKey === 'category' ? 'category' : pageKey;
   const config = await getPublicSlotsConfig({ page: publicPage, device });
   if (!config.enabled) {
+    console.log('[ADS] Placement found:', {
+      pageKey,
+      device,
+      enabled: false,
+      placements: [],
+    });
     return { items: videos.map((video, index) => ({ type: 'video', key: `video:${getVideoIdentity(video, index)}`, video, index })), meta: { device, adSlots: [], rules: [] } };
   }
 
@@ -197,6 +266,21 @@ export async function buildStructuredFeedLayout({
     .map(buildRule)
     .filter(Boolean)
     .sort((a, b) => a.priority - b.priority);
+
+  console.log('[ADS] Placement found:', {
+    pageKey,
+    device,
+    enabled: true,
+    placements: rules.map((rule) => ({
+      slotKey: rule.slot.slotKey,
+      placement: rule.slot.placementType || rule.slot.placement,
+      location: rule.slot.location,
+      frequency: rule.frequency,
+      startAfter: rule.startAfter,
+      maxPerPage: rule.maxPerPage,
+      priority: rule.priority,
+    })),
+  });
 
   if (!rules.length) {
     return { items: videos.map((video, index) => ({ type: 'video', key: `video:${getVideoIdentity(video, index)}`, video, index })), meta: { device, adSlots: [], rules: [] } };
@@ -221,6 +305,12 @@ export async function buildStructuredFeedLayout({
       const injected = injectedBySlot.get(rule.slot.slotKey) || 0;
       if (!creative || injected >= rule.maxPerPage || !shouldInjectAfter(videoCount, rule)) continue;
       injectedBySlot.set(rule.slot.slotKey, injected + 1);
+      console.log('[ADS] Injected at index:', {
+        index: videoCount,
+        slotKey: rule.slot.slotKey,
+        placement: rule.slot.placementType || rule.slot.placement,
+        sequence: injected + 1,
+      });
       items.push(buildAdItem({
         slot: rule.slot,
         creative,

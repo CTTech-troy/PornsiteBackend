@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node scripts/test-video-playback-validation.mjs",
-    "test:payments": "node --test tests/payments/security.test.mjs",
+    "test:payments": "node --test tests/payments/*.test.mjs",
     "test:import": "node --test tests/import/*.test.mjs",
     "migrate:video-import": "node scripts/apply-video-import-migration.mjs",
     "migrate:content-removal": "node scripts/apply-content-removal-migration.mjs",
@@ -31,7 +31,6 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1054.0",
     "@aws-sdk/s3-request-presigner": "^3.1054.0",
-    "@justalk/pornhub-api": "^3.5.0",
     "@supabase/supabase-js": "^2.95.3",
     "@upstash/qstash": "^2.11.0",
     "@upstash/redis": "^1.38.0",

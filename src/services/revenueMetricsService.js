@@ -14,7 +14,8 @@ import { getPayoutMetrics } from './payoutMetricsService.js';
 import { getAdRewardAnalytics } from './creatorAdReward.service.js';
 
 const COMPLETED_PAYOUT = ['paid', 'completed'];
-const ACTIVE_MEMBERSHIP = ['active', 'completed'];
+const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
+const SUCCESSFUL_PAYMENT_STATUSES = ['success', 'successful', 'fulfilled', 'paid', 'completed', 'complete', 'verified'];
 
 function bucketDaily(rows, dateField, amountField, from, to) {
   const map = new Map();
@@ -56,19 +57,19 @@ function bucketMonthly(daily) {
 
 async function loadRevenueSources() {
   if (!supabase) {
-    return { earnings: [], memberships: [], payouts: [], transactions: [], payments: [] };
+    return { earnings: [], coinPayments: [], payouts: [], transactions: [], payments: [] };
   }
 
-  const [earningsRes, membershipsRes, payoutsRes, transactionsRes] = await Promise.all([
+  const [earningsRes, coinPaymentsRes, payoutsRes, transactionsRes] = await Promise.all([
     supabase.from('creator_earnings').select('creator_id, amount_usd, gross_usd, platform_fee_usd, source, created_at, reference_id'),
-    supabase.from('user_memberships').select('user_id, amount_paid_usd, status, started_at, plan_id'),
+    supabase.from('payment_intents').select('user_id, product_type, amount, currency, status, created_at, fulfilled_at'),
     supabase.from('creator_payout_requests').select('creator_id, amount_usd, status, requested_at, completed_at, paid_at'),
     supabase.from('transactions').select('owner_id, type, amount, platform_fee, creator_earnings, created_at').limit(5000),
   ]);
 
   return {
     earnings: earningsRes.error && isMissingDbFeature(earningsRes.error) ? [] : (earningsRes.data || []),
-    memberships: membershipsRes.error && isMissingDbFeature(membershipsRes.error) ? [] : (membershipsRes.data || []),
+    coinPayments: coinPaymentsRes.error && isMissingDbFeature(coinPaymentsRes.error) ? [] : (coinPaymentsRes.data || []),
     payouts: payoutsRes.error && isMissingDbFeature(payoutsRes.error) ? [] : (payoutsRes.data || []),
     transactions: transactionsRes.error && isMissingDbFeature(transactionsRes.error) ? [] : (transactionsRes.data || []),
     payments: [],
@@ -87,11 +88,12 @@ export async function getCompanyRevenueMetrics(query = {}) {
   let periodCreatorEarnings = 0;
   let periodPlatformFromEarnings = 0;
   let periodGrossFromEarnings = 0;
-  let subscriptionRevenue = 0;
+  let coinPurchaseRevenue = 0;
   let videoPurchaseRevenue = 0;
   let tipRevenue = 0;
   let prevCreatorEarnings = 0;
   let prevPlatformFromEarnings = 0;
+  let prevCoinPurchaseRevenue = 0;
 
   const creatorTotals = new Map();
   const payerTotals = new Map();
@@ -102,7 +104,7 @@ export async function getCompanyRevenueMetrics(query = {}) {
       seenEarningRefs.add(row.reference_id);
     }
     const src = String(row.source || 'other');
-    if (src === 'membership' || src === 'subscription') continue;
+    if (/member|subscr/i.test(src)) continue;
 
     const creatorAmt = money(row.amount_usd);
     const gross = row.gross_usd != null ? money(row.gross_usd) : grossFromCreatorShare(creatorAmt, rates.creatorPercent);
@@ -124,22 +126,23 @@ export async function getCompanyRevenueMetrics(query = {}) {
     }
   }
 
-  for (const m of sources.memberships) {
-    if (!ACTIVE_MEMBERSHIP.includes(m.status)) continue;
-    const gross = money(m.amount_paid_usd);
-    const splitPlatform = money(gross * (rates.platformPercent / 100));
-    const creatorShare = money(gross - splitPlatform);
-    if (inRange(m.started_at, from, to)) {
-      subscriptionRevenue += gross;
+  for (const payment of sources.coinPayments) {
+    const productType = String(payment.product_type || '').toLowerCase();
+    if (!/coin|token/.test(productType)) continue;
+    if (!SUCCESSFUL_PAYMENT_STATUSES.includes(String(payment.status || '').toLowerCase())) continue;
+    const gross = String(payment.currency || 'USD').toUpperCase() === 'NGN'
+      ? money(Number(payment.amount || 0) / NGN_PER_USD)
+      : money(payment.amount);
+    const paidAt = payment.fulfilled_at || payment.created_at;
+    if (inRange(paidAt, from, to)) {
+      coinPurchaseRevenue += gross;
       periodGrossFromEarnings += gross;
-      periodPlatformFromEarnings += splitPlatform;
-      periodCreatorEarnings += creatorShare;
-    } else if (inRange(m.started_at, prevFrom, prevTo)) {
-      prevCreatorEarnings += creatorShare;
-      prevPlatformFromEarnings += splitPlatform;
+      periodPlatformFromEarnings += gross;
+    } else if (inRange(paidAt, prevFrom, prevTo)) {
+      prevCoinPurchaseRevenue += gross;
     }
-    if (m.user_id) {
-      payerTotals.set(m.user_id, money((payerTotals.get(m.user_id) || 0) + gross));
+    if (payment.user_id) {
+      payerTotals.set(payment.user_id, money((payerTotals.get(payment.user_id) || 0) + gross));
     }
   }
 
@@ -150,28 +153,15 @@ export async function getCompanyRevenueMetrics(query = {}) {
     }
   }
 
-  const periodMembershipGross = sources.memberships
-    .filter((m) => ACTIVE_MEMBERSHIP.includes(m.status) && inRange(m.started_at, from, to))
-    .reduce((s, m) => s + money(m.amount_paid_usd), 0);
-
-  const prevMembershipGross = sources.memberships
-    .filter((m) => ACTIVE_MEMBERSHIP.includes(m.status) && inRange(m.started_at, prevFrom, prevTo))
-    .reduce((s, m) => s + money(m.amount_paid_usd), 0);
-
   const grossRevenue = money(periodGrossFromEarnings);
-  const prevGross = money(prevMembershipGross + prevCreatorEarnings + prevPlatformFromEarnings);
+  const prevGross = money(prevCoinPurchaseRevenue + prevCreatorEarnings + prevPlatformFromEarnings);
 
-  let revenueThisMonth = sources.memberships
-    .filter((m) => ACTIVE_MEMBERSHIP.includes(m.status) && m.started_at && new Date(m.started_at) >= monthStart)
-    .reduce((s, m) => s + money(m.amount_paid_usd), 0);
-
-  let revenueThisYear = sources.memberships
-    .filter((m) => ACTIVE_MEMBERSHIP.includes(m.status) && m.started_at && new Date(m.started_at) >= yearStart)
-    .reduce((s, m) => s + money(m.amount_paid_usd), 0);
+  let revenueThisMonth = 0;
+  let revenueThisYear = 0;
 
   for (const e of sources.earnings) {
     const src = String(e.source || '');
-    if (src === 'membership' || src === 'subscription') continue;
+    if (/member|subscr/i.test(src)) continue;
     if (e.created_at && new Date(e.created_at) >= monthStart) {
       const g = e.gross_usd != null ? money(e.gross_usd) : grossFromCreatorShare(money(e.amount_usd), rates.creatorPercent);
       revenueThisMonth += g;
@@ -181,11 +171,17 @@ export async function getCompanyRevenueMetrics(query = {}) {
       revenueThisYear += g;
     }
   }
-  for (const m of sources.memberships) {
-    if (!ACTIVE_MEMBERSHIP.includes(m.status) || !m.started_at) continue;
-    const gross = money(m.amount_paid_usd);
-    if (new Date(m.started_at) >= monthStart) revenueThisMonth += gross;
-    if (new Date(m.started_at) >= yearStart) revenueThisYear += gross;
+  for (const payment of sources.coinPayments) {
+    const productType = String(payment.product_type || '').toLowerCase();
+    if (!/coin|token/.test(productType)) continue;
+    if (!SUCCESSFUL_PAYMENT_STATUSES.includes(String(payment.status || '').toLowerCase())) continue;
+    const paidAt = payment.fulfilled_at || payment.created_at;
+    if (!paidAt) continue;
+    const gross = String(payment.currency || 'USD').toUpperCase() === 'NGN'
+      ? money(Number(payment.amount || 0) / NGN_PER_USD)
+      : money(payment.amount);
+    if (new Date(paidAt) >= monthStart) revenueThisMonth += gross;
+    if (new Date(paidAt) >= yearStart) revenueThisYear += gross;
   }
 
   const totalPlatformRevenue = money(periodPlatformFromEarnings);
@@ -196,16 +192,21 @@ export async function getCompanyRevenueMetrics(query = {}) {
   const taxEstimate = money(grossRevenue * (rates.taxPercent / 100));
   const netProfit = money(totalPlatformRevenue - creatorPayoutTotals - processingFees - taxEstimate);
 
-  const membershipDaily = bucketDaily(
-    sources.memberships.filter((m) => ACTIVE_MEMBERSHIP.includes(m.status)),
-    'started_at',
-    'amount_paid_usd',
-    from,
-    to,
-  );
-
   const earningsGrossDaily = [];
-  const dailyMap = new Map(membershipDaily.map((d) => [d.date, d.amount]));
+  const dailyMap = new Map();
+  for (const payment of sources.coinPayments) {
+    const productType = String(payment.product_type || '').toLowerCase();
+    if (!/coin|token/.test(productType)) continue;
+    if (!SUCCESSFUL_PAYMENT_STATUSES.includes(String(payment.status || '').toLowerCase())) continue;
+    const paidAt = payment.fulfilled_at || payment.created_at;
+    if (!inRange(paidAt, from, to)) continue;
+    const day = String(paidAt || '').slice(0, 10);
+    if (!day) continue;
+    const amount = String(payment.currency || 'USD').toUpperCase() === 'NGN'
+      ? money(Number(payment.amount || 0) / NGN_PER_USD)
+      : money(payment.amount);
+    dailyMap.set(day, money((dailyMap.get(day) || 0) + amount));
+  }
   for (const row of sources.earnings) {
     if (!inRange(row.created_at, from, to)) continue;
     const day = String(row.created_at || '').slice(0, 10);
@@ -276,7 +277,7 @@ export async function getCompanyRevenueMetrics(query = {}) {
     totalPlatformRevenue,
     totalCreatorEarnings,
     platformCommissionEarnings: totalPlatformRevenue,
-    subscriptionRevenue: money(subscriptionRevenue),
+    coinPurchaseRevenue: money(coinPurchaseRevenue),
     videoPurchaseRevenue: money(videoPurchaseRevenue),
     tipRevenue: money(tipRevenue),
     creatorPayoutTotals,
@@ -292,9 +293,15 @@ export async function getCompanyRevenueMetrics(query = {}) {
     topEarningCreators: topCreatorsEnriched,
     highestPayingUsers: topPayersEnriched,
     commissionTrend,
-    subscriptionAnalytics: {
-      count: sources.memberships.filter((m) => ACTIVE_MEMBERSHIP.includes(m.status) && inRange(m.started_at, from, to)).length,
-      revenue: money(subscriptionRevenue),
+    coinPurchaseAnalytics: {
+      count: sources.coinPayments.filter((payment) => {
+        const productType = String(payment.product_type || '').toLowerCase();
+        const paidAt = payment.fulfilled_at || payment.created_at;
+        return /coin|token/.test(productType)
+          && SUCCESSFUL_PAYMENT_STATUSES.includes(String(payment.status || '').toLowerCase())
+          && inRange(paidAt, from, to);
+      }).length,
+      revenue: money(coinPurchaseRevenue),
     },
     payoutAnalytics: {
       pending: payoutMetrics.pendingAmount,
@@ -302,7 +309,7 @@ export async function getCompanyRevenueMetrics(query = {}) {
       avgHours: payoutMetrics.avgProcessingHours,
     },
     breakdown: [
-      { name: 'Subscriptions', value: money(subscriptionRevenue) },
+      { name: 'Coin purchases', value: money(coinPurchaseRevenue) },
       { name: 'Video purchases', value: money(videoPurchaseRevenue) },
       { name: 'Tips & gifts', value: money(tipRevenue) },
       { name: 'Platform fees', value: totalPlatformRevenue },

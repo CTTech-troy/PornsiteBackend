@@ -57,7 +57,7 @@ function rememberRecent(list, entry) {
   if (list.length > diagnosticsMaxRecent) list.length = diagnosticsMaxRecent;
 }
 
-function recordRedisTiming(command, startedAt, error = null) {
+function recordRedisTiming(command, startedAt, error = null, { logSlow = true } = {}) {
   const name = String(command || 'UNKNOWN').toUpperCase();
   const durationMs = Date.now() - startedAt;
   redisDiagnostics.total += 1;
@@ -72,7 +72,9 @@ function recordRedisTiming(command, startedAt, error = null) {
       at: new Date().toISOString(),
       error: error ? sanitizeRedisError(error) : null,
     });
-    console.warn('[redis] slow operation', { command: name, durationMs, error: error ? sanitizeRedisError(error) : null });
+    if (logSlow) {
+      console.warn('[redis] slow operation', { command: name, durationMs, error: error ? sanitizeRedisError(error) : null });
+    }
   }
 
   const stats = redisDiagnostics.byCommand.get(name) || {
@@ -232,6 +234,7 @@ export async function sendRedisCommand(...command) {
 export async function runRedisOperation(name, operation, {
   timeoutMs = commandTimeoutMs,
   critical = false,
+  logSlow = true,
 } = {}) {
   if (!upstashRedis) {
     const error = new Error('Upstash Redis is not configured');
@@ -254,11 +257,11 @@ export async function runRedisOperation(name, operation, {
       }),
     ]);
     markRedisConnected();
-    recordRedisTiming(name, started);
+    recordRedisTiming(name, started, null, { logSlow });
     return result;
   } catch (error) {
     markRedisError(error);
-    recordRedisTiming(name, started, error);
+    recordRedisTiming(name, started, error, { logSlow });
     if (critical) throw error;
     return null;
   } finally {

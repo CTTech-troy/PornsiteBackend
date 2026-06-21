@@ -12,14 +12,14 @@ test('African countries route to Flutterwave', () => {
   assert.equal(resolvePaymentProvider({ countryCode: 'ZA' }), 'flutterwave');
 });
 
-test('Non-African countries route to Paystack', () => {
-  assert.equal(resolvePaymentProvider({ countryCode: 'US' }), 'paystack');
-  assert.equal(resolvePaymentProvider({ countryCode: 'GB' }), 'paystack');
+test('Non-African countries route to Flutterwave', () => {
+  assert.equal(resolvePaymentProvider({ countryCode: 'US' }), 'flutterwave');
+  assert.equal(resolvePaymentProvider({ countryCode: 'GB' }), 'flutterwave');
 });
 
-test('Billing country overrides checkout country for routing', () => {
+test('Billing country does not change the Flutterwave-only provider', () => {
   assert.equal(resolvePaymentProvider({ countryCode: 'US', billingCountry: 'NG' }), 'flutterwave');
-  assert.equal(resolvePaymentProvider({ countryCode: 'NG', billingCountry: 'US' }), 'paystack');
+  assert.equal(resolvePaymentProvider({ countryCode: 'NG', billingCountry: 'US' }), 'flutterwave');
 });
 
 test('isAfricanCountry helper', () => {

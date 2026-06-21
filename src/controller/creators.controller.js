@@ -90,27 +90,50 @@ function mapXnxxVideoToCreatorVideo(v, i) {
 }
 
 function mapPlatformVideoToCreatorVideo(v, i) {
+  const thumb = v.thumbnailUrl || v.thumbnail_url || v.thumbnail || v.posterUrl || v.poster_url || v.poster || v.thumb_url || v.thumb || '';
+  const id = v.videoId || v.id || `platform-v-${i}`;
+  const creatorId = v.creatorId || v.creator_id || v.userId || v.user_id || null;
+  const createdAt = v.createdAt || v.created_at || v.uploadedAt || v.uploaded_at || null;
+  const rawAccessType = String(v.accessType || v.access_type || '').toLowerCase();
+  const legacyCoinGate = v.requiresMembership === true || v.requires_membership === true || v.subscriptionAccess === true || v.subscription_access === true || rawAccessType === 'members_only';
+  const accessType = legacyCoinGate ? 'coin_unlock' : (v.accessType || v.access_type || (v.isPremiumContent ? 'premium' : 'free'));
   return {
-    id: v.videoId || v.id || `platform-v-${i}`,
+    id,
+    videoId: id,
+    video_id: id,
     title: v.title || 'Video',
-    thumbnail: v.thumbnailUrl || v.thumbnail || '',
+    thumbnail: thumb,
+    thumbnailUrl: thumb,
+    thumbnail_url: thumb,
     duration: v.durationSeconds ?? v.duration ?? 0,
+    durationSeconds: v.durationSeconds ?? v.duration_seconds ?? v.duration ?? 0,
     views: v.totalViews ?? v.views ?? 0,
+    totalViews: v.totalViews ?? v.views ?? 0,
     url: v.videoUrl || v.streamUrl || v.playbackUrl || '',
+    videoUrl: v.videoUrl || v.streamUrl || v.playbackUrl || '',
+    streamUrl: v.streamUrl || v.videoUrl || v.playbackUrl || '',
     likes: v.totalLikes ?? v.likes ?? 0,
+    totalLikes: v.totalLikes ?? v.likes ?? 0,
     comments: v.totalComments ?? v.comments ?? 0,
-    isPremium: v.isPremiumContent === true,
-    isPremiumContent: v.isPremiumContent === true,
+    totalComments: v.totalComments ?? v.comments ?? 0,
+    createdAt,
+    isPremium: v.isPremiumContent === true || legacyCoinGate,
+    isPremiumContent: v.isPremiumContent === true || legacyCoinGate,
     tokenPrice: Number(v.tokenPrice || 0),
-    accessType: v.accessType || v.access_type || (v.isPremiumContent ? 'premium' : 'free'),
+    accessType,
     premiumVisibility: v.premiumVisibility || v.premium_visibility || null,
-    requiresMembership: v.requiresMembership === true || v.requires_membership === true,
-    subscriptionAccess: v.subscriptionAccess === true || v.subscription_access === true,
+    requiresMembership: false,
+    subscriptionAccess: false,
     officialCompanyContent: v.officialCompanyContent === true || v.official_company_content === true,
     source: v.source || 'community',
-    userId: v.userId || v.user_id || null,
+    userId: v.userId || v.user_id || creatorId,
+    user_id: v.userId || v.user_id || creatorId,
+    creatorId,
+    creator_id: creatorId,
     creatorDisplayName: v.creatorDisplayName || null,
+    creator_display_name: v.creatorDisplayName || null,
     creatorAvatarUrl: v.creatorAvatarUrl || null,
+    creator_avatar_url: v.creatorAvatarUrl || null,
   };
 }
 
@@ -123,7 +146,12 @@ async function getPlatformCreatorByIdentifier(identifier) {
     const allVideos = await fetchPublishedPublicVideos({ page: 1, limit: 500 }).catch(() => []);
     const videos = (Array.isArray(allVideos) ? allVideos : [])
       .filter((v) => String(v.userId || v.user_id || v.creatorId || v.creator_id || '') === String(company.id))
-      .map(mapPlatformVideoToCreatorVideo);
+      .map(mapPlatformVideoToCreatorVideo)
+      .sort((a, b) => {
+        const left = Date.parse(String(a.createdAt || '')) || 0;
+        const right = Date.parse(String(b.createdAt || '')) || 0;
+        return right - left;
+      });
     return {
       id: company.id,
       slug: company.id,
@@ -142,6 +170,7 @@ async function getPlatformCreatorByIdentifier(identifier) {
       followers: 0,
       following: 0,
       videosCount: videos.length,
+      totalViews: videos.reduce((sum, item) => sum + (Number(item.totalViews ?? item.views ?? 0) || 0), 0),
       videos,
       _source: 'official_company',
     };
@@ -150,7 +179,7 @@ async function getPlatformCreatorByIdentifier(identifier) {
 
   let { data: creator, error } = await supabase
     .from('creators')
-    .select('id, user_id, display_name, bio, creator_type, active, status, created_at')
+    .select('id, user_id, display_name, bio, creator_type, active, status, social_links, banner_url, cover_image, verified, created_at')
     .eq('user_id', raw)
     .maybeSingle();
   if (error && isColumnMissingError(error)) {
@@ -165,7 +194,7 @@ async function getPlatformCreatorByIdentifier(identifier) {
   if (!creator && isUuidLike(raw)) {
     ({ data: creator, error } = await supabase
       .from('creators')
-      .select('id, user_id, display_name, bio, creator_type, active, status, created_at')
+      .select('id, user_id, display_name, bio, creator_type, active, status, social_links, banner_url, cover_image, verified, created_at')
       .eq('id', raw)
       .maybeSingle());
     if (error && isColumnMissingError(error)) {
@@ -184,14 +213,19 @@ async function getPlatformCreatorByIdentifier(identifier) {
 
   const { data: user } = await supabase
     .from('users')
-    .select('username, display_name, full_name, avatar, avatar_url, followers, following')
+    .select('username, display_name, full_name, avatar, avatar_url, followers, following, verified')
     .eq('id', creator.user_id)
     .maybeSingle();
 
   const allVideos = await fetchPublishedPublicVideos({ page: 1, limit: 500 }).catch(() => []);
   const videos = (Array.isArray(allVideos) ? allVideos : [])
     .filter((v) => String(v.userId || v.user_id || v.creatorId || v.creator_id || '') === String(creator.user_id))
-    .map(mapPlatformVideoToCreatorVideo);
+    .map(mapPlatformVideoToCreatorVideo)
+    .sort((a, b) => {
+      const left = Date.parse(String(a.createdAt || '')) || 0;
+      const right = Date.parse(String(b.createdAt || '')) || 0;
+      return right - left;
+    });
 
   const name =
     creator.display_name ||
@@ -207,12 +241,21 @@ async function getPlatformCreatorByIdentifier(identifier) {
     creatorId: creator.id,
     name,
     displayName: name,
+    username: user?.username || null,
     avatar: user?.avatar_url || user?.avatar || '',
+    avatar_url: user?.avatar_url || user?.avatar || '',
+    banner: creator.banner_url || creator.cover_image || '',
+    bannerUrl: creator.banner_url || creator.cover_image || '',
+    banner_url: creator.banner_url || creator.cover_image || '',
     bio: creator.bio || '',
+    socialLinks: creator.social_links || {},
+    social_links: creator.social_links || {},
     creatorType: creator.creator_type || 'pstar',
     followers: Number(user?.followers || 0),
     following: Number(user?.following || 0),
+    verified: creator.verified === true || user?.verified === true,
     videosCount: videos.length,
+    totalViews: videos.reduce((sum, item) => sum + (Number(item.totalViews ?? item.views ?? 0) || 0), 0),
     videos,
     _source: 'platform',
   };
@@ -324,7 +367,7 @@ export async function getCreatorBySlug(req, res) {
       videos: videos.map((v, i) => ({
         id: v.id || v.video_id || v.key || `v-${i}`,
         title: v.title || v.name || '',
-        thumbnail: v.thumbnail || v.thumb || v.poster || '',
+        thumbnail: v.thumbnailUrl || v.thumbnail_url || v.thumbnail || v.thumbUrl || v.thumb_url || v.thumb || v.posterUrl || v.poster_url || v.poster || '',
         duration: v.duration ?? v.length ?? 0,
         views: v.views ?? v.views_count ?? 0,
         url: v.url || v.link || '',

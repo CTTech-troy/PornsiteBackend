@@ -13,12 +13,14 @@ const PUBLIC_FEED_CACHE_TTL_MS = Math.max(5_000, Number(process.env.PUBLIC_VIDEO
 const PUBLIC_FEED_CACHE_MAX_KEYS = Math.max(10, Number(process.env.PUBLIC_VIDEO_FEED_CACHE_MAX_KEYS || 80));
 const VIDEO_DELIVERY_SLOW_QUERY_MS = Math.max(50, Number(process.env.VIDEO_DELIVERY_SLOW_QUERY_MS || 250));
 const VIDEO_DELIVERY_DIAGNOSTICS = String(process.env.VIDEO_DELIVERY_DIAGNOSTICS || '').toLowerCase() === 'true';
+const PUBLIC_FEED_SOURCE_TIMEOUT_MS = Math.max(500, Number(process.env.PUBLIC_VIDEO_FEED_SOURCE_TIMEOUT_MS || 2500));
 
 const publicFeedCache = new Map();
 
 const TIKTOK_PUBLIC_SELECT_COLUMNS = [
   'video_id',
   'user_id',
+  'creator_id',
   'title',
   'description',
   'main_orientation_category',
@@ -174,6 +176,26 @@ async function timedDelivery(label, fn, meta = {}) {
     logDeliveryTiming(label, startedAt, { ...meta, error: error?.message || String(error) });
     throw error;
   }
+}
+
+function withDeliveryTimeout(label, promise, fallback = []) {
+  let timer = null;
+  const startedAt = Date.now();
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => {
+      timer = setTimeout(() => {
+        logDeliveryTiming(label, startedAt, { timeout: true });
+        resolve(fallback);
+      }, PUBLIC_FEED_SOURCE_TIMEOUT_MS);
+      timer.unref?.();
+    }),
+  ]).catch((error) => {
+    logDeliveryTiming(label, startedAt, { error: error?.message || String(error) });
+    return fallback;
+  }).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function applyPublicListingFilter(q) {
@@ -348,8 +370,8 @@ function getPrimaryThumbnailUrl(row = {}) {
 function hasRenderablePublicVideo(v) {
   if (!v || typeof v !== 'object') return false;
   const title = String(v.title || '').trim();
-  const thumb = String(v.thumbnailUrl || '').trim();
-  const url = String(v.videoUrl || v.streamUrl || '').trim();
+  const thumb = getPrimaryThumbnailUrl(v);
+  const url = getPrimaryVideoUrl(v);
   const source = String(v.source || v.contentSource || v.content_source || '').toLowerCase();
   const listableExternal =
     (v.listableInFeed === true || v.feedVisible === true) ||
@@ -391,9 +413,10 @@ function mapTiktokRowToPublicVideo(row) {
   return {
     id: row.video_id,
     videoId: row.video_id,
-    userId: row.user_id,
-    creatorId: row.user_id,
-    creator_id: row.user_id,
+    userId: row.user_id || row.creator_id,
+    user_id: row.user_id || row.creator_id,
+    creatorId: row.creator_id || row.user_id,
+    creator_id: row.creator_id || row.user_id,
     title: row.title || '',
     description: row.description || '',
     mainOrientationCategory: row.main_orientation_category || '',
@@ -409,12 +432,12 @@ function mapTiktokRowToPublicVideo(row) {
     consentQuestion: CONSENT_QUESTION,
     consentGiven: row.consent_given === true,
     isLive: row.is_live === true,
-    isPremiumContent: row.is_premium_content === true,
+    isPremiumContent: row.is_premium_content === true || row.requires_membership === true || row.subscription_access === true,
     tokenPrice: Number(row.token_price || row.coin_price || 0),
-    accessType: row.access_type || (row.is_premium_content === true ? 'premium' : 'free'),
+    accessType: row.requires_membership === true || row.subscription_access === true ? 'coin_unlock' : row.access_type || (row.is_premium_content === true ? 'premium' : 'free'),
     premiumVisibility: row.premium_visibility || null,
-    requiresMembership: row.requires_membership === true,
-    subscriptionAccess: row.subscription_access === true,
+    requiresMembership: false,
+    subscriptionAccess: false,
     officialCompanyContent: row.official_company_content === true,
     totalLikes: Number(row.likes_count || 0),
     totalComments: Number(row.comments_count || 0),
@@ -511,6 +534,7 @@ function mapRtdbVideoRowToPublicVideo(videoId, row) {
     id,
     videoId: id,
     userId: row.userId || row.user_id || row.uid || null,
+    user_id: row.userId || row.user_id || row.uid || null,
     creatorId: row.userId || row.user_id || row.uid || null,
     creator_id: row.userId || row.user_id || row.uid || null,
     title: row.title || row.name || 'Video',
@@ -528,12 +552,12 @@ function mapRtdbVideoRowToPublicVideo(videoId, row) {
     consentQuestion: row.consentQuestion || CONSENT_QUESTION,
     consentGiven: row.consentGiven !== false,
     isLive: row.isLive !== false,
-    isPremiumContent: row.isPremiumContent === true || Number(row.tokenPrice || row.coin_price || 0) > 0,
+    isPremiumContent: row.isPremiumContent === true || Number(row.tokenPrice || row.coin_price || 0) > 0 || row.requiresMembership === true || row.requires_membership === true || row.subscriptionAccess === true || row.subscription_access === true,
     tokenPrice: Number(row.tokenPrice || row.coin_price || 0),
-    accessType: row.accessType || row.access_type || (row.isPremiumContent ? 'premium' : 'free'),
+    accessType: row.requiresMembership === true || row.requires_membership === true || row.subscriptionAccess === true || row.subscription_access === true ? 'coin_unlock' : row.accessType || row.access_type || (row.isPremiumContent ? 'premium' : 'free'),
     premiumVisibility: row.premiumVisibility || row.premium_visibility || null,
-    requiresMembership: row.requiresMembership === true || row.requires_membership === true,
-    subscriptionAccess: row.subscriptionAccess === true || row.subscription_access === true,
+    requiresMembership: false,
+    subscriptionAccess: false,
     totalLikes: Number(row.totalLikes || row.likes_count || 0),
     totalComments: Number(row.totalComments || row.comments_count || 0),
     totalViews: Number(row.totalViews ?? row.views ?? row.views_count ?? 0) || 0,
@@ -554,6 +578,7 @@ function mapMediaRowToPublicVideo(row, source = 'media') {
     id,
     videoId: id,
     userId: row.user_id || row.userId || row.uid || null,
+    user_id: row.user_id || row.userId || row.uid || null,
     creatorId: row.user_id || row.userId || row.uid || null,
     creator_id: row.user_id || row.userId || row.uid || null,
     title: row.title || row.name || 'Creator video',
@@ -571,12 +596,12 @@ function mapMediaRowToPublicVideo(row, source = 'media') {
     consentQuestion: CONSENT_QUESTION,
     consentGiven: true,
     isLive: true,
-    isPremiumContent: row.is_premium_content === true || row.isPremiumContent === true || Number(row.token_price || row.tokenPrice || 0) > 0,
+    isPremiumContent: row.is_premium_content === true || row.isPremiumContent === true || Number(row.token_price || row.tokenPrice || 0) > 0 || row.requires_membership === true || row.requiresMembership === true || row.subscription_access === true || row.subscriptionAccess === true,
     tokenPrice: Number(row.token_price || row.tokenPrice || 0),
-    accessType: row.access_type || row.accessType || (row.is_premium_content === true || row.isPremiumContent === true ? 'premium' : 'free'),
+    accessType: row.requires_membership === true || row.requiresMembership === true || row.subscription_access === true || row.subscriptionAccess === true ? 'coin_unlock' : row.access_type || row.accessType || (row.is_premium_content === true || row.isPremiumContent === true ? 'premium' : 'free'),
     premiumVisibility: row.premium_visibility || row.premiumVisibility || null,
-    requiresMembership: row.requires_membership === true || row.requiresMembership === true,
-    subscriptionAccess: row.subscription_access === true || row.subscriptionAccess === true,
+    requiresMembership: false,
+    subscriptionAccess: false,
     totalLikes: Number(row.likes_count || row.totalLikes || 0),
     totalComments: Number(row.comments_count || row.totalComments || 0),
     totalViews: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
@@ -644,20 +669,19 @@ export function publicVideoToHomeCard(v, index) {
   if (!id) return null;
   const playback = getPublicVideoPlaybackShape(v);
   const preview = String(v.previewVideo || '').trim();
-  const thumb = String(v.thumbnailUrl || '').trim();
+  const thumb = getPrimaryThumbnailUrl(v);
   const dur = Number(v.durationSeconds) || 0;
   const title = v.title || 'Video';
   const seed = String(v.userId || id || title).slice(0, 50);
-  const accessType = String(v.accessType || v.access_type || '').trim().toLowerCase().replace(/-/g, '_')
+  const rawAccessType = String(v.accessType || v.access_type || '').trim().toLowerCase().replace(/-/g, '_')
     || (v.isPremiumContent === true || Number(v.tokenPrice || 0) > 0 ? 'premium' : 'free');
-  const requiresMembership = v.requiresMembership === true || v.requires_membership === true || accessType === 'members_only';
-  const subscriptionAccess = v.subscriptionAccess === true || v.subscription_access === true || accessType === 'members_only';
+  const legacyCoinGate = v.requiresMembership === true || v.requires_membership === true || v.subscriptionAccess === true || v.subscription_access === true || rawAccessType === 'members_only';
+  const accessType = legacyCoinGate ? 'coin_unlock' : rawAccessType;
   const isPremiumContent =
     v.isPremiumContent === true ||
     Number(v.tokenPrice || 0) > 0 ||
-    ['premium', 'members_only', 'coin_unlock'].includes(accessType) ||
-    requiresMembership ||
-    subscriptionAccess;
+    ['premium', 'coin_unlock'].includes(accessType) ||
+    legacyCoinGate;
   return {
     id: String(id),
     title: String(title),
@@ -693,9 +717,10 @@ export function publicVideoToHomeCard(v, index) {
     description: title ? `Watch ${title}.` : 'Watch this video.',
     source: v.source || 'community',
     contentSource: v.contentSource || v.content_source || null,
-    userId: v.userId || null,
-    creatorId: v.creatorId || v.creator_id || v.userId || null,
-    creator_id: v.creatorId || v.creator_id || v.userId || null,
+    userId: v.userId || v.user_id || null,
+    user_id: v.userId || v.user_id || null,
+    creatorId: v.creatorId || v.creator_id || v.userId || v.user_id || null,
+    creator_id: v.creatorId || v.creator_id || v.userId || v.user_id || null,
     creatorPriority: hasCreatorPriority(v),
     allowPeopleToComment: v.allowPeopleToComment !== false,
     category: v.category || v.mainOrientationCategory || '',
@@ -708,10 +733,10 @@ export function publicVideoToHomeCard(v, index) {
     access_type: accessType,
     premiumVisibility: v.premiumVisibility || v.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
     premium_visibility: v.premiumVisibility || v.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership,
-    requires_membership: requiresMembership,
-    subscriptionAccess,
-    subscription_access: subscriptionAccess,
+    requiresMembership: false,
+    requires_membership: false,
+    subscriptionAccess: false,
+    subscription_access: false,
     officialCompanyContent: v.officialCompanyContent === true || v.official_company_content === true,
     official_company_content: v.officialCompanyContent === true || v.official_company_content === true,
     playable: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.playable === true,
@@ -734,16 +759,15 @@ export function publicVideoToFeedItem(v, index) {
   const playback = getPublicVideoPlaybackShape(v);
   const id = v.videoId ?? v.id;
   if (!id) return null;
-  const accessType = String(v.accessType || v.access_type || '').trim().toLowerCase().replace(/-/g, '_')
+  const rawAccessType = String(v.accessType || v.access_type || '').trim().toLowerCase().replace(/-/g, '_')
     || (v.isPremiumContent === true || Number(v.tokenPrice || 0) > 0 ? 'premium' : 'free');
-  const requiresMembership = v.requiresMembership === true || v.requires_membership === true || accessType === 'members_only';
-  const subscriptionAccess = v.subscriptionAccess === true || v.subscription_access === true || accessType === 'members_only';
+  const legacyCoinGate = v.requiresMembership === true || v.requires_membership === true || v.subscriptionAccess === true || v.subscription_access === true || rawAccessType === 'members_only';
+  const accessType = legacyCoinGate ? 'coin_unlock' : rawAccessType;
   const isPremiumContent =
     v.isPremiumContent === true ||
     Number(v.tokenPrice || 0) > 0 ||
-    ['premium', 'members_only', 'coin_unlock'].includes(accessType) ||
-    requiresMembership ||
-    subscriptionAccess;
+    ['premium', 'coin_unlock'].includes(accessType) ||
+    legacyCoinGate;
   return {
     id: String(id),
     videoUrl: playback.pageUrl,
@@ -757,9 +781,9 @@ export function publicVideoToFeedItem(v, index) {
     playbackType: playback.playbackType,
     playback_type: playback.playbackType,
     previewVideo: preview,
-    thumbnailUrl: String(v.thumbnailUrl || ''),
-    thumbnail_url: String(v.thumbnailUrl || ''),
-    thumbnail: String(v.thumbnailUrl || ''),
+    thumbnailUrl: getPrimaryThumbnailUrl(v),
+    thumbnail_url: getPrimaryThumbnailUrl(v),
+    thumbnail: getPrimaryThumbnailUrl(v),
     pageUrl: playback.pageUrl,
     page_url: playback.pageUrl,
     externalUrl: playback.externalUrl,
@@ -775,9 +799,10 @@ export function publicVideoToFeedItem(v, index) {
     totalViews: v.totalViews ?? v.views ?? 0,
     source: v.source || 'community',
     contentSource: v.contentSource || v.content_source || null,
-    userId: v.userId || null,
-    creatorId: v.creatorId || v.creator_id || v.userId || null,
-    creator_id: v.creatorId || v.creator_id || v.userId || null,
+    userId: v.userId || v.user_id || null,
+    user_id: v.userId || v.user_id || null,
+    creatorId: v.creatorId || v.creator_id || v.userId || v.user_id || null,
+    creator_id: v.creatorId || v.creator_id || v.userId || v.user_id || null,
     creatorPriority: hasCreatorPriority(v),
     allowPeopleToComment: v.allowPeopleToComment !== false,
     category: v.category || v.mainOrientationCategory || '',
@@ -789,10 +814,10 @@ export function publicVideoToFeedItem(v, index) {
     access_type: accessType,
     premiumVisibility: v.premiumVisibility || v.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
     premium_visibility: v.premiumVisibility || v.premium_visibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership,
-    requires_membership: requiresMembership,
-    subscriptionAccess,
-    subscription_access: subscriptionAccess,
+    requiresMembership: false,
+    requires_membership: false,
+    subscriptionAccess: false,
+    subscription_access: false,
     officialCompanyContent: v.officialCompanyContent === true || v.official_company_content === true,
     official_company_content: v.officialCompanyContent === true || v.official_company_content === true,
     playable: Boolean(playback.playbackUrl) || playback.isExternalEmbed || v.playable === true,
@@ -928,7 +953,8 @@ async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false, categor
   if (!rtdb) return [];
   const categoryFilter = normalizeCategoryFilter(category);
   try {
-    const snap = await rtdb.ref('videos').once('value');
+    const limitNum = Math.min(500, Math.max(1, Number(limit) || 500));
+    const snap = await rtdb.ref('videos').orderByKey().limitToLast(limitNum).once('value');
     const val = snap.val();
     if (!val || typeof val !== 'object') return [];
     const mapped = Object.entries(val)
@@ -937,7 +963,7 @@ async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false, categor
       .filter((v) => !premiumOnly || v.isPremiumContent === true)
       .filter((v) => publicVideoMatchesCategory(v, categoryFilter))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
-      .slice(0, Math.min(500, Math.max(1, Number(limit) || 500)));
+      .slice(0, limitNum);
     return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
   } catch {
     return [];
@@ -949,7 +975,8 @@ async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false, ca
   if (!rtdb) return [];
   const categoryFilter = normalizeCategoryFilter(category);
   try {
-    const snap = await rtdb.ref('media').once('value');
+    const limitNum = Math.min(500, Math.max(1, Number(limit) || 500));
+    const snap = await rtdb.ref('media').orderByKey().limitToLast(limitNum).once('value');
     const val = snap.val();
     if (!val || typeof val !== 'object') return [];
     const mapped = Object.entries(val)
@@ -958,7 +985,7 @@ async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false, ca
       .filter((v) => !premiumOnly || v.isPremiumContent === true)
       .filter((v) => publicVideoMatchesCategory(v, categoryFilter))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
-      .slice(0, Math.min(500, Math.max(1, Number(limit) || 500)));
+      .slice(0, limitNum);
     return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
   } catch {
     return [];
@@ -971,11 +998,11 @@ async function fetchAllCreatorPublicVideos({ page = 1, limit = 100, premiumOnly 
   const fetchLimit = Math.min(500, pageNum * limitNum);
   const categoryFilter = normalizeCategoryFilter(category);
   const [tiktokRows, importedRows, mediaRows, rtdbRows, rtdbMediaRows] = await Promise.all([
-    fetchSupabaseTiktokPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter }),
-    fetchSupabaseImportedPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter }),
-    fetchSupabaseMediaPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter }),
-    fetchRtdbPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter }),
-    fetchRtdbMediaPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter }),
+    withDeliveryTimeout('public-feed.tiktok', fetchSupabaseTiktokPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter })),
+    withDeliveryTimeout('public-feed.imported', fetchSupabaseImportedPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter })),
+    withDeliveryTimeout('public-feed.media', fetchSupabaseMediaPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter })),
+    withDeliveryTimeout('public-feed.rtdb-videos', fetchRtdbPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter })),
+    withDeliveryTimeout('public-feed.rtdb-media', fetchRtdbMediaPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter })),
   ]);
   return uniquePublicVideos([...tiktokRows, ...importedRows, ...mediaRows, ...rtdbRows, ...rtdbMediaRows]);
 }
@@ -994,14 +1021,51 @@ export async function fetchPublishedPublicVideos({ page = 1, limit = 100, premiu
   return cloneRows(sliced);
 }
 
+async function safeCount(queryPromise) {
+  try {
+    const { count, error } = await queryPromise;
+    if (error) return 0;
+    return Number(count) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function countPublishedPublicVideos({ premiumOnly = false, category = null } = {}) {
+  if (!isConfigured() || !supabase) return 0;
+  const categoryFilter = normalizeCategoryFilter(category);
+
+  let importedQuery = supabase.from('videos').select('id', { count: 'exact', head: true });
+  if (categoryFilter) importedQuery = applyCategoryFilter(importedQuery, 'category', categoryFilter);
+
+  let tiktokQuery = supabase.from('tiktok_videos').select('video_id', { count: 'exact', head: true });
+  tiktokQuery = applyPublicListingFilter(tiktokQuery);
+  if (premiumOnly) tiktokQuery = tiktokQuery.eq('is_premium_content', true);
+  if (categoryFilter) tiktokQuery = applyCategoryFilter(tiktokQuery, 'main_orientation_category', categoryFilter);
+
+  let mediaQuery = supabase.from('media').select('id', { count: 'exact', head: true });
+  if (!premiumOnly) mediaQuery = mediaQuery.eq('type', 'video');
+  if (premiumOnly) mediaQuery = mediaQuery.eq('is_premium_content', true);
+  if (categoryFilter) mediaQuery = applyCategoryFilter(mediaQuery, 'category', categoryFilter);
+
+  const counts = await Promise.all([
+    safeCount(importedQuery),
+    safeCount(tiktokQuery),
+    safeCount(mediaQuery),
+  ]);
+
+  return counts.reduce((sum, value) => sum + value, 0);
+}
+
 /**
  * @param {{ page: number, pagesCount: number }} opts page 1-based, pagesCount merged "pages" width
  * @returns {Promise<Array>} home-card shaped rows
  */
-export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = null, category = null }) {
+export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = null, category = null, limit = null }) {
   const pageNum = Math.max(1, Number(page) || 1);
   const pages = Math.min(5, Math.max(1, Number(pagesCount) || 1));
-  const pageSize = Math.min(200, 20 * pages);
+  const requestedLimit = Number(limit);
+  const pageSize = Math.min(500, Math.max(20 * pages, Number.isFinite(requestedLimit) ? requestedLimit : 20 * pages));
   const rows = await fetchPublishedPublicVideos({ page: pageNum, limit: pageSize, category });
   return rows.map((v, i) => publicVideoToHomeCard(v, i)).filter(Boolean);
 }
@@ -1012,7 +1076,7 @@ export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = nu
  */
 export async function fetchPublishedFeedPage({ page, limit, viewerUid = null }) {
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const rows = await fetchPublishedPublicVideos({ page: pageNum, limit: limitNum });
   return rows.map((v, i) => publicVideoToFeedItem(v, i)).filter(Boolean);
 }
@@ -1084,9 +1148,9 @@ function publicVideoToDetailItem(v) {
     playbackType: playback.playbackType,
     playback_type: playback.playbackType,
     previewVideo: preview,
-    thumbnailUrl: String(v.thumbnailUrl || ''),
-    thumbnail_url: String(v.thumbnailUrl || ''),
-    thumbnail: String(v.thumbnailUrl || ''),
+    thumbnailUrl: getPrimaryThumbnailUrl(v),
+    thumbnail_url: getPrimaryThumbnailUrl(v),
+    thumbnail: getPrimaryThumbnailUrl(v),
     pageUrl: playback.pageUrl,
     page_url: playback.pageUrl,
     externalUrl: playback.externalUrl,
@@ -1103,9 +1167,10 @@ function publicVideoToDetailItem(v) {
     totalLikes: v.totalLikes ?? 0,
     totalComments: v.totalComments ?? 0,
     source: v.source || 'community',
-    userId: v.userId || null,
-    creatorId: v.creatorId || v.creator_id || v.userId || null,
-    creator_id: v.creatorId || v.creator_id || v.userId || null,
+    userId: v.userId || v.user_id || null,
+    user_id: v.userId || v.user_id || null,
+    creatorId: v.creatorId || v.creator_id || v.userId || v.user_id || null,
+    creator_id: v.creatorId || v.creator_id || v.userId || v.user_id || null,
     creatorPriority: hasCreatorPriority(v),
     allowPeopleToComment: v.allowPeopleToComment !== false,
     isPremiumContent: v.isPremiumContent === true,

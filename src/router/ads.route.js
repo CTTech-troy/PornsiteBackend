@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   getPlacementAd,
   getNextAd,
+  getVastXml,
   getSlotAd,
   trackCampaignImpression,
   trackCampaignClick,
@@ -12,6 +13,7 @@ import {
 const router = Router();
 
 router.get('/next', getNextAd);
+router.get('/vast-xml', getVastXml);
 router.get('/placement/:placement', getPlacementAd);
 router.get('/slot/:slotKey', getSlotAd);
 router.post('/campaign/:adId/impression', trackCampaignImpression);

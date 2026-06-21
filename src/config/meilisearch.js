@@ -18,7 +18,7 @@ const INDEX_SETTINGS = {
   [MEILI_INDEXES.videos]: {
     primaryKey: 'id',
     searchableAttributes: ['title', 'description', 'tags', 'categories', 'creatorDisplayName', 'provider'],
-    filterableAttributes: ['isPremiumContent', 'accessType', 'premiumVisibility', 'requiresMembership', 'subscriptionAccess', 'officialCompanyContent', 'contentSource', 'playable', 'deleted', 'creatorId', 'tags', 'categories'],
+    filterableAttributes: ['isPremiumContent', 'accessType', 'premiumVisibility', 'officialCompanyContent', 'contentSource', 'playable', 'deleted', 'creatorId', 'tags', 'categories'],
     sortableAttributes: ['createdAt', 'viewsCount', 'likesCount', 'commentsCount', 'engagementScore', 'trendingScore'],
     rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness', 'trendingScore:desc', 'viewsCount:desc', 'likesCount:desc', 'createdAt:desc'],
     typoTolerance: { enabled: true },

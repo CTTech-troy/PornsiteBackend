@@ -197,6 +197,7 @@ export async function prepareVideoImportPayload({
   const importedAccessType = ['premium', 'members_only', 'coin_unlock', 'free'].includes(String(row.access_type || '').toLowerCase())
     ? String(row.access_type).toLowerCase()
     : (importType === 'premium' || row.is_premium_content ? 'premium' : 'free');
+  const normalizedImportedAccessType = importedAccessType === 'members_only' ? 'coin_unlock' : importedAccessType;
   const tokenPrice = Math.max(0, parseInt(String(row.token_price || 0), 10) || 0);
 
   const baseRow = await applyOfficialCompanyOwnership({
@@ -210,13 +211,13 @@ export async function prepareVideoImportPayload({
     embed_url: resolvedEmbedUrl,
     thumbnail_url: thumbnailUrl,
     duration_seconds: row.duration_seconds,
-    is_premium_content: importType === 'premium' || row.is_premium_content === true || importedAccessType !== 'free',
-    token_price: importedAccessType === 'coin_unlock' || tokenPrice > 0 ? tokenPrice : 0,
-    coin_price: importedAccessType === 'coin_unlock' || tokenPrice > 0 ? tokenPrice : 0,
-    access_type: importedAccessType,
-    requires_membership: importedAccessType === 'members_only' || row.requires_membership === true,
-    subscription_access: row.subscription_access === true || importedAccessType === 'members_only',
-    premium_visibility: row.premium_visibility || (importedAccessType === 'free' ? 'public' : 'public_preview'),
+    is_premium_content: importType === 'premium' || row.is_premium_content === true || normalizedImportedAccessType !== 'free',
+    token_price: normalizedImportedAccessType === 'coin_unlock' || tokenPrice > 0 ? tokenPrice : 0,
+    coin_price: normalizedImportedAccessType === 'coin_unlock' || tokenPrice > 0 ? tokenPrice : 0,
+    access_type: normalizedImportedAccessType,
+    requires_membership: false,
+    subscription_access: false,
+    premium_visibility: row.premium_visibility || (normalizedImportedAccessType === 'free' ? 'public' : 'public_preview'),
     is_live: true,
     status: 'published',
     visibility: 'public',

@@ -6,8 +6,108 @@ import {
 } from '../services/adCampaign.service.js';
 import { supabase } from '../config/supabase.js';
 import { validateAdForRender } from '../services/safeAdPolicy.service.js';
+import { getPlatformSettingsMap, resolveVastSettingsFromMap } from '../services/platformSettings.service.js';
 
-const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idzone=5933056';
+const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+const VAST_PROXY_TIMEOUT_MS = 5000;
+const VAST_PROXY_MAX_BYTES = 1_000_000;
+const TRUSTED_VAST_HOSTS = ['s.magsrv.com', 'magsrv.com', 'vast.yomeno.xyz', 'yomeno.xyz'];
+
+function normalizeUrlForCompare(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function isTrustedVastHost(parsed) {
+  const host = parsed.hostname.toLowerCase();
+  return TRUSTED_VAST_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+async function resolvePublicVastUrl() {
+  try {
+    const map = await getPlatformSettingsMap();
+    const settings = resolveVastSettingsFromMap(map);
+    return settings.url || EXOCLICK_VAST_TAG_URL;
+  } catch {
+    return EXOCLICK_VAST_TAG_URL;
+  }
+}
+
+async function isTrustedVastUrl(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    if (parsed.protocol !== 'https:') return false;
+    if (isTrustedVastHost(parsed)) return true;
+    const activeUrl = await resolvePublicVastUrl();
+    return Boolean(activeUrl) && normalizeUrlForCompare(activeUrl) === normalizeUrlForCompare(parsed.toString());
+  } catch {
+    return false;
+  }
+}
+
+function analyzeVastXml(xml) {
+  const body = String(xml || '');
+  const hasVast = /<VAST(?=[\s>/])/i.test(body);
+  const adMatches = body.match(/<Ad(?=[\s>])/gi) || [];
+  if (!body.trim()) return { ok: false, reason: 'empty_response', hasAd: false, adCount: 0 };
+  if (!hasVast) return { ok: false, reason: 'malformed_vast', hasAd: false, adCount: 0 };
+  if (!adMatches.length) return { ok: false, reason: 'empty_vast', hasAd: false, adCount: 0 };
+  return { ok: true, reason: null, hasAd: true, adCount: adMatches.length };
+}
+
+async function fetchVastXml(tagUrl) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), VAST_PROXY_TIMEOUT_MS);
+  try {
+    const response = await fetch(tagUrl, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/xml,text/xml,*/*',
+        'User-Agent': 'Mozilla/5.0 (compatible; XStreamVideos-VASTProxy/1.0)',
+      },
+    });
+    const xml = await response.text();
+    if (Buffer.byteLength(xml || '', 'utf8') > VAST_PROXY_MAX_BYTES) {
+      return {
+        ok: false,
+        status: response.status,
+        reason: 'vast_too_large',
+        xml: '',
+      };
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        reason: `http_${response.status}`,
+        xml,
+      };
+    }
+    const analysis = analyzeVastXml(xml);
+    return {
+      ...analysis,
+      status: response.status,
+      contentType: response.headers.get('content-type') || null,
+      bytes: Buffer.byteLength(xml || '', 'utf8'),
+      xml: analysis.ok ? xml : '',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err?.name === 'AbortError' ? 'vast_timeout' : 'vast_fetch_failed',
+      message: err?.message || String(err),
+      xml: '',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const PLACEMENT_BY_SLOT = {
   home_after_subheader_900x250: 'home_after_subheader_900x250',
@@ -88,24 +188,68 @@ function sendPublicAdFallback(req, res, payload, err) {
 
 export async function getNextAd(req, res) {
   try {
+    const settings = resolveVastSettingsFromMap(await getPlatformSettingsMap());
+    if (!settings.enabled || !settings.url) {
+      return res.json({ success: true, ad: null });
+    }
     const placement = 'video_preroll';
     const ad = {
-      id: 'exoclick-vast-5933056',
+      id: `${settings.provider}-vast-preroll`,
       type: 'vast',
       sourceType: 'vast',
       placement,
       url: null,
-      vastTagUrl: EXOCLICK_VAST_TAG_URL,
+      vastTagUrl: settings.url,
       skipAfterSeconds: 5,
       durationSeconds: 0,
       clickUrl: null,
-      provider: 'exoclick',
-      zoneId: '5933056',
+      provider: settings.provider,
+      zoneId: settings.provider === 'clickadilla' ? '1492236' : '5932212',
     };
     return res.json({ success: true, ad });
   } catch (err) {
     return sendPublicAdFallback(req, res, { success: true, ad: null }, err);
   }
+}
+
+export async function getVastXml(req, res) {
+  const requestedUrl = String(req.query.url || '').trim();
+  const tagUrl = requestedUrl || await resolvePublicVastUrl();
+  res.setHeader('Cache-Control', 'no-store');
+
+  if (!await isTrustedVastUrl(tagUrl)) {
+    return res.status(400).json({
+      ok: false,
+      reason: 'untrusted_vast_url',
+      xml: '',
+    });
+  }
+
+  const result = await fetchVastXml(tagUrl);
+  if (!result.ok) {
+    return res.status(200).json({
+      ok: false,
+      reason: result.reason || 'vast_unavailable',
+      diagnostics: {
+        status: result.status || null,
+        bytes: result.bytes || 0,
+        contentType: result.contentType || null,
+        hasAd: Boolean(result.hasAd),
+      },
+      xml: '',
+    });
+  }
+
+  return res.json({
+    ok: true,
+    xml: result.xml,
+    diagnostics: {
+      status: result.status,
+      bytes: result.bytes,
+      contentType: result.contentType,
+      adCount: result.adCount,
+    },
+  });
 }
 
 export async function getPlacementAd(req, res) {

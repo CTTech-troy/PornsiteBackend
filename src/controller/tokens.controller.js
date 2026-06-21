@@ -72,8 +72,10 @@ export async function createTokenCheckout(params) {
     productType: 'coins',
     productId: params.packageId,
     countryCode: params.countryCode,
+    billingCountry: params.billingCountry || null,
     customerEmail: params.customerEmail,
     customerName: params.customerName,
+    customerPhone: params.customerPhone || '',
     req: params.req || null,
   });
 }

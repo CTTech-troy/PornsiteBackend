@@ -525,22 +525,6 @@ export function buildMonetizationWorkflowSchedules() {
   const retries = readPositiveInteger('QSTASH_MONETIZATION_RETRIES', 3);
   return [
     buildMonetizationSchedule({
-      key: 'EXPIRATION',
-      path: '/expire-memberships',
-      cron: process.env.QSTASH_MONETIZATION_EXPIRATION_CRON || '*/15 * * * *',
-      body: { type: 'monetization.memberships.expire' },
-      timeoutSeconds: readPositiveInteger('QSTASH_MONETIZATION_EXPIRATION_TIMEOUT_SECONDS', 30),
-      retries,
-    }),
-    buildMonetizationSchedule({
-      key: 'REMINDERS',
-      path: '/renewal-reminders',
-      cron: process.env.QSTASH_MONETIZATION_REMINDER_CRON || '0 */6 * * *',
-      body: { type: 'monetization.memberships.reminders', days: [7, 3, 1] },
-      timeoutSeconds: readPositiveInteger('QSTASH_MONETIZATION_REMINDER_TIMEOUT_SECONDS', 30),
-      retries,
-    }),
-    buildMonetizationSchedule({
       key: 'ANALYTICS',
       path: '/analytics',
       cron: process.env.QSTASH_MONETIZATION_ANALYTICS_CRON || '10 * * * *',

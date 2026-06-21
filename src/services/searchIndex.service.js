@@ -123,14 +123,14 @@ export function rowToSearchDoc(row = {}) {
   const effectivePlaybackType = directPlaybackUrl ? 'internal' : playbackType;
   const playbackUrl = isExternalEmbed ? '' : (directPlaybackUrl || rawPlaybackUrl || sourcePageUrl);
   const tokenPrice = Number(row.token_price ?? row.tokenPrice ?? row.coin_price ?? 0);
-  const accessType = text(row.access_type || row.accessType).replace(/-/g, '_')
+  const rawAccessType = text(row.access_type || row.accessType).replace(/-/g, '_')
     || (row.requires_membership === true || row.requiresMembership === true
-      ? 'members_only'
+      ? 'coin_unlock'
       : tokenPrice > 0
         ? 'coin_unlock'
         : (row.is_premium_content === true || row.isPremiumContent === true ? 'premium' : 'free'));
-  const requiresMembership = row.requires_membership === true || row.requiresMembership === true || accessType === 'members_only';
-  const subscriptionAccess = row.subscription_access === true || row.subscriptionAccess === true || accessType === 'members_only';
+  const legacyCoinGate = row.requires_membership === true || row.requiresMembership === true || row.subscription_access === true || row.subscriptionAccess === true || rawAccessType === 'members_only';
+  const accessType = legacyCoinGate ? 'coin_unlock' : rawAccessType;
   const tags = normalizeArray(row.tags);
   const categories = normalizeArray(row.categories || row.main_orientation_category || row.category);
   const scores = scoreVideo(row);
@@ -146,7 +146,7 @@ export function rowToSearchDoc(row = {}) {
     creatorDisplayName: text(row.creator_display_name || row.creatorDisplayName || row.channelName),
     creatorAvatarUrl: row.creator_avatar_url || row.creatorAvatarUrl || null,
     provider: text(row.provider),
-    thumbnailUrl: row.thumbnail_url || row.thumbnailUrl || row.thumbnail || '',
+    thumbnailUrl: row.thumbnail_url || row.thumbnailUrl || row.thumbnail || row.poster_url || row.posterUrl || row.poster || row.thumb_url || row.thumbUrl || row.thumb || '',
     duration: Number(row.duration_seconds ?? row.duration ?? 0),
     videoUrl: sourcePageUrl || playbackUrl,
     playbackUrl,
@@ -160,14 +160,13 @@ export function rowToSearchDoc(row = {}) {
       row.is_premium_content === true ||
       row.isPremiumContent === true ||
       tokenPrice > 0 ||
-      ['premium', 'members_only', 'coin_unlock'].includes(accessType) ||
-      requiresMembership ||
-      subscriptionAccess,
+      ['premium', 'coin_unlock'].includes(accessType) ||
+      legacyCoinGate,
     tokenPrice,
     accessType,
     premiumVisibility: row.premium_visibility || row.premiumVisibility || (accessType === 'free' ? 'public' : 'public_preview'),
-    requiresMembership,
-    subscriptionAccess,
+    requiresMembership: false,
+    subscriptionAccess: false,
     officialCompanyContent: row.official_company_content === true || row.officialCompanyContent === true,
     contentSource: text(row.content_source || row.contentSource || (row.import_job_id || iframeEmbed ? 'imported_csv' : ''), 'creator'),
     playable: isExternalEmbed ? true : row.playable !== false,
@@ -424,7 +423,7 @@ async function deleteDocuments(indexName, ids) {
 export async function searchPostgres(q, { page = 1, limit = 20, filters = {} } = {}) {
   if (!supabase) return { items: [], total: 0, hasMore: false };
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const offset = (pageNum - 1) * limitNum;
   const term = String(q || '').trim();
 
@@ -467,7 +466,7 @@ export async function searchMeilisearch(q, { page = 1, limit = 20, filters = {},
   if (!ms) return null;
   await ensureVideosIndex();
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
   const offset = (pageNum - 1) * limitNum;
   const filterParts = ['deleted = false'];
   if (filters.premium === true) filterParts.push('isPremiumContent = true');

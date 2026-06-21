@@ -9,16 +9,32 @@ import {
   fetchXnxxBestPage,
   homeCardToFeedVideoItem,
 } from '../utils/xnxxRapidApi.js';
-import { fetchPublishedHomeCards, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
+import { countPublishedPublicVideos, fetchPublishedHomeCards, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
 import { annotatePlayableVideo, isDirectPlayableStreamUrl, isListableInHomeFeed, isPlayableVideo } from '../utils/videoPlaybackValidation.js';
+import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platformSettings.service.js';
 
 const CACHE_MAX_ITEMS = 500;
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const DEFAULT_LIMIT = 10;
-const MAX_LIMIT = 30;
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
 const PER_PAGE_HINT = 10;
 
 let cache = { items: [], ts: 0 };
+
+function getFeedItemThumbnail(item = {}) {
+  return String(
+    item.thumbnailUrl ||
+    item.thumbnail_url ||
+    item.thumbnail ||
+    item.posterUrl ||
+    item.poster_url ||
+    item.poster ||
+    item.thumbUrl ||
+    item.thumb_url ||
+    item.thumb ||
+    ''
+  ).trim();
+}
 
 function mergeCache(items) {
   const seen = new Set();
@@ -46,13 +62,13 @@ function mergeCache(items) {
 function feedItemHasRenderableMedia(item) {
   if (!item) return false;
   const title = item.title && String(item.title).trim() !== '';
-  const thumb = item.thumbnailUrl && String(item.thumbnailUrl).trim() !== '';
+  const thumb = getFeedItemThumbnail(item);
   const url = (item.playbackUrl || item.streamUrl || item.videoUrl) && String(item.playbackUrl || item.streamUrl || item.videoUrl).trim() !== '';
   if (!item.id || !(thumb || url || title)) return false;
   if (isPlayableVideo(item)) return true;
   return isListableInHomeFeed({
     ...item,
-    thumbnail: item.thumbnailUrl,
+    thumbnail: thumb,
     videoUrl: item.videoUrl || item.streamUrl,
     source: item.source || 'external',
   });
@@ -92,9 +108,9 @@ function mapCachedHomeFeedRow(hf) {
     page_url: page,
     externalUrl: hf.externalUrl || hf.external_url || hf.pageUrl || hf.page_url || page,
     external_url: hf.externalUrl || hf.external_url || hf.pageUrl || hf.page_url || page,
-    thumbnailUrl: String(hf.thumbnail || hf.thumbnailUrl || hf.thumbnail_url || ''),
-    thumbnail_url: String(hf.thumbnail_url || hf.thumbnailUrl || hf.thumbnail || ''),
-    thumbnail: String(hf.thumbnail || hf.thumbnailUrl || hf.thumbnail_url || ''),
+    thumbnailUrl: getFeedItemThumbnail(hf),
+    thumbnail_url: getFeedItemThumbnail(hf),
+    thumbnail: getFeedItemThumbnail(hf),
     duration: Number(hf.durationSeconds) || 0,
     createdAt: new Date().toISOString(),
     title: hf.title || '',
@@ -206,7 +222,7 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
   };
 
   try {
-    const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid, category });
+    const cards = await fetchPublishedHomeCards({ page: pageNum, pagesCount: pagesForDb, viewerUid, category, limit: limitNum });
     if (cards.length) ingestHomeFeedVideos(cards);
     cards.forEach((card, index) => addItem(homeCardToFeedVideoItem(card, index)));
   } catch (err) {
@@ -243,12 +259,14 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
     };
   }
 
-  const hasMore = sliced.length >= limitNum || sliced.length >= PER_PAGE_HINT;
+  const total = await countPublishedPublicVideos({ category }).catch(() => sliced.length);
+  const totalPages = total > 0 ? Math.max(1, Math.ceil(total / limitNum)) : 0;
+  const hasMore = totalPages > 0 ? pageNum < totalPages : (sliced.length >= limitNum || sliced.length >= PER_PAGE_HINT);
   return await withRtdbMerge({
     data: sliced,
-    total: sliced.length,
+    total: Math.max(Number(total) || 0, sliced.length),
     page: pageNum,
-    totalPages: hasMore ? pageNum + 1 : pageNum,
+    totalPages,
     hasMore,
     nextCursor: hasMore ? encodeFeedCursor(pageNum + 1) : null,
     limit: limitNum,
@@ -258,7 +276,10 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
 
 export async function getLatestVideos(req, res) {
   const page = req.query.page || 1;
-  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+  const adminPageSize = await getFeedPageSizeSetting(DEFAULT_LIMIT);
+  const limit = req.query.limit == null
+    ? adminPageSize
+    : Math.min(MAX_LIMIT, normalizeFeedPageSize(parseInt(req.query.limit, 10), adminPageSize));
   try {
     const result = await getVideosPaginated(page, limit, {
       viewerUid: req.uid || null,
@@ -284,7 +305,10 @@ export async function getLatestVideos(req, res) {
 
 export async function getCategoryVideos(req, res) {
   const page = req.query.page || 1;
-  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+  const adminPageSize = await getFeedPageSizeSetting(DEFAULT_LIMIT);
+  const limit = req.query.limit == null
+    ? adminPageSize
+    : Math.min(MAX_LIMIT, normalizeFeedPageSize(parseInt(req.query.limit, 10), adminPageSize));
   const category = String(req.params.slug || req.query.category || '').trim();
   try {
     const result = await getVideosPaginated(page, limit, {

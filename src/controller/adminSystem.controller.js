@@ -4,11 +4,13 @@ import { pingServices } from '../utils/servicePing.js';
 import { getUserDirectoryAggregateStats, safeCount } from '../services/userDirectoryService.js';
 import {
   getAdminSettingsPayload,
+  getResolvedVastSettings,
   getPublicPlatformSettings,
   PLATFORM_SETTINGS_CATALOG,
   saveAdminSettings,
   invalidatePlatformSettingsCache,
 } from '../services/platformSettings.service.js';
+import { probeVastTag } from '../services/adHealthScanner.service.js';
 import { logAction as writeAuditAction } from '../services/adminAudit.service.js';
 import { listPlatformActivityEvents } from '../services/platformActivity.service.js';
 import { isMeilisearchConfigured, getMeilisearchClient } from '../config/meilisearch.js';
@@ -62,6 +64,55 @@ export async function getPublicSettings(req, res) {
 }
 
 // ── PUT /api/admin/system/settings ────────────────────────────────────────────
+
+export async function getPublicVastSettings(req, res) {
+  try {
+    const settings = await getResolvedVastSettings();
+    return res.json({
+      enabled: settings.enabled,
+      provider: settings.provider,
+      url: settings.url,
+    });
+  } catch (err) {
+    console.warn('[settings.vast:fallback]', {
+      requestId: req.requestId,
+      message: err?.message || String(err),
+    });
+    return res.status(200).json({
+      enabled: true,
+      provider: 'monetag',
+      url: 'https://s.magsrv.com/v1/vast.php?idz=5932212',
+      recoverable: true,
+    });
+  }
+}
+
+export async function testVastTag(req, res) {
+  try {
+    const url = String(req.body?.url || req.body?.tagUrl || '').trim();
+    if (!url) return res.status(400).json({ ok: false, message: 'VAST URL required.' });
+    const result = await probeVastTag(url, Math.min(5000, Number(req.body?.timeoutMs) || 5000));
+    const valid = result.status === 'healthy';
+    return res.json({
+      ok: valid,
+      valid,
+      status: result.status,
+      responseMs: result.responseMs || 0,
+      message: valid ? 'VAST is valid - Ad found' : 'VAST is empty - No ad available right now',
+      errorCode: result.errorCode || null,
+      errorMessage: result.errorMessage || null,
+      diagnostics: result.diagnostics || null,
+    });
+  } catch (err) {
+    return res.status(200).json({
+      ok: false,
+      valid: false,
+      status: 'failed',
+      message: 'VAST is empty - No ad available right now',
+      errorMessage: err?.message || 'VAST probe failed',
+    });
+  }
+}
 
 export async function updateSettings(req, res) {
   try {
@@ -119,11 +170,10 @@ export async function getSystemHealth(req, res) {
       userSourceCounts = u.sourceCounts || null;
     } catch (_) {}
 
-    // Count active subscriptions
-    let activeSubscriptions = 0;
+    let coinWallets = 0;
     try {
-      const { count } = await supabase.from('user_memberships').select('*', { count: 'exact', head: true }).eq('status', 'active');
-      activeSubscriptions = count || 0;
+      const { count } = await supabase.from('coin_wallets').select('*', { count: 'exact', head: true });
+      coinWallets = count || 0;
     } catch (_) {}
 
     // Count pending payouts
@@ -185,7 +235,7 @@ export async function getSystemHealth(req, res) {
         totalUsers,
         userSourceCounts,
         activeLives,
-        activeSubscriptions,
+        coinWallets,
         pendingPayouts,
       },
       runtime: {
@@ -296,12 +346,13 @@ export async function getStats(req, res) {
 
     const [
       pendingApps,
-      totalVideos, liveNow, activeMembers, activeAdCampaigns,
+      totalVideos, liveNow, coinWallets, coinTransactions, activeAdCampaigns,
     ] = await Promise.all([
       safeCount(supabase.from('creator_applications').select('*', { count: 'exact', head: true }).eq('status', 'pending')),
       safeCount(supabase.from('tiktok_videos').select('*', { count: 'exact', head: true })),
       safeCount(supabase.from('lives').select('*', { count: 'exact', head: true }).eq('status', 'live')),
-      safeCount(supabase.from('user_memberships').select('*', { count: 'exact', head: true }).eq('status', 'active')),
+      safeCount(supabase.from('coin_wallets').select('*', { count: 'exact', head: true })),
+      safeCount(supabase.from('coin_wallet_transactions').select('*', { count: 'exact', head: true })),
       safeCount(supabase.from('ad_campaigns').select('*', { count: 'exact', head: true }).eq('status', 'active')),
     ]);
 
@@ -329,7 +380,7 @@ export async function getStats(req, res) {
         pendingApplications: pendingApps,
       },
       content:     { videos: totalVideos, liveNow },
-      memberships: { active: activeMembers },
+      coins:       { wallets: coinWallets, transactions: coinTransactions },
       ads:         { activeCampaigns: activeAdCampaigns },
     });
   } catch (err) {
@@ -466,8 +517,7 @@ const MONITORED_ROUTES = [
   { group: 'Creators',     path: '/api/creators' },
   { group: 'Creators',     path: '/api/creators/top' },
   { group: 'Posts',        path: '/api/videos/posts' },
-  { group: 'Payments',     path: '/api/payments/plans' },
-  { group: 'Memberships',  path: '/api/memberships' },
+  { group: 'Coins',        path: '/api/coins/packages' },
   { group: 'Gifts',        path: '/api/gifts' },
   { group: 'Tokens',       path: '/api/tokens/packages' },
   { group: 'Ads',          path: '/api/ads/next' },
@@ -492,8 +542,6 @@ const MONITORED_ROUTES = [
   { group: 'Admin · Users',      path: '/api/admin/applications',             adminAuth: true },
   // ── Admin — finance ───────────────────────────────────────────────────────
   { group: 'Admin · Finance',    path: '/api/admin/finance/summary',          adminAuth: true },
-  { group: 'Admin · Finance',    path: '/api/admin/finance/membership-plans', adminAuth: true },
-  { group: 'Admin · Finance',    path: '/api/admin/finance/subscribers',      adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/payment-history',  adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/payouts',          adminAuth: true },
   { group: 'Admin · Finance',    path: '/api/admin/finance/ads',              adminAuth: true },

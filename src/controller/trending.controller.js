@@ -3,6 +3,7 @@ import { fetchPublishedHomeCards } from '../utils/platformPublicFeed.js';
 import { filterHomeFeedVideos } from '../utils/videoPlaybackValidation.js';
 import { loadExternalFeedConfig } from '../services/externalFeedConfig.service.js';
 import { ingestHomeFeedVideos } from '../config/homeFeedCache.js';
+import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platformSettings.service.js';
 
 function creatorPriorityRank(card = {}) {
   if (card.creatorPriority === true || card.userId || card.user_id || card.creatorId || card.creator_id) return 0;
@@ -15,8 +16,11 @@ function creatorPriorityRank(card = {}) {
 export async function getTrending(req, res) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const creatorCards = await fetchPublishedHomeCards({ page, pagesCount: 1, viewerUid: req.uid || null });
+    const adminPageSize = await getFeedPageSizeSetting(100);
+    const limit = req.query.limit == null
+      ? adminPageSize
+      : normalizeFeedPageSize(parseInt(req.query.limit, 10), adminPageSize);
+    const creatorCards = await fetchPublishedHomeCards({ page, pagesCount: 1, viewerUid: req.uid || null, limit });
     const merged = [...creatorCards];
     const seen = new Set(merged.map((c) => String(c.id)));
 

@@ -5,10 +5,6 @@ import { upstashRedis } from '../config/redis.js';
 import { createCheckout } from './paymentServiceClient.js';
 import { getCoinPackage, fulfillCoinPurchase } from './coinWallet.service.js';
 import {
-  activateMembershipFromPayment,
-  getMembershipPlan,
-} from './membershipLifecycle.service.js';
-import {
   normalizeWebhookPayload,
   verifyProviderTransaction,
   verifyWebhookSignature,
@@ -17,6 +13,7 @@ import {
   countryFromRequest,
   normalizeCountryCode,
   resolveCheckoutCountry,
+  resolvePaymentProvider,
 } from './paymentRegion.service.js';
 import {
   resolveCheckoutProviders,
@@ -37,6 +34,7 @@ const AUDIT_HASH_SECRET = process.env.PAYMENT_AUDIT_HASH_SECRET
   || process.env.SESSION_JWT_SECRET
   || process.env.JWT_SECRET
   || 'local-payment-audit';
+const SUCCESS_PAYMENT_STATUSES = new Set(['success', 'successful', 'fulfilled', 'paid', 'completed', 'complete', 'verified']);
 
 function isMissingDbFeature(error) {
   const message = String(error?.message || '');
@@ -72,12 +70,20 @@ function money(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function isSuccessfulPaymentStatus(status) {
+  return SUCCESS_PAYMENT_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+function paymentSuccessStatus() {
+  return 'success';
+}
+
 function normalizeProductType(value, productId = '') {
   const type = String(value || '').trim().toLowerCase();
   if (['coin', 'coins', 'token', 'tokens'].includes(type)) return 'coins';
-  if (['membership', 'subscription', 'plan'].includes(type)) return 'membership';
   const id = String(productId || '').toLowerCase();
-  return id.startsWith('tokens_') || id.startsWith('coins_') ? 'coins' : 'membership';
+  if (id.startsWith('tokens_') || id.startsWith('coins_')) return 'coins';
+  return '';
 }
 
 function hashValue(value) {
@@ -102,43 +108,27 @@ function headersForAudit(req) {
 
 async function officialProduct({ productType, productId, countryCode }) {
   const type = normalizeProductType(productType, productId);
+  if (type !== 'coins') {
+    throw new Error('Only coin purchases are supported.');
+  }
   const isNigeria = String(countryCode || '').toUpperCase() === 'NG';
   const currency = isNigeria ? 'NGN' : 'USD';
 
-  if (type === 'coins') {
-    const pkg = await getCoinPackage(productId);
-    if (!pkg || (!pkg.isActive && process.env.NODE_ENV === 'production')) {
-      throw new Error(`Unknown coin package: ${productId}`);
-    }
-    const amount = isNigeria
-      ? (pkg.priceNgn || Math.round(pkg.priceUsd * NGN_PER_USD))
-      : (pkg.priceUsd || money((pkg.priceNgn || 0) / NGN_PER_USD));
-    return {
-      productType: 'coins',
-      productId: pkg.id,
-      productName: pkg.name || `${pkg.totalCoins} Coins`,
-      amount: money(amount),
-      currency,
-      officialUnits: Number(pkg.totalCoins || pkg.coins || 0),
-      snapshot: pkg,
-    };
-  }
-
-  const plan = await getMembershipPlan(productId);
-  if (!plan || (!plan.isActive && process.env.NODE_ENV === 'production')) {
-    throw new Error(`Unknown membership plan: ${productId}`);
+  const pkg = await getCoinPackage(productId);
+  if (!pkg || (!pkg.isActive && process.env.NODE_ENV === 'production')) {
+    throw new Error(`Unknown coin package: ${productId}`);
   }
   const amount = isNigeria
-    ? (plan.price_ngn || Math.round(plan.price_usd * NGN_PER_USD))
-    : (plan.price_usd || money((plan.price_ngn || 0) / NGN_PER_USD));
+    ? (pkg.priceNgn || Math.round(pkg.priceUsd * NGN_PER_USD))
+    : (pkg.priceUsd || money((pkg.priceNgn || 0) / NGN_PER_USD));
   return {
-    productType: 'membership',
-    productId: plan.id,
-    productName: plan.name,
+    productType: 'coins',
+    productId: pkg.id,
+    productName: pkg.name || `${pkg.totalCoins} Coins`,
     amount: money(amount),
     currency,
-    officialUnits: 0,
-    snapshot: plan,
+    officialUnits: Number(pkg.totalCoins || pkg.coins || 0),
+    snapshot: pkg,
   };
 }
 
@@ -252,7 +242,12 @@ export async function createSecurePaymentSession({
     billingCountry,
     ipCountry,
   });
-  const gatewayPlan = await resolveCheckoutProviders({ explicitProvider: provider });
+  const routedProvider = provider || resolvePaymentProvider({
+    countryCode: checkoutCountry,
+    billingCountry,
+    ipCountry,
+  });
+  const gatewayPlan = await resolveCheckoutProviders({ explicitProvider: routedProvider });
 
   if (!gatewayPlan.primary) {
     throw new Error('Payments are temporarily unavailable.');
@@ -292,7 +287,6 @@ export async function createSecurePaymentSession({
           billingCountry: normalizeCountryCode(billingCountry) || checkoutCountry,
           ipCountry,
           provider: gatewayPlan.primary,
-          fallbackProvider: gatewayPlan.fallback,
           gatewayPlan,
         },
       })
@@ -333,7 +327,6 @@ export async function createSecurePaymentSession({
     productType: product.productType,
     productId: product.productId,
     provider: gatewayPlan.primary,
-    fallbackProvider: gatewayPlan.fallback,
     country: checkoutCountry,
     amount: product.amount,
     currency: product.currency,
@@ -347,12 +340,6 @@ export async function createSecurePaymentSession({
       planId: product.productId,
       productType: product.productType,
       productId: product.productId,
-      provider: gatewayPlan.primary,
-      primaryProvider: gatewayPlan.primary,
-      fallbackProvider: gatewayPlan.fallback,
-      allowFallback: gatewayPlan.allowFallback,
-      flutterwaveEnabled: gatewayPlan.flutterwaveEnabled,
-      paystackEnabled: gatewayPlan.paystackEnabled,
       maxRetries: gatewayPlan.maxRetries,
       retryDelayMs: gatewayPlan.retryDelayMs,
       timeoutMs: gatewayPlan.timeoutMs,
@@ -381,7 +368,6 @@ export async function createSecurePaymentSession({
       userId,
       productId: product.productId,
       primary: gatewayPlan.primary,
-      fallback: gatewayPlan.fallback,
       error: err?.message,
     });
     if (intentId && supabase) {
@@ -468,6 +454,7 @@ export async function createSecurePaymentSession({
 }
 
 export async function processProviderWebhook(provider, req) {
+  const io = req?.app?.get?.('io') || null;
   const signature = verifyWebhookSignature(provider, req);
   const normalized = normalizeWebhookPayload(provider, req);
 
@@ -554,7 +541,7 @@ export async function processProviderWebhook(provider, req) {
             eventType: normalized.eventType,
             reason: normalized.failureReason || normalized.message || 'Payment provider reported a failed payment.',
           },
-        });
+        }, { io });
       }
       logPaymentEvent('warn', 'webhook.failed', {
         provider,
@@ -590,6 +577,7 @@ export async function processProviderWebhook(provider, req) {
     normalized,
     verified,
     source: 'webhook',
+    io,
   });
 
   if (fulfillment.suspicious) {
@@ -610,7 +598,7 @@ export async function processProviderWebhook(provider, req) {
   };
 }
 
-async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verified, source = 'manual' }) {
+async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verified, source = 'manual', io = null }) {
   const reference = verified.reference || normalized.reference;
   const intent = await findPaymentIntent({
     provider,
@@ -632,7 +620,8 @@ async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verif
 
   const metadataMismatch = [
     verified.userId && verified.userId !== intent.user_id,
-    normalizeProductType(verified.productType, verified.productId) !== normalizeProductType(intent.product_type, intent.product_id),
+    (verified.productType || verified.productId)
+      && normalizeProductType(verified.productType, verified.productId) !== normalizeProductType(intent.product_type, intent.product_id),
     verified.productId && verified.productId !== intent.product_id,
   ].some(Boolean);
 
@@ -654,7 +643,28 @@ async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verif
         eventType: normalized.eventType || `payment.${source}.verified`,
       },
     });
-    if (result?.duplicate !== true) {
+    await insertPaymentTransaction({
+      intent,
+      provider,
+      reference,
+      amount: verified.amount,
+      currency: verified.currency,
+      verification: verified,
+      event: {
+        ...normalized,
+        eventType: normalized.eventType || `payment.${source}.verified`,
+      },
+    });
+    await markPaymentRecordsSuccessful({
+      intent,
+      provider,
+      reference,
+      verified,
+      result,
+      source,
+    });
+    const duplicate = result?.duplicate === true;
+    if (!duplicate) {
       await sendPaymentReceiptEmail({
         intent,
         status: 'success',
@@ -671,28 +681,34 @@ async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verif
         metadata: { provider, reference, productType: intent.product_type, productId: intent.product_id },
       });
       await writeFinanceActivityEvent({
-        eventType: normalizeProductType(intent.product_type, intent.product_id) === 'coins'
-          ? 'coins_purchased'
-          : 'membership_purchased',
+        eventType: 'coins_purchased',
         userId: intent.user_id,
         productType: intent.product_type,
         productId: intent.product_id,
         amountUsd: amountToUsd(verified.amount, verified.currency),
-        amountTokens: normalizeProductType(intent.product_type, intent.product_id) === 'coins'
-          ? intent.official_units
-          : null,
+        amountTokens: intent.official_units,
         provider,
         reference,
-        status: 'fulfilled',
+        status: paymentSuccessStatus(),
         metadata: {
           paymentIntentId: intent.id,
           currency: verified.currency,
           providerAmount: verified.amount,
           result,
         },
-      });
+      }, { io });
     }
-    return { fulfilled: true, result, duplicate: result?.duplicate === true, intent };
+    emitPaymentRealtimeEvent({
+      io,
+      intent,
+      result,
+      provider,
+      reference,
+      status: paymentSuccessStatus(),
+      source,
+      verified,
+    });
+    return { fulfilled: true, result, duplicate, intent };
   } catch (error) {
     await markIntentSuspicious(intent, error.code || 'fulfillment_failed', { message: error.message, verified, source });
     await sendPaymentReceiptEmail({
@@ -718,8 +734,68 @@ async function fulfillVerifiedProviderPayment({ provider, normalized = {}, verif
         reason: error.message,
         currency: verified.currency,
       },
+    }, { io });
+    emitPaymentRealtimeEvent({
+      io,
+      intent,
+      result: null,
+      provider,
+      reference,
+      status: 'failed',
+      source,
+      verified,
+      error: error.message,
     });
     return { fulfilled: false, error: error.message, intent };
+  }
+}
+
+function emitPaymentRealtimeEvent({
+  io = null,
+  intent,
+  result = null,
+  provider = '',
+  reference = '',
+  status = paymentSuccessStatus(),
+  source = 'payment',
+  verified = {},
+  error = null,
+}) {
+  if (!io || !intent?.user_id) return;
+  const productType = normalizeProductType(intent.product_type, intent.product_id);
+  const basePayload = {
+    status,
+    source,
+    provider,
+    reference,
+    paymentIntentId: intent.id,
+    orderKey: intent.intent_key,
+    userId: intent.user_id,
+    productType,
+    productId: intent.product_id,
+    amount: Number(verified?.amount ?? intent.amount ?? 0),
+    currency: verified?.currency || intent.currency,
+    result,
+    error,
+    ts: Date.now(),
+  };
+
+  try {
+    io.to(`user:${intent.user_id}`).emit('payment:updated', basePayload);
+    if (isSuccessfulPaymentStatus(status)) {
+      io.to(`user:${intent.user_id}`).emit('payment:fulfilled', basePayload);
+      if (productType === 'coins') {
+        const nextBalance = Number(result?.balance);
+        io.to(`user:${intent.user_id}`).emit('wallet:updated', {
+          ...basePayload,
+          balance: Number.isFinite(nextBalance) ? nextBalance : null,
+          transactionId: result?.walletTransactionId || result?.transactionId || null,
+        });
+      }
+    }
+    io.emit('admin:payments:update', basePayload);
+  } catch (err) {
+    console.warn('[payments] realtime emit failed:', err?.message || err);
   }
 }
 
@@ -728,41 +804,11 @@ async function fulfillVerifiedIntent({ intent, provider, reference, amount, curr
     throw new Error('Supabase not configured');
   }
 
-  if (normalizeProductType(intent.product_type, intent.product_id) === 'coins') {
-    const { data, error } = await supabase.rpc('secure_fulfill_coin_payment', {
-      p_intent_id: intent.id,
-      p_provider: provider,
-      p_provider_reference: reference,
-      p_amount: Number(amount),
-      p_currency: currency,
-      p_verification: verification.raw || verification,
-      p_event: event.raw || event,
-    });
-    if (error) {
-      if (isMissingDbFeature(error) && !IS_PRODUCTION) {
-        return fulfillCoinPurchase({
-          userId: intent.user_id,
-          packageId: intent.product_id,
-          orderKey: intent.intent_key,
-          reference,
-          provider,
-          amountPaid: amount,
-          currency,
-          metadata: { paymentIntentId: intent.id, verification },
-        });
-      }
-      throw error;
-    }
-    const row = Array.isArray(data) ? data[0] : data;
-    return {
-      balance: Number(row?.new_balance || 0),
-      tokenCreditId: row?.token_credit_id || null,
-      walletTransactionId: row?.wallet_transaction_id || null,
-      duplicate: row?.duplicate === true,
-    };
+  if (normalizeProductType(intent.product_type, intent.product_id) !== 'coins') {
+    throw new Error('Only coin payment fulfillment is supported.');
   }
 
-  const { data, error } = await supabase.rpc('secure_fulfill_membership_payment', {
+  const { data, error } = await supabase.rpc('secure_fulfill_coin_payment', {
     p_intent_id: intent.id,
     p_provider: provider,
     p_provider_reference: reference,
@@ -773,22 +819,70 @@ async function fulfillVerifiedIntent({ intent, provider, reference, amount, curr
   });
   if (error) {
     if (isMissingDbFeature(error) && !IS_PRODUCTION) {
-      return activateMembershipFromPayment(intent.user_id, intent.product_id, {
+      return fulfillCoinPurchase({
+        userId: intent.user_id,
+        packageId: intent.product_id,
+        orderKey: intent.intent_key,
         reference,
         provider,
-        amountPaidUsd: amount,
+        amountPaid: amount,
         currency,
-        orderKey: intent.intent_key,
         metadata: { paymentIntentId: intent.id, verification },
       });
     }
     throw error;
   }
   const row = Array.isArray(data) ? data[0] : data;
+  const nextBalance = row?.new_balance;
   return {
-    membershipId: row?.membership_id || null,
+    balance: nextBalance === null || nextBalance === undefined ? null : Number(nextBalance),
+    tokenCreditId: row?.token_credit_id || null,
+    walletTransactionId: row?.wallet_transaction_id || null,
     duplicate: row?.duplicate === true,
   };
+}
+
+async function markPaymentRecordsSuccessful({ intent, provider, reference, verified = {}, result = null, source = 'payment' }) {
+  if (!supabase || !intent?.id) return;
+  const now = new Date().toISOString();
+  const status = paymentSuccessStatus();
+  const transactionUpdate = {
+    status,
+    verified: true,
+    raw_verification: verified?.raw || verified || {},
+  };
+  if (verified?.providerTransactionId) {
+    transactionUpdate.provider_transaction_id = verified.providerTransactionId;
+  }
+  await runOptionalPaymentQuery(
+    supabase
+      .from('payment_intents')
+      .update({
+        status,
+        provider,
+        provider_reference: reference,
+        fulfilled_at: intent.fulfilled_at || now,
+        updated_at: now,
+      })
+      .eq('id', intent.id),
+    'mark payment intent success',
+  );
+  await runOptionalPaymentQuery(
+    supabase
+      .from('payment_transactions')
+      .update(transactionUpdate)
+      .eq('intent_id', intent.id)
+      .eq('provider', provider)
+      .eq('provider_reference', reference),
+    'mark payment transaction success',
+  );
+  await writeAudit({
+    intentId: intent.id,
+    userId: intent.user_id,
+    eventType: `payment.status_success.${source}`,
+    message: 'Verified provider payment marked successful',
+    metadata: { provider, reference, result },
+  });
 }
 
 async function findPaymentIntent({ provider, providerReference, orderKey }) {
@@ -870,19 +964,22 @@ async function markWebhookProcessed(id, status = 'processed', errorMessage = nul
 
 async function insertPaymentTransaction({ intent, provider, reference, amount, currency, verification, event }) {
   if (!supabase) return;
-  const { error } = await supabase.from('payment_transactions').insert({
+  const row = {
     intent_id: intent.id,
     provider,
     provider_reference: reference,
     provider_transaction_id: verification.providerTransactionId || null,
     event_type: event.eventType || 'payment.verified',
-    status: 'verified',
+    status: paymentSuccessStatus(),
     amount,
     currency,
     verified: true,
     raw_event: event.raw || event,
     raw_verification: verification.raw || verification,
-  });
+  };
+  const { error } = await supabase
+    .from('payment_transactions')
+    .upsert(row, { onConflict: 'provider,provider_reference' });
   if (error?.code !== '23505' && error && !isMissingDbFeature(error)) throw error;
 }
 
@@ -996,7 +1093,13 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
       .select('*', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
-    if (statusFilter) query = query.eq('status', statusFilter);
+    if (statusFilter) {
+      if (isSuccessfulPaymentStatus(statusFilter)) {
+        query = query.in('status', Array.from(SUCCESS_PAYMENT_STATUSES));
+      } else {
+        query = query.eq('status', statusFilter);
+      }
+    }
     if (methodFilter) query = query.eq('provider', methodFilter);
     if (search) {
       query = query.or(`provider_reference.ilike.%${search}%,intent_key.ilike.%${search}%,user_id.ilike.%${search}%`);
@@ -1014,13 +1117,13 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
     };
     const stats = {
       totalTransactions: all.length,
-      totalRevenue: money(all.filter((row) => ['fulfilled', 'paid'].includes(row.status)).reduce((sum, row) => sum + revenueUsd(row), 0)),
+      totalRevenue: money(all.filter((row) => isSuccessfulPaymentStatus(row.status)).reduce((sum, row) => sum + revenueUsd(row), 0)),
       pending: all.filter((row) => ['created', 'checkout_created', 'processing'].includes(row.status)).length,
       failed: all.filter((row) => ['failed', 'suspicious', 'expired'].includes(row.status)).length,
       refunded: 0,
       fraudAlerts: fraudRes.count || 0,
-      tokenSales: all.filter((row) => row.product_type === 'coins' && row.status === 'fulfilled').length,
-      conversionRate: all.length ? Math.round((all.filter((row) => row.status === 'fulfilled').length / all.length) * 10000) / 100 : 0,
+      tokenSales: all.filter((row) => row.product_type === 'coins' && isSuccessfulPaymentStatus(row.status)).length,
+      conversionRate: all.length ? Math.round((all.filter((row) => isSuccessfulPaymentStatus(row.status)).length / all.length) * 10000) / 100 : 0,
     };
 
     const payments = (data || []).map((row) => ({
@@ -1032,7 +1135,7 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
       item: `${row.product_type}: ${row.product_id}`,
       amount: Number(row.amount || 0),
       method: row.provider || 'pending',
-      status: row.status,
+      status: isSuccessfulPaymentStatus(row.status) ? paymentSuccessStatus() : row.status,
       date: row.created_at,
       riskScore: Number(row.risk_score || 0),
       riskFlags: row.risk_flags || [],
@@ -1136,7 +1239,7 @@ export async function getGatewayAnalytics({ hours = 24 } = {}) {
   for (const row of intentsRes.data || []) {
     const bucket = ensure(row.provider);
     bucket.attempts += 1;
-    if (row.status === 'fulfilled') bucket.fulfilled += 1;
+    if (isSuccessfulPaymentStatus(row.status)) bucket.fulfilled += 1;
     if (row.status === 'failed') bucket.failed += 1;
     const meta = row.metadata || {};
     if (meta.fallbackUsed) bucket.fallbackUsed += 1;
@@ -1145,7 +1248,7 @@ export async function getGatewayAnalytics({ hours = 24 } = {}) {
 
   for (const row of txRes.data || []) {
     const bucket = ensure(row.provider);
-    if (row.status === 'verified' || row.status === 'completed') {
+    if (isSuccessfulPaymentStatus(row.status)) {
       bucket.revenue += Number(row.amount || 0);
     }
   }
@@ -1177,7 +1280,7 @@ export async function getPaymentReconciliationReport({ hours = 24 } = {}) {
   if (txRes.error) throw txRes.error;
   if (webhooksRes.error) throw webhooksRes.error;
 
-  const fulfilled = (intentsRes.data || []).filter((row) => row.status === 'fulfilled');
+  const fulfilled = (intentsRes.data || []).filter((row) => isSuccessfulPaymentStatus(row.status));
   const txIntentIds = new Set((txRes.data || []).map((row) => row.intent_id).filter(Boolean));
   const orphans = fulfilled.filter((row) => !txIntentIds.has(row.id));
 
@@ -1196,17 +1299,17 @@ export async function getPaymentReconciliationReport({ hours = 24 } = {}) {
   };
 }
 
-export async function refreshAndFulfillPaymentIntent({ reference, orderKey = null, userId = null } = {}) {
+export async function refreshAndFulfillPaymentIntent({ reference, orderKey = null, userId = null, io = null } = {}) {
   const current = await getPaymentIntentStatus({ reference, orderKey, userId });
   if (!current) return null;
 
-  if (current.status === 'fulfilled') {
+  if (isSuccessfulPaymentStatus(current.status)) {
     return {
       verified: true,
       fulfilled: true,
       duplicate: true,
       payment: current,
-      providerStatus: { status: 'fulfilled' },
+      providerStatus: { status: paymentSuccessStatus() },
     };
   }
 
@@ -1253,6 +1356,7 @@ export async function refreshAndFulfillPaymentIntent({ reference, orderKey = nul
       raw: { source: 'payment_verify_refresh', reference, orderKey },
     },
     source: 'callback_refresh',
+    io,
   });
 
   const latest = await getPaymentIntentStatus({
@@ -1261,8 +1365,8 @@ export async function refreshAndFulfillPaymentIntent({ reference, orderKey = nul
   });
 
   return {
-    verified: latest?.status === 'fulfilled',
-    fulfilled: fulfillment.fulfilled === true,
+    verified: isSuccessfulPaymentStatus(latest?.status),
+    fulfilled: fulfillment.fulfilled === true || isSuccessfulPaymentStatus(latest?.status),
     duplicate: fulfillment.duplicate === true,
     suspicious: fulfillment.suspicious === true,
     error: fulfillment.error || null,
@@ -1316,6 +1420,7 @@ export async function getPaymentIntentStatus({ reference, orderKey, userId } = {
       amount: Number(row.amount || 0),
       currency: row.currency,
       status: row.status,
+      successful: isSuccessfulPaymentStatus(row.status),
       expired: row.expires_at ? new Date(row.expires_at).getTime() < Date.now() : false,
       expiresAt: row.expires_at,
       fulfilledAt: row.fulfilled_at,
