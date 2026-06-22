@@ -20,6 +20,8 @@ import { setCoinBalance } from '../services/coinWallet.service.js';
 import { enqueueSearchDocument } from '../services/searchIndex.service.js';
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
 
+const ADMIN_APPLICATION_SCAN_LIMIT = Math.min(5000, Math.max(100, Number(process.env.ADMIN_APPLICATION_SCAN_LIMIT || 2000)));
+
 function invalidateCreatorLeaderboard() {
   try {
     invalidateTopCreatorsCache();
@@ -155,6 +157,79 @@ async function deactivateCreatorProfile(userId, status = 'removed') {
   invalidateCreatorLeaderboard();
 }
 
+function splitFullName(value = '') {
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  return {
+    firstName: parts[0] || '',
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
+function mainApplicationData(row = {}) {
+  const nameParts = splitFullName(row.full_name);
+  const photos = Array.isArray(row.uploaded_photos) ? row.uploaded_photos.filter(Boolean) : [];
+  const videos = Array.isArray(row.uploaded_videos) ? row.uploaded_videos.filter(Boolean) : [];
+  return {
+    firstName: nameParts.firstName,
+    lastName: nameParts.lastName,
+    displayName: row.display_name || row.full_name || '',
+    fullName: row.full_name || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    country: row.country || '',
+    state: row.state || '',
+    city: row.city || '',
+    streetAddress: row.street_address || row.streetAddress || '',
+    bio: row.bio || '',
+    creatorCategory: row.category || '',
+    creatorMode: row.category || '',
+    experienceLevel: row.experience || '',
+    creator_type: row.creator_type || row.creatorType || '',
+    dateOfBirth: row.date_of_birth || row.dateOfBirth || '',
+    ageConfirmed: row.age_verified === true,
+    social_links: row.social_links || {},
+    instagramUrl: row.social_links?.instagram || '',
+    xUrl: row.social_links?.x || row.social_links?.twitter || '',
+    tiktokUrl: row.social_links?.tiktok || '',
+    youtubeUrl: row.social_links?.youtube || '',
+    websiteUrl: row.social_links?.website || '',
+    attachments: [
+      ...(row.profile_picture ? [{ name: 'Profile picture', url: row.profile_picture, contentType: 'image/*' }] : []),
+      ...photos.map((url, index) => ({ name: `Photo ${index + 1}`, url, contentType: 'image/*' })),
+      ...videos.map((url, index) => ({ name: `Video ${index + 1}`, url, contentType: 'video/*' })),
+    ],
+  };
+}
+
+function normalizeMainApplicationRecord(row = {}) {
+  return {
+    ...row,
+    __source: 'main',
+    data: mainApplicationData(row),
+    review_reason: row.review_reason || row.rejection_reason || null,
+    reviewed_at: row.reviewed_at || null,
+    reviewed_by: row.reviewed_by || null,
+    decision_at: row.decision_at || row.updated_at || row.created_at || null,
+    ban_reason: row.ban_reason || (row.status === 'banned' ? row.rejection_reason : null),
+    ban_expires_at: row.ban_expires_at || null,
+    ban_admin_id: row.ban_admin_id || null,
+  };
+}
+
+function applicationSearchText(app = {}) {
+  return [
+    app.name,
+    app.full_name,
+    app.username,
+    app.email,
+    app.user_id,
+    app.creator_type,
+    app.category,
+    app.content_type,
+    app.application_message,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
 async function setCreatorApplicationBan(userId, ban) {
   const normalizedBan = ban?.banned
     ? {
@@ -251,12 +326,46 @@ async function syncCreatorLifecycle(userId, { status, appData = {}, applicationI
 }
 
 async function fetchApplicationRecord(id) {
-  const { data, error } = await supabase.from('creator_applications').select('*').eq('id', id).maybeSingle();
-  if (error) throw error;
-  return data || null;
+  const legacy = await supabase.from('creator_applications').select('*').eq('id', id).maybeSingle();
+  if (legacy.error && !isMissingTable(legacy.error)) throw legacy.error;
+  if (legacy.data) return { ...legacy.data, __source: 'legacy' };
+
+  const current = await supabase.from('creators_main_application').select('*').eq('id', id).maybeSingle();
+  if (current.error && !isMissingTable(current.error)) throw current.error;
+  if (current.data) return normalizeMainApplicationRecord(current.data);
+
+  return null;
 }
 
-async function updateApplicationLifecycle(id, payload) {
+async function updateApplicationLifecycle(appOrId, payload) {
+  const id = typeof appOrId === 'object' ? appOrId.id : appOrId;
+  const source = typeof appOrId === 'object' ? appOrId.__source : 'legacy';
+  if (source === 'main') {
+    const currentPayload = {
+      status: payload.status,
+      approved: payload.status === 'approved',
+      rejected: payload.status === 'rejected',
+      rejection_reason: ['rejected', 'banned'].includes(payload.status) ? payload.review_reason : null,
+      review_reason: payload.review_reason,
+      reviewed_at: payload.reviewed_at,
+      reviewed_by: payload.reviewed_by,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from('creators_main_application').update(currentPayload).eq('id', id);
+    if (error) {
+      if (!isColumnMissingError(error)) throw error;
+      const fallback = {
+        status: payload.status,
+        approved: payload.status === 'approved',
+        rejected: payload.status === 'rejected',
+        rejection_reason: ['rejected', 'banned'].includes(payload.status) ? payload.review_reason : null,
+      };
+      const retry = await supabase.from('creators_main_application').update(fallback).eq('id', id);
+      if (retry.error && !isMissingTable(retry.error)) throw retry.error;
+    }
+    return;
+  }
+
   const required = { status: payload.status };
   const review = {
     status: payload.status,
@@ -901,6 +1010,153 @@ export async function getCreatorApplications(req, res) {
     const { search = '', statusFilter = '' } = req.query;
     const { page, limit, offset } = paginateAdmin(req.query.page, req.query.limit);
 
+    {
+    const fetchRows = async (table) => {
+      let q = supabase
+        .from(table)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(ADMIN_APPLICATION_SCAN_LIMIT);
+      if (statusFilter) q = q.eq('status', statusFilter);
+      const { data, error } = await q;
+      if (error) {
+        if (isMissingTable(error)) return [];
+        throw error;
+      }
+      return Array.isArray(data) ? data : [];
+    };
+
+    const [legacyRows, currentRows] = await Promise.all([
+      fetchRows('creator_applications'),
+      fetchRows('creators_main_application'),
+    ]);
+
+    const userIds = [...new Set([
+      ...legacyRows.map(a => a.user_id).filter(Boolean),
+      ...currentRows.map(a => a.user_id).filter(Boolean),
+    ])];
+    const userMap = await buildAdminUserFacetsByIds(userIds);
+    const { data: creatorRows } = userIds.length
+      ? await supabase.from('creators').select('*').in('user_id', userIds)
+      : { data: [] };
+    const creatorByUserId = Object.fromEntries((creatorRows || []).map((c) => [c.user_id, c]));
+    const reviewerIds = [...new Set([
+      ...legacyRows.map(a => a.reviewed_by).filter(Boolean),
+      ...currentRows.map(a => a.reviewed_by).filter(Boolean),
+    ])];
+    let reviewerById = {};
+    if (reviewerIds.length) {
+      const { data: admins } = await supabase
+        .from('admin_users')
+        .select('id,name,email')
+        .in('id', reviewerIds);
+      reviewerById = Object.fromEntries((admins || []).map((admin) => [admin.id, admin.name || admin.email || 'Admin']));
+    }
+
+    let applications = [
+      ...legacyRows.map((a) => {
+        const u = userMap[a.user_id] || {};
+        const creator = creatorByUserId[a.user_id] || {};
+        let appData = {};
+        try { appData = decryptApplicationData(a.data || {}); } catch (_) {}
+        const fullName = displayNameFromApplicationData(appData, u.username || a.user_id);
+        return {
+          id: a.id,
+          user_id: a.user_id,
+          name: fullName,
+          username: u.username || a.user_id,
+          email: appData.email || u.email || '',
+          avatar_url: u.avatar || null,
+          status: a.status,
+          creator_type: appData.creator_type || '',
+          category: appData.creatorCategory || appData.creatorMode || '',
+          content_type: appData.contentType || appData.content_type || appData.mainOrientationCategory || '',
+          application_message: appData.message || appData.application_message || appData.applicationMessage || '',
+          is_verified: !!u.email_verified,
+          created_at: a.created_at,
+          submitted_at: a.created_at,
+          reviewed_at: a.reviewed_at || null,
+          reviewed_by: a.reviewed_by || null,
+          reviewed_by_name: reviewerById[a.reviewed_by] || '',
+          decision_at: a.decision_at || null,
+          review_reason: a.review_reason || null,
+          rejection_reason: a.status === 'rejected' || a.status === 'banned' ? a.review_reason || null : null,
+          ban_reason: a.ban_reason || null,
+          ban_expires_at: a.ban_expires_at || null,
+          ban_admin_id: a.ban_admin_id || null,
+          creator_id: creator.id || null,
+          creator_active: creator.active !== false,
+          creator_status: creator.status || (a.status === 'approved' ? 'active' : ''),
+          application_source: 'creator_applications',
+        };
+      }),
+      ...currentRows.map((row) => {
+        const u = userMap[row.user_id] || {};
+        const creator = creatorByUserId[row.user_id] || {};
+        const status = row.status || 'pending';
+        return {
+          id: row.id,
+          user_id: row.user_id,
+          name: row.full_name || u.display_name || u.username || row.user_id,
+          username: u.username || row.user_id,
+          email: row.email || u.email || '',
+          avatar_url: row.profile_picture || u.avatar || null,
+          status,
+          creator_type: row.creator_type || '',
+          category: row.category || '',
+          content_type: row.category || '',
+          application_message: row.bio || row.experience || '',
+          is_verified: !!u.email_verified,
+          created_at: row.created_at,
+          submitted_at: row.created_at,
+          reviewed_at: row.reviewed_at || null,
+          reviewed_by: row.reviewed_by || null,
+          reviewed_by_name: reviewerById[row.reviewed_by] || '',
+          decision_at: row.decision_at || row.updated_at || null,
+          review_reason: row.review_reason || row.rejection_reason || null,
+          rejection_reason: status === 'rejected' || status === 'banned' ? row.rejection_reason || row.review_reason || null : null,
+          ban_reason: row.ban_reason || null,
+          ban_expires_at: row.ban_expires_at || null,
+          ban_admin_id: row.ban_admin_id || null,
+          creator_id: creator.id || null,
+          creator_active: creator.active !== false,
+          creator_status: creator.status || (status === 'approved' ? 'active' : ''),
+          profile_picture: row.profile_picture || null,
+          uploaded_photos: Array.isArray(row.uploaded_photos) ? row.uploaded_photos : [],
+          uploaded_videos: Array.isArray(row.uploaded_videos) ? row.uploaded_videos : [],
+          application_source: 'creators_main_application',
+        };
+      }),
+    ];
+
+    const searchTrim = String(search || '').trim().toLowerCase();
+    if (searchTrim) applications = applications.filter((app) => applicationSearchText(app).includes(searchTrim));
+    applications.sort((a, b) => new Date(b.created_at || b.submitted_at || 0) - new Date(a.created_at || a.submitted_at || 0));
+    const total = applications.length;
+    applications = total === 0 || offset >= total ? [] : applications.slice(offset, offset + limit);
+
+    const rowsForEnrich = applications.map((a) => ({
+      id: a.user_id,
+      email: a.email,
+      avatar_url: a.avatar_url,
+      is_verified: a.is_verified,
+    }));
+    const enriched = await enrichUsersFromFirebase(rowsForEnrich);
+    const enrichedMap = new Map(enriched.map((r) => [r.id, r]));
+    applications = applications.map((a) => {
+      const e = enrichedMap.get(a.user_id);
+      if (!e) return a;
+      return {
+        ...a,
+        email: a.email || e.email,
+        avatar_url: a.avatar_url || e.avatar_url,
+        is_verified: a.is_verified || e.is_verified,
+      };
+    });
+
+    return res.json({ applications, total, page, limit });
+    }
+
     // creator_applications table: id, user_id, data (encrypted jsonb), status, created_at
     // If search is provided, first resolve matching user_ids from users table
     let searchUserIds = null;
@@ -1051,9 +1307,66 @@ export async function getCreatorApplications(req, res) {
 
 // ── GET /api/admin/applications/:id ──────────────────────────────────────────
 
+async function buildApplicationDetailDto(app) {
+  let appData = {};
+  if (app.__source === 'main') {
+    appData = app.data || mainApplicationData(app);
+  } else {
+    try { appData = decryptApplicationData(app.data || {}); } catch (_) {}
+  }
+
+  const facets = await buildAdminUserFacetsByIds([app.user_id]);
+  const f = facets[app.user_id] || {};
+  const { data: creator } = await supabase
+    .from('creators')
+    .select('*')
+    .eq('user_id', app.user_id)
+    .maybeSingle();
+  let reviewedByName = '';
+  if (app.reviewed_by) {
+    const { data: adminRow } = await supabase
+      .from('admin_users')
+      .select('name,email')
+      .eq('id', app.reviewed_by)
+      .maybeSingle();
+    reviewedByName = adminRow?.name || adminRow?.email || '';
+  }
+
+  return {
+    id: app.id,
+    user_id: app.user_id,
+    status: app.status || 'pending',
+    created_at: app.created_at,
+    username: f.username || app.username || app.user_id,
+    avatar_url: app.profile_picture || f.avatar || null,
+    email: appData.email || app.email || f.email || '',
+    is_verified: !!f.email_verified,
+    review_reason: app.review_reason || null,
+    rejection_reason: app.rejection_reason || null,
+    reviewed_at: app.reviewed_at || null,
+    reviewed_by: app.reviewed_by || null,
+    reviewed_by_name: reviewedByName,
+    decision_at: app.decision_at || null,
+    missing_fields: app.missing_fields || [],
+    email_sent: !!app.email_sent,
+    ban_reason: app.ban_reason || null,
+    ban_expires_at: app.ban_expires_at || null,
+    ban_admin_id: app.ban_admin_id || null,
+    creator_id: creator?.id || null,
+    creator_active: creator ? creator.active !== false : false,
+    creator_status: creator?.status || '',
+    application_source: app.__source === 'main' ? 'creators_main_application' : 'creator_applications',
+    data: appData,
+  };
+}
+
 export async function getApplicationById(req, res) {
   try {
     const { id } = req.params;
+    const normalized = await fetchApplicationRecord(id);
+    if (normalized) {
+      return res.json(await buildApplicationDetailDto(normalized));
+    }
 
     const { data: app, error } = await supabase
       .from('creator_applications')
@@ -1222,7 +1535,7 @@ export async function updateApplicationStatus(req, res) {
       extendedPayload.ban_admin_id = null;
     }
 
-    await updateApplicationLifecycle(id, extendedPayload);
+    await updateApplicationLifecycle(app, extendedPayload);
     const lifecycle = await syncCreatorLifecycle(userId, {
       status,
       appData,
@@ -1307,7 +1620,10 @@ export async function updateApplicationStatus(req, res) {
           missingFields: status === 'info_requested' ? missingFields : [],
           updateLink,
         });
-        await supabase.from('creator_applications').update({ email_sent: true }).eq('id', id);
+        await supabase
+          .from(app.__source === 'main' ? 'creators_main_application' : 'creator_applications')
+          .update({ email_sent: true })
+          .eq('id', id);
       } catch (_) {}
     }
 
@@ -1398,7 +1714,7 @@ export async function removeCreatorAccess(req, res) {
     let appData = {};
     try { appData = decryptApplicationData(app.data || {}); } catch (_) {}
     const now = new Date().toISOString();
-    await updateApplicationLifecycle(id, {
+    await updateApplicationLifecycle(app, {
       status: 'rejected',
       review_reason: `Creator access removed: ${reason}`,
       reviewed_at: now,
@@ -1449,10 +1765,11 @@ export async function deleteCreatorApplication(req, res) {
       previousStatus: app.status,
     });
 
-    const { error } = await supabase.from('creator_applications').delete().eq('id', id);
+    const applicationTable = app.__source === 'main' ? 'creators_main_application' : 'creator_applications';
+    const { error } = await supabase.from(applicationTable).delete().eq('id', id);
     if (error) return res.status(500).json({ message: error.message });
 
-    const rtdb = getFirebaseRtdb();
+    const rtdb = app.__source === 'main' ? null : getFirebaseRtdb();
     if (rtdb) {
       await rtdb.ref(`creator_applications/${id}`).remove().catch(() => {});
       await rtdb.ref(`creatorApplications/${id}`).remove().catch(() => {});

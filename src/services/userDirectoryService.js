@@ -159,6 +159,7 @@ export function firestoreUserDocToRow(id, u) {
 const MAX_RTDB_USER_SCAN = Math.min(8000, Math.max(100, Number(process.env.ADMIN_MAX_RTDB_USER_SCAN || 2000)));
 const MAX_AUTH_USER_SCAN = Math.min(10000, Math.max(100, Number(process.env.ADMIN_MAX_AUTH_USER_SCAN || 2500)));
 const MAX_FIRESTORE_USER_SCAN = Math.min(10000, Math.max(100, Number(process.env.ADMIN_MAX_FIRESTORE_USER_SCAN || 2500)));
+const PLATFORM_CREATOR_TYPE_SCAN_LIMIT = Math.min(20000, Math.max(100, Number(process.env.ADMIN_PLATFORM_CREATOR_TYPE_SCAN_LIMIT || 5000)));
 const DIRECTORY_PROVIDER_TIMEOUT_MS = Math.max(3000, Number(process.env.ADMIN_DIRECTORY_PROVIDER_TIMEOUT_MS) || 12000);
 const USER_DIRECTORY_SUPABASE_WARN_MS = Math.max(30000, Number(process.env.USER_DIRECTORY_SUPABASE_WARN_MS || 120000));
 const ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN = ['true', '1', 'yes'].includes(
@@ -591,6 +592,26 @@ async function getCreatorStateByUserId(userIds) {
     } catch {
       /* application table may not exist yet */
     }
+
+    try {
+      const { data: mainAppRows } = await supabase
+        .from('creators_main_application')
+        .select('user_id, status, created_at')
+        .in('user_id', slice)
+        .order('created_at', { ascending: false });
+      for (const app of mainAppRows || []) {
+        if (!app?.user_id) continue;
+        const existing = state.get(app.user_id) || {};
+        if (!existing.applicationStatus) {
+          state.set(app.user_id, {
+            ...existing,
+            applicationStatus: app.status || 'pending',
+          });
+        }
+      }
+    } catch {
+      /* current application table may not exist yet */
+    }
   }
   return state;
 }
@@ -829,20 +850,15 @@ export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
       suspendedUsers,
       bannedUsers,
       newToday,
-      creatorsFromTable,
-      creatorsPstar,
-      creatorsChannel,
+      platformCreators,
     ] = await Promise.all([
       safeCount(supabase.from('users').select('id', { count: 'planned', head: true })),
       safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('email_verified', true)),
       safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('suspended', true)),
       safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('banned', true)),
       safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).gte('created_at', d.toISOString())),
-      safeCount(supabase.from('creators').select('id', { count: 'planned', head: true })),
-      safeCount(supabase.from('creators').select('id', { count: 'planned', head: true }).eq('creator_type', 'pstar')),
-      safeCount(supabase.from('creators').select('id', { count: 'planned', head: true }).eq('creator_type', 'channel')),
+      getSupabasePlatformCreatorCounts(),
     ]);
-    const creatorsTotal = creatorsFromTable || await safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('creator', true));
     const counts = {
       mergedTotal: totalUsers,
       rawSourceTotal: totalUsers,
@@ -862,9 +878,9 @@ export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
       suspendedUsers,
       bannedUsers,
       newToday,
-      creatorsTotal,
-      creatorsPstar,
-      creatorsChannel,
+      creatorsTotal: platformCreators.total,
+      creatorsPstar: platformCreators.pstars,
+      creatorsChannel: platformCreators.channels,
       firebaseOnlyUsers: 0,
       supabaseTotal: counts.supabaseTotal,
       firebaseAuthTotal: 0,
@@ -921,6 +937,88 @@ export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
     deduplicatedTotal: counts.deduplicatedTotal,
     sourceCounts: counts,
   };
+}
+
+async function getSupabasePlatformCreatorCounts() {
+  if (!isSupabaseAvailable() || !supabase) {
+    return { total: 0, pstars: 0, channels: 0 };
+  }
+
+  let total = await safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('creator', true));
+  let idQuery = supabase
+    .from('users')
+    .select('id')
+    .eq('creator', true)
+    .limit(PLATFORM_CREATOR_TYPE_SCAN_LIMIT);
+
+  if (total === 0) {
+    const approved = await safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('verified', 'approved'));
+    if (approved > 0) {
+      total = approved;
+      idQuery = supabase
+        .from('users')
+        .select('id')
+        .eq('verified', 'approved')
+        .limit(PLATFORM_CREATOR_TYPE_SCAN_LIMIT);
+    }
+  }
+
+  if (total <= 0) {
+    return { total: 0, pstars: 0, channels: 0 };
+  }
+
+  const { data: userRows, error: userError } = await idQuery;
+  if (userError || !Array.isArray(userRows) || userRows.length === 0) {
+    return { total, pstars: total, channels: 0 };
+  }
+
+  const creatorUserIds = [...new Set(userRows.map((row) => row.id).filter(Boolean))];
+  if (!creatorUserIds.length) {
+    return { total, pstars: total, channels: 0 };
+  }
+
+  let typedRows = [];
+  const CHUNK = 400;
+  for (let i = 0; i < creatorUserIds.length; i += CHUNK) {
+    const slice = creatorUserIds.slice(i, i + CHUNK);
+    try {
+      const { data, error } = await supabase
+        .from('creators')
+        .select('user_id, creator_type')
+        .in('user_id', slice);
+      if (!error && Array.isArray(data)) typedRows.push(...data);
+    } catch {
+      /* creators table may be unavailable during early setup */
+    }
+  }
+
+  const typedByUserId = new Map();
+  for (const row of typedRows) {
+    if (!row?.user_id) continue;
+    typedByUserId.set(row.user_id, String(row.creator_type || '').trim().toLowerCase());
+  }
+
+  let channels = 0;
+  let pstars = 0;
+  for (const userId of creatorUserIds) {
+    const type = typedByUserId.get(userId);
+    if (type === 'channel') channels += 1;
+    else pstars += 1;
+  }
+
+  const scannedTotal = pstars + channels;
+  if (total > scannedTotal) pstars += total - scannedTotal;
+  return { total, pstars, channels };
+}
+
+export async function countCreatorApplicationsByStatus(status = 'pending') {
+  const normalized = String(status || '').trim() || 'pending';
+  if (!isSupabaseAvailable() || !supabase) return 0;
+  const [legacy, current] = await Promise.all([
+    safeCount(supabase.from('creator_applications').select('id', { count: 'planned', head: true }).eq('status', normalized)),
+    safeCount(supabase.from('creators_main_application').select('id', { count: 'planned', head: true }).eq('status', normalized)),
+  ]);
+  return legacy + current;
 }
 
 export async function listUsersForAdminFromDirectory(query) {

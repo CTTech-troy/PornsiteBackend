@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { isMissingDbFeature } from './revenueCalculation.service.js';
+import { countCreatorApplicationsByStatus } from './userDirectoryService.js';
 
 const configuredRawLimit = Number(process.env.ANALYTICS_RAW_QUERY_LIMIT || 5000);
 const configuredRawLimitMax = Number(process.env.ANALYTICS_RAW_QUERY_MAX || 5000);
@@ -993,6 +994,7 @@ export async function getAnalyticsOverview(query = {}) {
     userRows,
     totalUserStats,
     revenueRows,
+    pendingCreatorApplications,
   ] = await Promise.all([
     selectRows('analytics_visitors', 'id,session_id,user_id,country,region,city,device_type,browser,os,referrer,traffic_source,landing_page,visit_date,created_at', { from, to, column: 'visit_date', order: 'visit_date', dateOnly: true }),
     selectRows('analytics_sessions', 'session_id,user_id,start_time,last_activity,end_time,duration_seconds,pages_visited,videos_watched,is_active,created_at', { from, to, column: 'start_time', order: 'start_time' }),
@@ -1004,6 +1006,7 @@ export async function getAnalyticsOverview(query = {}) {
     selectRows('users', 'id,email,created_at', { from, to }),
     getTimedUserDirectoryStats(today),
     fetchRevenueFacts({ from, to }),
+    countCreatorApplicationsByStatus('pending'),
   ]);
 
   const hasAnalyticsFacts = visitorRows.length || sessionRows.length || analyticsViews.length || engagementRows.length;
@@ -1156,6 +1159,12 @@ export async function getAnalyticsOverview(query = {}) {
         activeMonth: activeUsersMonth,
         returning: uniqueCount(sessionRows.filter((row) => toNumber(row.pages_visited) > 1), (row) => row.user_id),
         newSignups: signupsToday,
+      },
+      creators: {
+        total: totalUserStats?.creatorsTotal || 0,
+        pstars: totalUserStats?.creatorsPstar || 0,
+        channels: totalUserStats?.creatorsChannel || 0,
+        pendingApplications: pendingCreatorApplications || 0,
       },
       videos: {
         totalViews,

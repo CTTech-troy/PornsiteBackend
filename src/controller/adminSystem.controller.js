@@ -1,7 +1,7 @@
 import { supabase } from '../config/supabase.js';
 import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { pingServices } from '../utils/servicePing.js';
-import { getUserDirectoryAggregateStats, safeCount } from '../services/userDirectoryService.js';
+import { countCreatorApplicationsByStatus, getUserDirectoryAggregateStats, safeCount } from '../services/userDirectoryService.js';
 import {
   getAdminSettingsPayload,
   getResolvedVastSettings,
@@ -348,7 +348,7 @@ export async function getStats(req, res) {
       pendingApps,
       totalVideos, liveNow, coinWallets, coinTransactions, activeAdCampaigns,
     ] = await Promise.all([
-      safeCount(supabase.from('creator_applications').select('id', { count: 'planned', head: true }).eq('status', 'pending')),
+      countCreatorApplicationsByStatus('pending'),
       safeCount(supabase.from('tiktok_videos').select('video_id', { count: 'planned', head: true })),
       safeCount(supabase.from('lives').select('id', { count: 'planned', head: true }).eq('status', 'live')),
       safeCount(supabase.from('coin_wallets').select('id', { count: 'planned', head: true })),
