@@ -494,4 +494,5 @@ export function annotateFeedListableVideo(video = {}) {
 export function filterHomeFeedVideos(videos = []) {
   return (Array.isArray(videos) ? videos : [])
     .map(annotateFeedListableVideo)
-    .filter((video) => video.lista
+    .filter((video) => video.listableInFeed === true);
+}

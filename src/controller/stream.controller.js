@@ -213,6 +213,8 @@ export async function getStreamUrl(req, res) {
     const adUnlockToken = req.query?.adUnlockToken || req.headers['x-ad-unlock-token'];
     const fingerprint = req.query?.fingerprint || req.headers['x-viewer-fingerprint'] || null;
 
+    const isOwnerViewer = uid && premiumMeta.creatorId && String(uid) === String(premiumMeta.creatorId);
+
     if (premiumMeta.isPremium) {
       try {
         await assertPremiumPlaybackAccess({
@@ -227,7 +229,7 @@ export async function getStreamUrl(req, res) {
           code: accessErr.code || 'PREMIUM_REQUIRED',
         });
       }
-    } else {
+    } else if (!isOwnerViewer) {
       try {
         await assertAdUnlockForStream({
           videoId: id,
@@ -266,4 +268,50 @@ export async function getStreamUrl(req, res) {
       try {
         const feedVideo = await getFeedVideoById(id);
         if (feedVideo) {
-          candidate = playableUrlFromRecord(feedVideo);
+          candidate = playableUrlFromRecord(feedVideo);
+        }
+      } catch (err) {
+        console.warn('stream.controller feed lookup failed:', err?.message || err);
+      }
+    }
+
+    if (!candidate) {
+      try {
+        const hf = lookupHomeFeedRow(id);
+        const play = playableUrlFromRecord(hf);
+        if (play) {
+          candidate = play;
+        }
+      } catch (err) {
+        console.warn('stream.controller home-feed lookup failed:', err?.message || err);
+      }
+    }
+
+    if (!candidate) {
+      return unsupportedResponse(res);
+    }
+
+    const signedStream = await createSignedStreamUrl(candidate);
+    const payload = {
+      url: signedStream.url,
+      expiresAt: signedStream.expiresAt,
+      signed: signedStream.signed,
+      delivery: signedStream.signed || isPlatformStorageUrl(candidate) ? 'signed_url' : 'source_url',
+    };
+    if (premiumMeta.isPremium && uid) {
+      const signed = signPlaybackToken({ userId: uid, videoId: id });
+      payload.playbackToken = signed.token;
+      payload.playbackTokenExpiresAt = signed.expiresAt;
+      payload.premium = true;
+    }
+
+    res.set('Cache-Control', premiumMeta.isPremium ? 'private, no-store' : 'private, max-age=30, stale-while-revalidate=30');
+    res.set('X-Content-Type-Options', 'nosniff');
+    return res.json(payload);
+  } catch (err) {
+    console.error('getStreamUrl error', err?.message || err);
+    return res.status(500).json({ error: err?.message || 'failed' });
+  }
+}
+
+export default { getStreamUrl };
