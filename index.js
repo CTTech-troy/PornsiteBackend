@@ -63,6 +63,7 @@ import publisherWorkflowRouter from './src/router/publisherWorkflow.route.js';
 import videoImportWorkflowRouter from './src/router/videoImportWorkflow.route.js';
 import { startHealthScanScheduler } from './src/services/adHealthScanner.service.js';
 import { renderVideoSharePreview } from './src/controller/sharePreview.controller.js';
+import { renderSitemapIndex, renderVideoSitemap } from './src/controller/seoSitemap.controller.js';
 import { preloadExternalFeedConfig } from './src/services/externalFeedConfig.service.js';
 import { startSearchSyncScheduler } from './src/services/searchIndex.service.js';
 import { generalApiRateLimiter } from './src/middleware/apiRateLimit.js';
@@ -534,6 +535,8 @@ app.get('/api/config/public', getPublicSettings);
 app.get('/api/settings/vast', getPublicVastSettings);
 app.get('/share/video/:id', renderVideoSharePreview);
 app.get('/api/share/video/:id', renderVideoSharePreview);
+app.get(['/sitemap-index.xml', '/api/sitemap-index.xml'], renderSitemapIndex);
+app.get(['/sitemap-videos.xml', '/api/sitemap-videos.xml', '/api/seo/sitemap-videos.xml'], renderVideoSitemap);
 
 app.use('/api/keepalive', keepAliveRouter);
 app.use('/api/internal/qstash/monitoring', apiMonitoringWorkflowRouter);

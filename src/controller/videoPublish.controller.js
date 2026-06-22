@@ -37,6 +37,7 @@ import { annotatePlayableVideo, validateVideoPlaybackSource } from '../utils/vid
 import { validateEmbedWithProbe } from '../services/videoSourceProbe.service.js';
 import { creditCoins as creditCoinWallet, spendCoins as debitCoinWallet } from '../services/coinWallet.service.js';
 import { getPlatformSettingsMap } from '../services/platformSettings.service.js';
+import { invalidateSeoSitemapCache } from './seoSitemap.controller.js';
 
 async function resolvePlaybackValidation(videoInput) {
   const base = validateVideoPlaybackSource(videoInput);
@@ -734,6 +735,7 @@ export async function publishFromStoragePath(req, res) {
       });
     }
     await enqueueSearchIndex(videoId, 'upsert').catch(() => null);
+    if (isLive) invalidateSeoSitemapCache(`video-published:${videoId}`);
     invalidateCreatorLeaderboard();
     if (isLive) {
       await writePlatformActivityEvent({
@@ -897,6 +899,7 @@ export async function uploadAndPublish(req, res) {
       });
     }
     await enqueueSearchIndex(videoId, isLive ? 'upsert' : 'delete').catch(() => null);
+    if (isLive) invalidateSeoSitemapCache(`video-published:${videoId}`);
     invalidateCreatorLeaderboard();
 
     if (isPremiumContent) incrementPremiumUploads(uid);
@@ -1011,6 +1014,7 @@ export async function deleteVideo(req, res) {
     await purgeSupabaseVideoRelations(videoId);
     await deleteOwnedVideoRecord(resolved, videoId);
     await enqueueSearchIndex(videoId, 'delete').catch(() => null);
+    invalidateSeoSitemapCache(`video-deleted:${videoId}`);
     invalidateCreatorLeaderboard();
 
     return res.json({ success: true });
@@ -1141,6 +1145,7 @@ export async function updateVideo(req, res) {
         : mapVideo(updated),
     );
     await enqueueSearchIndex(videoId, 'upsert').catch(() => null);
+    invalidateSeoSitemapCache(`video-updated:${videoId}`);
     invalidateCreatorLeaderboard();
     return res.json({ success: true, data: merged });
   } catch (err) {
@@ -1203,6 +1208,7 @@ export async function setVideoDraft(req, res) {
         : mapVideo(updated),
     );
     await enqueueSearchIndex(videoId, 'delete').catch(() => null);
+    invalidateSeoSitemapCache(`video-drafted:${videoId}`);
     invalidateCreatorLeaderboard();
     return res.json({ success: true, data: merged });
   } catch (err) {

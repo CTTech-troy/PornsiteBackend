@@ -122,6 +122,8 @@ export function resolvePaymentServiceUrl() {
   return pickUrl([
     process.env.PAYMENT_SERVICE_URL,
     process.env.PAYMENT_API_URL,
+    process.env.PROD_PAYMENT_SERVICE_URL,
+    process.env.PROD_PAYMENT_API_URL,
     PRODUCTION_PAYMENT_SERVICE_DEFAULT,
   ], { allowLocalhost: !isProductionEnv() }) || PRODUCTION_PAYMENT_SERVICE_DEFAULT;
 }

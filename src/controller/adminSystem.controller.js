@@ -349,11 +349,11 @@ export async function getStats(req, res) {
       totalVideos, liveNow, coinWallets, coinTransactions, activeAdCampaigns,
     ] = await Promise.all([
       countCreatorApplicationsByStatus('pending'),
-      safeCount(supabase.from('tiktok_videos').select('video_id', { count: 'planned', head: true })),
-      safeCount(supabase.from('lives').select('id', { count: 'planned', head: true }).eq('status', 'live')),
-      safeCount(supabase.from('coin_wallets').select('id', { count: 'planned', head: true })),
-      safeCount(supabase.from('coin_wallet_transactions').select('id', { count: 'planned', head: true })),
-      safeCount(supabase.from('ad_campaigns').select('id', { count: 'planned', head: true }).eq('status', 'active')),
+      safeCount(supabase.from('tiktok_videos').select('video_id', { count: 'exact', head: true })),
+      safeCount(supabase.from('lives').select('id', { count: 'exact', head: true }).eq('status', 'live')),
+      safeCount(supabase.from('coin_wallets').select('id', { count: 'exact', head: true })),
+      safeCount(supabase.from('coin_wallet_transactions').select('id', { count: 'exact', head: true })),
+      safeCount(supabase.from('ad_campaigns').select('id', { count: 'exact', head: true }).eq('status', 'active')),
     ]);
 
     const activeUsers = Math.max(

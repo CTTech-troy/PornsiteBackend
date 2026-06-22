@@ -865,11 +865,11 @@ export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
       newToday,
       platformCreators,
     ] = await Promise.all([
-      safeCount(supabase.from('users').select('id', { count: 'planned', head: true })),
-      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('email_verified', true)),
-      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('suspended', true)),
-      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('banned', true)),
-      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).gte('created_at', d.toISOString())),
+      safeCount(supabase.from('users').select('id', { count: 'exact', head: true })),
+      safeCount(supabase.from('users').select('id', { count: 'exact', head: true }).eq('email_verified', true)),
+      safeCount(supabase.from('users').select('id', { count: 'exact', head: true }).eq('suspended', true)),
+      safeCount(supabase.from('users').select('id', { count: 'exact', head: true }).eq('banned', true)),
+      safeCount(supabase.from('users').select('id', { count: 'exact', head: true }).gte('created_at', d.toISOString())),
       getSupabasePlatformCreatorCounts(),
     ]);
     const counts = {
@@ -957,7 +957,7 @@ async function getSupabasePlatformCreatorCounts() {
     return { total: 0, pstars: 0, channels: 0 };
   }
 
-  let total = await safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('creator', true));
+  let total = await safeCount(supabase.from('users').select('id', { count: 'exact', head: true }).eq('creator', true));
   let idQuery = supabase
     .from('users')
     .select('id')
@@ -965,7 +965,7 @@ async function getSupabasePlatformCreatorCounts() {
     .limit(PLATFORM_CREATOR_TYPE_SCAN_LIMIT);
 
   if (total === 0) {
-    const approved = await safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('verified', 'approved'));
+    const approved = await safeCount(supabase.from('users').select('id', { count: 'exact', head: true }).eq('verified', 'approved'));
     if (approved > 0) {
       total = approved;
       idQuery = supabase
@@ -1028,8 +1028,8 @@ export async function countCreatorApplicationsByStatus(status = 'pending') {
   const normalized = String(status || '').trim() || 'pending';
   if (!isSupabaseAvailable() || !supabase) return 0;
   const [legacy, current] = await Promise.all([
-    safeCount(supabase.from('creator_applications').select('id', { count: 'planned', head: true }).eq('status', normalized)),
-    safeCount(supabase.from('creators_main_application').select('id', { count: 'planned', head: true }).eq('status', normalized)),
+    safeCount(supabase.from('creator_applications').select('id', { count: 'exact', head: true }).eq('status', normalized)),
+    safeCount(supabase.from('creators_main_application').select('id', { count: 'exact', head: true }).eq('status', normalized)),
   ]);
   return legacy + current;
 }

@@ -18,7 +18,11 @@ import crypto from 'crypto';
  */
 
 const PRODUCTION_PAYMENT_SERVICE_URL = 'https://pornsite-paymentsystem-1.onrender.com';
-const _rawUrl = process.env.PAYMENT_SERVICE_URL;
+const _rawUrl =
+  process.env.PAYMENT_SERVICE_URL ||
+  process.env.PAYMENT_API_URL ||
+  process.env.PROD_PAYMENT_SERVICE_URL ||
+  process.env.PROD_PAYMENT_API_URL;
 
 function isProductionRuntime() {
   const nodeEnv = String(process.env.NODE_ENV || '').toLowerCase();
