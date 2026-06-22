@@ -6,7 +6,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const base = process.env.BASE_URL || process.env.BACKEND_PUBLIC_URL || 'https://pornsitebackend.onrender.com';
+const base = process.env.BASE_URL || process.env.BACKEND_PUBLIC_URL || 'https://api.xstreamvideos.site';
 const secret = process.env.ADMIN_SECRET;
 
 if (!secret) {

@@ -27,7 +27,7 @@
 
 ## Docker Compose Cannot Reach Services
 
-- Use service names inside Compose, for example `https://pornsitebackend.onrender.com`.
+- Use service names inside Compose, for example `https://api.xstreamvideos.site`.
 - Use public URLs only from the browser or outside Docker.
 - Rebuild after moving files: `docker compose -f backend/docker-compose.yml build`.
 

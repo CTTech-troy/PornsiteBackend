@@ -2,7 +2,7 @@ import { supabase } from '../config/supabase.js';
 import { listActiveCampaigns, getNetworkPricing, mapCampaignRow } from '../services/adCampaign.service.js';
 import { buildJsEmbed } from '../services/publisherAdServe.service.js';
 
-const apiBase = () => process.env.PUBLIC_API_URL || process.env.API_BASE_URL || 'https://pornsitebackend.onrender.com';
+const apiBase = () => process.env.PUBLIC_API_URL || process.env.API_BASE_URL || 'https://api.xstreamvideos.site';
 
 export async function getNetworkLibrary(req, res) {
   try {

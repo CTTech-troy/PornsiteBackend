@@ -72,7 +72,7 @@ function pickUrl(candidates, { allowLocalhost = false } = {}) {
 
 export const PRODUCTION_ADMIN_DEFAULT = 'https://admin.xstreamvideos.site';
 export const PRODUCTION_PUBLIC_DEFAULT = 'https://xstreamvideos.site';
-export const PRODUCTION_API_DEFAULT = 'https://pornsitebackend.onrender.com';
+export const PRODUCTION_API_DEFAULT = 'https://api.xstreamvideos.site';
 export const PRODUCTION_PAYMENT_SERVICE_DEFAULT = 'https://pornsite-paymentsystem-1.onrender.com';
 
 export function resolveAdminFrontendUrl() {

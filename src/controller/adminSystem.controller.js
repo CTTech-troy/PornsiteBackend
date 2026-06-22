@@ -552,7 +552,7 @@ export async function getRouteLatency(req, res) {
     process.env.BACKEND_PUBLIC_URL ||
     process.env.API_PUBLIC_URL ||
     process.env.BACKEND_URL ||
-    'https://pornsitebackend.onrender.com',
+    'https://api.xstreamvideos.site',
   ).replace(/\/$/, '');
   const adminToken = req.headers.authorization || '';
 

@@ -104,8 +104,8 @@ app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
 
 const LIVEKIT_HTTP_ORIGIN = 'https://xstream-8lx5fseo.livekit.cloud';
 const LIVEKIT_WS_ORIGIN = 'wss://xstream-8lx5fseo.livekit.cloud';
-const SOCKET_IO_HTTP_ORIGIN = 'https://pornsitebackend.onrender.com';
-const SOCKET_IO_WS_ORIGIN = 'wss://pornsitebackend.onrender.com';
+const SOCKET_IO_HTTP_ORIGIN = 'https://api.xstreamvideos.site';
+const SOCKET_IO_WS_ORIGIN = 'wss://api.xstreamvideos.site';
 const PERMISSIONS_POLICY_HEADER = [
   'accelerometer=()',
   'autoplay=*',

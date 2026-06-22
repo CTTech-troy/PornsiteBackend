@@ -50,8 +50,8 @@ All limits are configurable through `.env.production`.
 
 ```bash
 npm run check:redis
-curl https://pornsitebackend.onrender.com/api/health/redis
-curl https://pornsitebackend.onrender.com/api/health/services
+curl https://api.xstreamvideos.site/api/health/redis
+curl https://api.xstreamvideos.site/api/health/services
 ```
 
 A healthy Redis response has `"configured": true` and `"connected": true`.
@@ -68,7 +68,7 @@ Restart the backend, then run:
 
 ```bash
 for i in 1 2 3; do
-  curl -i -X POST https://pornsitebackend.onrender.com/api/auth/login \
+  curl -i -X POST https://api.xstreamvideos.site/api/auth/login \
     -H "Content-Type: application/json" \
     -d '{"email":"test@example.com","password":"wrong-password"}'
 done

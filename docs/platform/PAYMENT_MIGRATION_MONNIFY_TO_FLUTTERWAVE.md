@@ -44,7 +44,7 @@ Same Flutterwave + Paystack keys as above. Set `PAYMENT_AFRICA_PROVIDER=flutterw
 ### Frontend (`frontend/.env`)
 
 ```env
-VITE_API_URL=https://pornsitebackend.onrender.com
+VITE_API_URL=https://api.xstreamvideos.site
 VITE_FRONTEND_URL=https://xstreamvideos.site
 VITE_FLUTTERWAVE_PUBLIC_KEY=FLWPUBK_TEST-...
 ```

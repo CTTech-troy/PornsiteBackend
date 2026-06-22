@@ -7,7 +7,7 @@ import { buildBannerHtml, buildJsEmbed } from '../services/publisherAdServe.serv
 import { partnerCanMonetize } from '../utils/publisherUtils.js';
 import { listWebsites } from '../services/publisherPartner.service.js';
 
-const apiBase = () => process.env.PUBLIC_API_URL || process.env.API_BASE_URL || 'https://pornsitebackend.onrender.com';
+const apiBase = () => process.env.PUBLIC_API_URL || process.env.API_BASE_URL || 'https://api.xstreamvideos.site';
 
 export async function list(req, res) {
   try {

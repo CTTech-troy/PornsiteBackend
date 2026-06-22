@@ -119,16 +119,16 @@ These endpoints require `Upstash-Signature` verification and raw request bodies.
 Generate traffic:
 
 ```bash
-curl https://pornsitebackend.onrender.com/api/health/services
-curl https://pornsitebackend.onrender.com/api/config/public
-curl https://pornsitebackend.onrender.com/api/not-real
+curl https://api.xstreamvideos.site/api/health/services
+curl https://api.xstreamvideos.site/api/config/public
+curl https://api.xstreamvideos.site/api/not-real
 ```
 
 Verify admin observability APIs:
 
 ```bash
 curl -H "Authorization: Bearer <ADMIN_TOKEN>" \
-  https://pornsitebackend.onrender.com/api/admin/system/observability/overview
+  https://api.xstreamvideos.site/api/admin/system/observability/overview
 ```
 
 Run aggregation manually from the admin API:
@@ -138,13 +138,13 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <ADMIN_TOKEN>" \
   -d '{"rangeMinutes":10,"bucketMinutes":1}' \
-  https://pornsitebackend.onrender.com/api/admin/system/observability/aggregate
+  https://api.xstreamvideos.site/api/admin/system/observability/aggregate
 ```
 
 Verify QStash protection:
 
 ```bash
-curl -i -X POST https://pornsitebackend.onrender.com/api/internal/qstash/monitoring/aggregate
+curl -i -X POST https://api.xstreamvideos.site/api/internal/qstash/monitoring/aggregate
 ```
 
 Expected result: `401 Missing QStash signature`.

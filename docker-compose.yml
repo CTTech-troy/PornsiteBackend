@@ -56,8 +56,8 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         APP_DIR: frontend
-        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
-        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://api.xstreamvideos.site}
+        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://api.xstreamvideos.site}
     ports:
       - "8080:80"
     restart: unless-stopped
@@ -70,8 +70,8 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         APP_DIR: admin
-        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
-        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://pornsitebackend.onrender.com}
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-https://api.xstreamvideos.site}
+        VITE_SOCKET_URL: ${BACKEND_PUBLIC_URL:-https://api.xstreamvideos.site}
     ports:
       - "8081:80"
     restart: unless-stopped
@@ -86,7 +86,7 @@ services:
       - ../ai/.env
     environment:
       PORT: ${AI_GATEWAY_PORT:-8000}
-      BACKEND_URL: https://pornsitebackend.onrender.com
+      BACKEND_URL: https://api.xstreamvideos.site
       MODEL_CACHE_DIR: /models
     ports:
       - "${AI_GATEWAY_PORT:-8000}:${AI_GATEWAY_PORT:-8000}"
@@ -103,7 +103,7 @@ services:
     env_file:
       - ../ai/.env
     environment:
-      BACKEND_URL: https://pornsitebackend.onrender.com
+      BACKEND_URL: https://api.xstreamvideos.site
       MODEL_CACHE_DIR: /models
     command: ["python", "-m", "workers.worker"]
     depends_on:

@@ -30,8 +30,8 @@ docker compose -f backend/docker-compose.yml up -d
 
 - Frontend: `https://xstreamvideos.site`
 - Admin: `https://admin.xstreamvideos.site`
-- Backend: `https://pornsitebackend.onrender.com`
-- AI Gateway: `https://pornsitebackend.onrender.com`
+- Backend: `https://api.xstreamvideos.site`
+- AI Gateway: `https://api.xstreamvideos.site`
 - Payment Service: `https://payments.xstreamvideos.site`
 - Nginx aggregate proxy: `https://xstreamvideos.site`
 

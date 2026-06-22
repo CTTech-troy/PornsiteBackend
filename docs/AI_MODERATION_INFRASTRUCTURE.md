@@ -67,7 +67,7 @@ Created tables:
 ## Environment Variables
 
 ```env
-AI_MODERATION_SERVICE_URL=https://pornsitebackend.onrender.com
+AI_MODERATION_SERVICE_URL=https://api.xstreamvideos.site
 AI_WORKER_API_KEY=
 AI_MODERATION_SERVICE_TIMEOUT_MS=12000
 AI_MODERATION_REDIS_QUEUE_MAX=1000
@@ -110,7 +110,7 @@ docker compose -f docker-compose.ai-moderation.yml up --build
 Health check:
 
 ```bash
-curl https://pornsitebackend.onrender.com/health
+curl https://api.xstreamvideos.site/health
 ```
 
 The service exposes:
@@ -185,7 +185,7 @@ Session detail pages include:
 Manual ingest test:
 
 ```bash
-curl -X POST https://pornsitebackend.onrender.com/api/admin/moderation/ai/ingest \
+curl -X POST https://api.xstreamvideos.site/api/admin/moderation/ai/ingest \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-AI-Worker-Key: <AI_WORKER_API_KEY>" \
   -H "Content-Type: application/json" \
