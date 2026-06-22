@@ -156,10 +156,20 @@ export async function loginAdmin(req, res) {
       .from('admin_users')
       .select('id,name,email,password_hash,is_super_admin,permissions,is_active')
       .eq('email', email)
-      .eq('is_active', true)
       .maybeSingle();
 
     if (error) return res.status(500).json({ message: error.message });
+    if (user?.is_active === false) {
+      await logAdminAction(req, {
+        action: 'Admin login failed',
+        targetType: 'admin_session',
+        targetId: user.id,
+        status: 'failure',
+        details: { reason: 'inactive_account', email },
+        admin: { id: user.id, name: user.name, email: user.email },
+      });
+      return res.status(403).json({ message: 'Admin account is not active' });
+    }
     if (!user || !user.password_hash) {
       await logAdminAction(req, {
         action: 'Admin login failed',
@@ -227,6 +237,70 @@ export async function logoutAdmin(req, res) {
       });
     }
     return res.json({ message: 'Logged out' });
+  } catch (err) {
+    return res.status(500).json({ message: err?.message || String(err) });
+  }
+}
+
+export async function changeAdminPassword(req, res) {
+  try {
+    const adminId = String(req.admin?.id || '').trim();
+    const currentPassword = String(req.body?.currentPassword || '');
+    const newPassword = String(req.body?.newPassword || '');
+
+    if (!adminId) return res.status(401).json({ message: 'Admin session is required' });
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: 'Current password and new password are required' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: 'New password must be at least 8 characters' });
+    }
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ message: 'New password must be different from the current password' });
+    }
+
+    const { data: user, error } = await supabase
+      .from('admin_users')
+      .select('id,name,email,password_hash,is_active')
+      .eq('id', adminId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ message: error.message });
+    if (!user || user.is_active === false) {
+      return res.status(401).json({ message: 'Admin account is not active' });
+    }
+    if (!user.password_hash) {
+      return res.status(409).json({ message: 'This admin account does not have a password set' });
+    }
+
+    const passwordOk = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!passwordOk) {
+      await logAdminAction(req, {
+        action: 'Admin password change failed',
+        targetType: 'admin_user',
+        targetId: user.id,
+        status: 'failure',
+        details: { reason: 'invalid_current_password' },
+        admin: { id: user.id, name: user.name, email: user.email },
+      });
+      return res.status(400).json({ message: 'Current password is incorrect' });
+    }
+
+    const password_hash = await bcrypt.hash(newPassword, 12);
+    const { error: updateErr } = await supabase
+      .from('admin_users')
+      .update({ password_hash })
+      .eq('id', user.id);
+    if (updateErr) return res.status(500).json({ message: updateErr.message });
+
+    await logAdminAction(req, {
+      action: 'Admin password changed',
+      targetType: 'admin_user',
+      targetId: user.id,
+      admin: { id: user.id, name: user.name, email: user.email },
+    });
+
+    return res.json({ message: 'Password changed successfully' });
   } catch (err) {
     return res.status(500).json({ message: err?.message || String(err) });
   }

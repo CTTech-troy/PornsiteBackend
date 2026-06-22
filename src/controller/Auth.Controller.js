@@ -13,6 +13,7 @@ import { recordAuth } from '../utils/authMetrics.js';
 import {
   signInWithPassword as firebaseRestSignIn,
   confirmPasswordResetWithOobCode,
+  isIdentityToolkitConfigError,
 } from '../services/firebaseAuthRestService.js';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
 import {
@@ -26,12 +27,17 @@ import {
 import { attributeReferral } from '../services/publisherRevenue.service.js';
 import {
   publicFrontendUrl,
-  buildPasswordResetContinueUrl,
   buildAppVerificationUrl,
+  buildAppPasswordResetUrl,
   isLocalDevUrlsConfigured,
 } from '../utils/authPublicUrls.js';
 import { emitPlatformActivity, writePlatformActivityEvent } from '../services/platformActivity.service.js';
 import { scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
+import {
+  createPasswordResetToken,
+  looksLikeAppPasswordResetToken,
+  verifyPasswordResetToken,
+} from '../services/passwordResetToken.service.js';
 
 const MIN_CREATOR_AGE = 18;
 
@@ -1023,6 +1029,10 @@ export async function login(req, res) {
           console.error('[login] FIREBASE_WEB_API_KEY missing');
           return res.status(503).json({ success: false, message: 'Sign-in is temporarily unavailable.' });
         }
+        if (isIdentityToolkitConfigError(code)) {
+          console.error('[login] Firebase sign-in provider is misconfigured:', code);
+          return res.status(503).json({ success: false, message: 'Sign-in is temporarily unavailable.' });
+        }
         const msg = restErr?.message || 'Invalid email or password.';
         const lower = String(code).toLowerCase();
         const status =
@@ -1260,19 +1270,8 @@ export async function forgotPassword(req, res) {
       });
     }
 
-    const continueUrl = buildPasswordResetContinueUrl();
-    if (!continueUrl || !/^https?:\/\//i.test(continueUrl)) {
-      console.error('forgotPassword: invalid continue URL', { continueUrl, front: publicFrontendUrl() });
-      return res.status(503).json({
-        success: false,
-        message: 'Password reset is temporarily unavailable. Please try again later.',
-      });
-    }
-
-    const link = await auth.generatePasswordResetLink(emailNorm, {
-      url: continueUrl,
-      handleCodeInApp: false,
-    });
+    const resetToken = createPasswordResetToken({ uid: userRecord.uid, email: emailNorm });
+    const link = buildAppPasswordResetUrl(resetToken);
 
     const displayName = userRecord.displayName || emailNorm.split('@')[0];
     await sendPasswordResetEmail({
@@ -1287,21 +1286,55 @@ export async function forgotPassword(req, res) {
     });
   } catch (err) {
     console.error('forgotPassword error:', err);
-    return res.status(500).json({ success: false, message: err.message || 'Could not process request.' });
+    if (err?.code === 'PASSWORD_RESET_CONFIG') {
+      return res.status(503).json({ success: false, message: 'Password reset is temporarily unavailable. Please try again later.' });
+    }
+    return res.status(500).json({ success: false, message: 'Could not process request.' });
   }
 }
 
 export async function resetPassword(req, res) {
   try {
-    const { oobCode, newPassword } = req.body || {};
-    if (!oobCode || typeof oobCode !== 'string') {
+    const { oobCode, code, newPassword } = req.body || {};
+    const resetCode = String(oobCode || code || '').trim();
+    if (!resetCode) {
       return res.status(400).json({ success: false, message: 'Reset code is required.' });
     }
     if (!newPassword || String(newPassword).length < 8) {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
     }
 
-    await confirmPasswordResetWithOobCode(String(oobCode).trim(), String(newPassword));
+    if (looksLikeAppPasswordResetToken(resetCode)) {
+      const verified = verifyPasswordResetToken(resetCode);
+      if (!verified.ok) {
+        const status = verified.code === 'PASSWORD_RESET_CONFIG' ? 503 : 400;
+        return res.status(status).json({ success: false, message: verified.message });
+      }
+
+      const auth = getFirebaseAuth();
+      if (!auth) {
+        return res.status(503).json({ success: false, message: 'Account service is temporarily unavailable.' });
+      }
+
+      try {
+        await auth.updateUser(verified.uid, { password: String(newPassword) });
+        await auth.revokeRefreshTokens(verified.uid).catch(() => {});
+      } catch (updateErr) {
+        const raw = String(updateErr?.code || updateErr?.message || '').toLowerCase();
+        if (raw.includes('user-not-found')) {
+          return res.status(400).json({ success: false, message: 'This reset link is invalid or has expired. Request a new one.' });
+        }
+        if (raw.includes('invalid-password') || raw.includes('weak-password')) {
+          return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+        }
+        console.error('resetPassword app token update error:', updateErr);
+        return res.status(503).json({ success: false, message: 'Password reset is temporarily unavailable. Please try again later.' });
+      }
+
+      return res.status(200).json({ success: true, message: 'Password updated. You can sign in with your new password.' });
+    }
+
+    await confirmPasswordResetWithOobCode(resetCode, String(newPassword));
     return res.status(200).json({ success: true, message: 'Password updated. You can sign in with your new password.' });
   } catch (err) {
     const raw = err?.code || err?.message || '';

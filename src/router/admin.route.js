@@ -31,6 +31,8 @@ router.post('/application-update/:token', adminUsers.updateApplicationByToken);
 
 router.use(requireAdminAuth);
 
+router.patch('/auth/password', adminCtrl.changeAdminPassword);
+router.put('/auth/password', adminCtrl.changeAdminPassword);
 router.post('/invite', adminCtrl.inviteAdmin);
 
 // --- Admin Management ---

@@ -1,6 +1,28 @@
 import jwt from 'jsonwebtoken';
 import { supabase } from '../config/supabase.js';
 
+const ADMIN_AUTH_LOOKUP_TIMEOUT = Symbol('admin_auth_lookup_timeout');
+const ADMIN_AUTH_DB_LOOKUP_TIMEOUT_MS = Math.max(
+  500,
+  Number(process.env.ADMIN_AUTH_DB_LOOKUP_TIMEOUT_MS || 2500),
+);
+
+async function withAdminLookupTimeout(promise, context = 'admin lookup') {
+  let timer;
+  const result = await Promise.race([
+    promise,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(ADMIN_AUTH_LOOKUP_TIMEOUT), ADMIN_AUTH_DB_LOOKUP_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+
+  if (result === ADMIN_AUTH_LOOKUP_TIMEOUT) {
+    console.warn(`[adminAuth] ${context} timed out after ${ADMIN_AUTH_DB_LOOKUP_TIMEOUT_MS}ms; trusting signed token for this request.`);
+  }
+
+  return result;
+}
+
 function adminSelectColumns(includeNewColumns = true) {
   return includeNewColumns
     ? 'id,name,email,role,permissions,is_active,is_super_admin,last_login,last_active_at'
@@ -43,7 +65,11 @@ export async function resolveAdminSessionFromToken(token) {
   let admin = payload;
 
   try {
-    const data = await findAdminByTokenPayload(payload);
+    const data = await withAdminLookupTimeout(
+      findAdminByTokenPayload(payload),
+      'resolveAdminSessionFromToken',
+    );
+    if (data === ADMIN_AUTH_LOOKUP_TIMEOUT) return admin;
     if (!data || data.is_active === false) return null;
     admin = {
       ...payload,
@@ -69,7 +95,14 @@ export async function requireAdminAuth(req, res, next) {
     const payload = jwt.verify(token, process.env.ADMIN_JWT_SECRET || 'admin-secret-fallback');
     let admin = payload;
     try {
-      const data = await findAdminByTokenPayload(payload);
+      const data = await withAdminLookupTimeout(
+        findAdminByTokenPayload(payload),
+        'requireAdminAuth',
+      );
+      if (data === ADMIN_AUTH_LOOKUP_TIMEOUT) {
+        req.admin = admin;
+        return next();
+      }
       if (!data) return res.status(401).json({ error: 'Admin session no longer exists. Please log in again.' });
       if (data.is_active === false) return res.status(401).json({ error: 'Admin account is inactive. Please contact the owner.' });
       admin = {

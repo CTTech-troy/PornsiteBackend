@@ -45,3 +45,15 @@ export function buildPasswordResetContinueUrl() {
     return `${front}/auth/reset-password`;
   }
 }
+
+export function buildAppPasswordResetUrl(rawToken) {
+  const front = publicFrontendUrl();
+  const token = String(rawToken || '').trim();
+  try {
+    const url = new URL('/auth/reset-password', `${front}/`);
+    url.searchParams.set('code', token);
+    return url.href;
+  } catch {
+    return `${front}/auth/reset-password?code=${encodeURIComponent(token)}`;
+  }
+}

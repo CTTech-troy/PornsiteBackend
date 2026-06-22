@@ -193,6 +193,158 @@ const TRUSTED_FRAME_SOURCES = [
   ...TRUSTED_VIDEO_EMBED_SOURCES,
   ...TRUSTED_AD_FRAME_SOURCES,
 ];
+
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://xstreamvideos.site',
+  'https://www.xstreamvideos.site',
+  'https://admin.xstreamvideos.site',
+];
+
+const DEVELOPMENT_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://localhost:5176',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://127.0.0.1:5175',
+  'http://127.0.0.1:5176',
+];
+
+const CORS_METHODS = ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'];
+const CORS_ALLOWED_HEADERS = [
+  'Accept',
+  'Authorization',
+  'Cache-Control',
+  'Content-Type',
+  'DNT',
+  'If-Modified-Since',
+  'Keep-Alive',
+  'Last-Event-ID',
+  'Origin',
+  'Pragma',
+  'User-Agent',
+  'X-Admin-Token',
+  'X-API-Key',
+  'X-Requested-With',
+  'X-Request-Id',
+];
+const CORS_EXPOSED_HEADERS = [
+  'Content-Length',
+  'Content-Range',
+  'X-Request-Id',
+];
+const CORS_PREFLIGHT_MAX_AGE_SECONDS = 86400;
+
+function isDeveloperMode() {
+  const env = String(process.env.APP_ENV || process.env.NODE_ENV || '').toLowerCase();
+  return ['development', 'dev', 'local', 'test'].includes(env);
+}
+
+function isEnabledEnvFlag(value, fallback = false) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function isRenderRuntime() {
+  return Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+}
+
+function shouldAllowLocalhostCors() {
+  return isEnabledEnvFlag(process.env.ALLOW_LOCALHOST_CORS, true);
+}
+
+function isLocalhostOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return ['http:', 'https:'].includes(url.protocol)
+      && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function parseAllowedOrigins(rawOrigins) {
+  const envList = typeof rawOrigins === 'string' && rawOrigins.trim() ? rawOrigins.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const devList = (isDeveloperMode() || shouldAllowLocalhostCors()) ? DEVELOPMENT_ALLOWED_ORIGINS : [];
+  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...devList, ...envList]));
+}
+
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ORIGINS);
+const allowedOriginsSet = new Set(ALLOWED_ORIGINS);
+console.info('[cors] Allowed origins configured', {
+  mode: isDeveloperMode() ? 'development' : 'production',
+  localhostCors: shouldAllowLocalhostCors() ? 'enabled' : 'disabled',
+  origins: ALLOWED_ORIGINS,
+});
+
+function isOriginAllowed(origin) {
+  return !origin
+    || allowedOriginsSet.has(origin)
+    || (shouldAllowLocalhostCors() && isLocalhostOrigin(origin));
+}
+
+function buildCorsError(origin) {
+  const error = new Error(`Not allowed by CORS for origin: ${origin}`);
+  error.status = 403;
+  error.statusCode = 403;
+  error.code = 'CORS_ORIGIN_DENIED';
+  return error;
+}
+
+function corsOriginDelegate(origin, callback) {
+  if (isOriginAllowed(origin)) return callback(null, true);
+  return callback(buildCorsError(origin));
+}
+
+function appendVary(res, value) {
+  const existing = String(res.getHeader('Vary') || '');
+  const values = new Set(existing.split(',').map((part) => part.trim()).filter(Boolean));
+  for (const part of String(value || '').split(',')) {
+    const trimmed = part.trim();
+    if (trimmed) values.add(trimmed);
+  }
+  if (values.size) res.setHeader('Vary', Array.from(values).join(', '));
+}
+
+function requestedCorsHeaders(req) {
+  const requested = String(req.headers['access-control-request-headers'] || '').trim();
+  return requested || CORS_ALLOWED_HEADERS.join(', ');
+}
+
+function applyCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  appendVary(res, 'Origin, Access-Control-Request-Headers');
+  if (!isOriginAllowed(origin)) return false;
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', CORS_METHODS.join(','));
+  res.setHeader('Access-Control-Allow-Headers', requestedCorsHeaders(req));
+  res.setHeader('Access-Control-Expose-Headers', CORS_EXPOSED_HEADERS.join(','));
+  res.setHeader('Access-Control-Max-Age', String(CORS_PREFLIGHT_MAX_AGE_SECONDS));
+  return true;
+}
+
+const corsOptions = {
+  origin: corsOriginDelegate,
+  credentials: true,
+  methods: CORS_METHODS,
+  allowedHeaders: CORS_ALLOWED_HEADERS,
+  exposedHeaders: CORS_EXPOSED_HEADERS,
+  maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
+  optionsSuccessStatus: 204,
+};
+
+app.use((req, res, next) => {
+  const allowed = applyCorsHeaders(req, res);
+  if (req.method === 'OPTIONS') {
+    if (!allowed) return res.status(403).json({ success: false, message: 'CORS origin denied' });
+    return res.status(204).end();
+  }
+  return next();
+});
  
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -261,88 +413,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_ALLOWED_ORIGINS = [
-  'https://xstreamvideos.site',
-  'https://www.xstreamvideos.site',
-  'https://admin.xstreamvideos.site',
-];
-
-const DEVELOPMENT_ALLOWED_ORIGINS = [
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:5175',
-  'http://localhost:5176',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:5174',
-  'http://127.0.0.1:5175',
-  'http://127.0.0.1:5176',
-];
-
-function isDeveloperMode() {
-  const env = String(process.env.APP_ENV || process.env.NODE_ENV || '').toLowerCase();
-  return ['development', 'dev', 'local', 'test'].includes(env);
-}
-
-function isEnabledEnvFlag(value, fallback = false) {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  return fallback;
-}
-
-function shouldAllowLocalhostCors() {
-  return isEnabledEnvFlag(process.env.ALLOW_LOCALHOST_CORS, true);
-}
-
-function isLocalhostOrigin(origin) {
-  try {
-    const url = new URL(origin);
-    return ['http:', 'https:'].includes(url.protocol)
-      && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function parseAllowedOrigins(rawOrigins) {
-  const envList = typeof rawOrigins === 'string' && rawOrigins.trim() ? rawOrigins.split(',').map((s) => s.trim()).filter(Boolean) : [];
-  const devList = (isDeveloperMode() || shouldAllowLocalhostCors()) ? DEVELOPMENT_ALLOWED_ORIGINS : [];
-  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...devList, ...envList]));
-}
-
-const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.CORS_ORIGINS);
-const allowedOriginsSet = new Set(ALLOWED_ORIGINS);
-console.info('[cors] Allowed origins configured', {
-  mode: isDeveloperMode() ? 'development' : 'production',
-  localhostCors: shouldAllowLocalhostCors() ? 'enabled' : 'disabled',
-  origins: ALLOWED_ORIGINS,
-});
-
-function isOriginAllowed(origin) {
-  return !origin
-    || allowedOriginsSet.has(origin)
-    || (shouldAllowLocalhostCors() && isLocalhostOrigin(origin));
-}
-
-function buildCorsError(origin) {
-  const error = new Error(`Not allowed by CORS for origin: ${origin}`);
-  error.status = 403;
-  error.statusCode = 403;
-  error.code = 'CORS_ORIGIN_DENIED';
-  return error;
-}
-
-function corsOriginDelegate(origin, callback) {
-  if (isOriginAllowed(origin)) return callback(null, true);
-  return callback(buildCorsError(origin));
-}
-
-app.use(cors({
-  origin: corsOriginDelegate,
-  credentials: true,
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  optionsSuccessStatus: 204,
-}));
+app.use(cors(corsOptions));
 
 // QStash signs the exact request body. Capture keep-alive requests as raw bytes
 // before the global JSON parser so verification works for dashboard-created
@@ -1762,7 +1833,7 @@ server.listen(PORT, async () => {
       .catch((err) => console.warn('[enterprise-import:r2] Bucket validation failed:', err?.message || err));
   }
   await ensureBuckets().catch(() => {});
-  if (isEnabledEnvFlag(process.env.IMPORT_WORKER_AUTOSTART, true)) {
+  if (isEnabledEnvFlag(process.env.IMPORT_WORKER_AUTOSTART, isRenderRuntime())) {
     assertEnterpriseImportQueueReady()
       .then(async (redis) => {
         console.info('[enterprise-import-worker] Redis queue ready', {

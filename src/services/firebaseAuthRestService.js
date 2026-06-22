@@ -12,15 +12,40 @@ const MESSAGE_MAP = {
   INVALID_LOGIN_CREDENTIALS: 'Invalid email or password.',
   USER_DISABLED: 'This account has been disabled.',
   TOO_MANY_ATTEMPTS_TRY_LATER: 'Too many attempts. Try again later.',
-  OPERATION_NOT_ALLOWED: 'Email/password sign-in is not enabled for this project.',
-  PASSWORD_LOGIN_DISABLED: 'Email/password sign-in is not enabled for this project.',
+  OPERATION_NOT_ALLOWED: 'Sign-in is temporarily unavailable.',
+  PASSWORD_LOGIN_DISABLED: 'Sign-in is temporarily unavailable.',
+  API_KEY_INVALID: 'Sign-in is temporarily unavailable.',
+  INVALID_API_KEY: 'Sign-in is temporarily unavailable.',
+  PROJECT_NOT_FOUND: 'Sign-in is temporarily unavailable.',
+  CONFIGURATION_NOT_FOUND: 'Sign-in is temporarily unavailable.',
+  INVALID_APP_CREDENTIAL: 'Sign-in is temporarily unavailable.',
   INVALID_OOB_CODE: 'This reset link is invalid or has already been used.',
   EXPIRED_OOB_CODE: 'This reset link has expired. Request a new one.',
   WEAK_PASSWORD: 'Password is too weak. Choose a stronger password.',
 };
 
+const CONFIG_ERROR_MARKERS = [
+  'OPERATION_NOT_ALLOWED',
+  'PASSWORD_LOGIN_DISABLED',
+  'API_KEY_INVALID',
+  'INVALID_API_KEY',
+  'PROJECT_NOT_FOUND',
+  'CONFIGURATION_NOT_FOUND',
+  'INVALID_APP_CREDENTIAL',
+  'AUTH_DOMAIN_CONFIG_REQUIRED',
+  'DOMAIN_NOT_ALLOWED',
+  'UNAUTHORIZED_DOMAIN',
+  'NOT_ALLOWLISTED',
+];
+
+export function isIdentityToolkitConfigError(raw) {
+  const key = String(raw || '').toUpperCase();
+  return CONFIG_ERROR_MARKERS.some((marker) => key.includes(marker));
+}
+
 export function mapIdentityToolkitMessage(raw) {
   const key = typeof raw === 'string' ? raw : '';
+  if (isIdentityToolkitConfigError(key)) return 'Sign-in is temporarily unavailable.';
   if (MESSAGE_MAP[key]) return MESSAGE_MAP[key];
   if (key.includes('INVALID_LOGIN_CREDENTIALS')) return MESSAGE_MAP.INVALID_LOGIN_CREDENTIALS;
   return 'Invalid email or password.';

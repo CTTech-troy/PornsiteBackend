@@ -65,7 +65,11 @@ const forgotPasswordVal = [
 ];
 
 const resetPasswordVal = [
-  body('oobCode').trim().notEmpty().withMessage('Reset code is required'),
+  body('oobCode').custom((value, { req }) => {
+    const resetCode = String(value || req.body?.code || '').trim();
+    if (!resetCode) throw new Error('Reset code is required');
+    return true;
+  }),
   body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   validateRequest,
 ];

@@ -13,9 +13,16 @@ const RAW_LIMIT = Math.floor(Math.min(
 const TOP_LIMIT = Math.max(5, Number(process.env.ANALYTICS_TOP_LIMIT || 25));
 const ACTIVE_WINDOW_MS = Math.max(60_000, Number(process.env.ANALYTICS_ACTIVE_WINDOW_MS || 5 * 60_000));
 const OPTIONAL_AGGREGATE_TIMEOUT_MS = Math.max(1000, Number(process.env.ANALYTICS_OPTIONAL_AGGREGATE_TIMEOUT_MS || 5000));
+const ANALYTICS_QUERY_TIMEOUT_MS = Math.max(2000, Number(process.env.ANALYTICS_QUERY_TIMEOUT_MS || 8000));
+const ANALYTICS_OVERVIEW_HARD_TIMEOUT_MS = Math.max(3000, Number(process.env.ANALYTICS_OVERVIEW_HARD_TIMEOUT_MS || 10000));
+const ANALYTICS_FAST_COUNT_TIMEOUT_MS = Math.max(1000, Number(process.env.ANALYTICS_FAST_COUNT_TIMEOUT_MS || 2500));
+const ANALYTICS_DETAILED_OVERVIEW_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.ANALYTICS_DETAILED_OVERVIEW_ENABLED || '').trim().toLowerCase(),
+);
 const NGN_PER_USD = Math.max(1, Number(process.env.NGN_PER_USD || 1600));
 const SUCCESS_REVENUE_STATUSES = new Set(['active', 'success', 'successful', 'fulfilled', 'paid', 'completed', 'complete', 'verified']);
 const ANALYTICS_ENGAGEMENT_TYPES = new Set(['like', 'comment', 'share', 'favorite', 'subscription', 'creator_follow', 'creator_unfollow']);
+const TIMEOUT_SENTINEL = Symbol('analytics_timeout');
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -37,8 +44,9 @@ function trim(value, max = 240) {
 }
 
 function safeDate(value, fallback = new Date()) {
-  const d = value instanceof Date ? value : new Date(value);
-  return Number.isFinite(d.getTime()) ? d : fallback;
+  const d = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (Number.isFinite(d.getTime())) return d;
+  return fallback instanceof Date ? new Date(fallback.getTime()) : new Date(fallback);
 }
 
 function iso(value) {
@@ -242,7 +250,12 @@ async function selectRows(table, columns, { from, to, column = 'created_at', ord
     if (from) query = query.gte(column, dateOnly ? dateKey(from) : iso(from));
     if (to) query = query.lte(column, dateOnly ? dateKey(to) : iso(to));
     query = query.order(order, { ascending: false }).limit(limit);
-    const { data, error } = await query;
+    const { data, error } = await withTimeout(
+      query,
+      ANALYTICS_QUERY_TIMEOUT_MS,
+      { data: [], error: null },
+      `${table} select`,
+    );
     if (error) {
       if (isMissingDbFeature(error)) return [];
       console.warn(`[analytics] ${table} query failed:`, error.message || error);
@@ -259,7 +272,12 @@ async function countRows(table, configure = (query) => query) {
   if (!supabase) return 0;
   try {
     const query = configure(supabase.from(table).select('id', { count: 'planned', head: true }));
-    const { count, error } = await query;
+    const { count, error } = await withTimeout(
+      query,
+      ANALYTICS_QUERY_TIMEOUT_MS,
+      { count: 0, error: null },
+      `${table} count`,
+    );
     if (error) return 0;
     return count || 0;
   } catch {
@@ -270,7 +288,12 @@ async function countRows(table, configure = (query) => query) {
 async function maybeRpc(name, args = {}) {
   if (!supabase) return null;
   try {
-    const { data, error } = await supabase.rpc(name, args);
+    const { data, error } = await withTimeout(
+      supabase.rpc(name, args),
+      ANALYTICS_QUERY_TIMEOUT_MS,
+      { data: null, error: null },
+      `rpc ${name}`,
+    );
     if (error) {
       if (!isMissingDbFeature(error)) console.warn(`[analytics] rpc ${name} failed:`, error.message || error);
       return null;
@@ -282,21 +305,212 @@ async function maybeRpc(name, args = {}) {
   }
 }
 
-function withTimeout(promise, timeoutMs, fallback = null) {
+async function withTimeout(promise, timeoutMs, fallback = null, label = 'operation') {
   let timer;
-  return Promise.race([
+  const result = await Promise.race([
     promise,
     new Promise((resolve) => {
-      timer = setTimeout(() => resolve(fallback), timeoutMs);
+      timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), timeoutMs);
     }),
   ]).finally(() => clearTimeout(timer));
+  if (result === TIMEOUT_SENTINEL) {
+    console.warn(`[analytics] ${label} timed out after ${timeoutMs}ms`);
+    return fallback;
+  }
+  return result;
+}
+
+function runSoon(fn) {
+  return new Promise((resolve, reject) => {
+    setImmediate(() => {
+      Promise.resolve()
+        .then(fn)
+        .then(resolve, reject);
+    });
+  });
+}
+
+function supabaseRestConfig() {
+  const url = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '').trim();
+  return { url, key };
+}
+
+function countFromContentRange(value) {
+  const match = String(value || '').match(/\/(\d+|\*)$/);
+  if (!match || match[1] === '*') return 0;
+  const count = Number(match[1]);
+  return Number.isFinite(count) ? count : 0;
+}
+
+async function supabaseRestCount(table, filters = {}) {
+  const { url, key } = supabaseRestConfig();
+  if (!url || !key || typeof fetch !== 'function') return 0;
+
+  const endpoint = new URL(`${url}/rest/v1/${encodeURIComponent(table)}`);
+  endpoint.searchParams.set('select', 'id');
+  endpoint.searchParams.set('limit', '1');
+  for (const [name, value] of Object.entries(filters || {})) {
+    if (value !== undefined && value !== null && value !== '') endpoint.searchParams.set(name, String(value));
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ANALYTICS_FAST_COUNT_TIMEOUT_MS);
+  try {
+    const res = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        Prefer: 'count=planned',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) return 0;
+    return countFromContentRange(res.headers.get('content-range'));
+  } catch {
+    return 0;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getFastAnalyticsOverview(query = {}) {
+  const overview = createEmptyAnalyticsOverview(
+    query,
+    'Using fast platform counts while detailed BI rollups warm up.',
+  );
+  const { from, to } = resolveRange(query);
+  const today = startOfDay(new Date());
+  const weekStart = addDays(today, -6);
+  const monthStart = addDays(today, -29);
+
+  const counts = await withTimeout(
+    Promise.all([
+      runSoon(() => supabaseRestCount('users')),
+      runSoon(() => supabaseRestCount('users', { created_at: `gte.${today.toISOString()}` })),
+      runSoon(() => supabaseRestCount('users', { creator: 'is.true' })),
+      runSoon(() => supabaseRestCount('users', { verified: 'eq.approved' })),
+      runSoon(() => supabaseRestCount('creator_applications', { status: 'eq.pending' })),
+      runSoon(() => supabaseRestCount('creators_main_application', { status: 'eq.pending' })),
+      runSoon(() => supabaseRestCount('tiktok_video_views', {
+        created_at: `gte.${from.toISOString()}`,
+        created_at_lte: undefined,
+      })),
+      runSoon(() => supabaseRestCount('tiktok_video_views', { created_at: `gte.${today.toISOString()}` })),
+      runSoon(() => supabaseRestCount('tiktok_video_views', { created_at: `gte.${weekStart.toISOString()}` })),
+      runSoon(() => supabaseRestCount('tiktok_video_views', { created_at: `gte.${monthStart.toISOString()}` })),
+      runSoon(() => supabaseRestCount('tiktok_video_likes', {
+        created_at: `gte.${from.toISOString()}`,
+      })),
+      runSoon(() => supabaseRestCount('tiktok_video_comments', {
+        created_at: `gte.${from.toISOString()}`,
+      })),
+    ]),
+    Math.min(ANALYTICS_OVERVIEW_HARD_TIMEOUT_MS, 6000),
+    [],
+    'fast analytics counts',
+  );
+
+  const [
+    totalUsers = 0,
+    newToday = 0,
+    creatorsByFlag = 0,
+    creatorsByApproved = 0,
+    pendingLegacy = 0,
+    pendingCurrent = 0,
+    viewsInRange = 0,
+    viewsToday = 0,
+    viewsWeek = 0,
+    viewsMonth = 0,
+    likesInRange = 0,
+    commentsInRange = 0,
+  ] = Array.isArray(counts) ? counts : [];
+
+  const totalCreators = Math.max(creatorsByFlag, creatorsByApproved);
+  const timeline = (overview.charts?.timeline || []).map((row, index, rows) => {
+    const isLast = index === rows.length - 1;
+    return {
+      ...row,
+      visitors: isLast ? viewsInRange : row.visitors,
+      activeUsers: isLast ? viewsMonth : row.activeUsers,
+      registrations: isLast ? newToday : row.registrations,
+      views: isLast ? viewsInRange : row.views,
+      visitorGrowth: 0,
+      viewGrowth: 0,
+      watchGrowth: 0,
+      revenueGrowth: 0,
+    };
+  });
+
+  return {
+    ...overview,
+    degraded: true,
+    message: 'Using fast platform counts while detailed BI rollups warm up.',
+    sources: {
+      analyticsFacts: false,
+      fallbackTables: ['users', 'creator_applications', 'creators_main_application', 'tiktok_video_views', 'tiktok_video_likes', 'tiktok_video_comments'],
+      revenueFacts: false,
+      degraded: true,
+      fastCounts: true,
+    },
+    charts: {
+      ...overview.charts,
+      timeline,
+      visitors: timeline.map((row) => ({ date: row.date, visitors: row.visitors, growth: row.visitorGrowth || 0 })),
+      users: timeline.map((row) => ({ date: row.date, activeUsers: row.activeUsers, registrations: row.registrations })),
+      views: timeline.map((row) => ({ date: row.date, views: row.views, growth: row.viewGrowth || 0 })),
+    },
+    kpis: {
+      ...overview.kpis,
+      visitors: {
+        ...overview.kpis.visitors,
+        total: viewsInRange,
+        today: viewsToday,
+        week: viewsWeek,
+        month: viewsMonth,
+      },
+      users: {
+        ...overview.kpis.users,
+        total: totalUsers,
+        activeToday: viewsToday,
+        activeWeek: viewsWeek,
+        activeMonth: viewsMonth,
+        newSignups: newToday,
+      },
+      creators: {
+        ...overview.kpis.creators,
+        total: totalCreators,
+        pstars: totalCreators,
+        channels: 0,
+        pendingApplications: pendingLegacy + pendingCurrent,
+      },
+      videos: {
+        ...overview.kpis.videos,
+        totalViews: viewsInRange,
+        viewsToday,
+        viewsWeek,
+        viewsMonth,
+      },
+      engagement: {
+        ...overview.kpis.engagement,
+        likes: likesInRange,
+        comments: commentsInRange,
+      },
+    },
+  };
 }
 
 async function getTimedUserDirectoryStats(today) {
   if (!supabase) return null;
   try {
     const { getUserDirectoryAggregateStats } = await import('./userDirectoryService.js');
-    return await withTimeout(getUserDirectoryAggregateStats(today).catch(() => null), OPTIONAL_AGGREGATE_TIMEOUT_MS, null);
+    return await withTimeout(
+      getUserDirectoryAggregateStats(today).catch(() => null),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      null,
+      'user directory aggregate stats',
+    );
   } catch {
     return null;
   }
@@ -783,12 +997,22 @@ async function fetchVideoMetadata(videoIds) {
   const columns = 'video_id,title,creator_display_name,creator_avatar_url,user_id,thumbnail_url,thumbnail,poster_url,storage_url,views_count,likes_count,comments_count,created_at';
   let data = [];
   try {
-    const res = await supabase.from('tiktok_videos').select(columns).in('video_id', ids);
+    const res = await withTimeout(
+      supabase.from('tiktok_videos').select(columns).in('video_id', ids),
+      ANALYTICS_QUERY_TIMEOUT_MS,
+      { data: [], error: null },
+      'video metadata',
+    );
     if (res.error) {
-      const fallback = await supabase
-        .from('tiktok_videos')
-        .select('video_id,title,user_id,storage_url,views_count,likes_count,comments_count,created_at')
-        .in('video_id', ids);
+      const fallback = await withTimeout(
+        supabase
+          .from('tiktok_videos')
+          .select('video_id,title,user_id,storage_url,views_count,likes_count,comments_count,created_at')
+          .in('video_id', ids),
+        ANALYTICS_QUERY_TIMEOUT_MS,
+        { data: [], error: null },
+        'video metadata fallback',
+      );
       data = fallback.data || [];
     } else {
       data = res.data || [];
@@ -802,11 +1026,16 @@ async function fetchVideoMetadata(videoIds) {
 async function fetchTopVideoCounters(orderColumn, limit = TOP_LIMIT) {
   if (!supabase) return [];
   try {
-    const { data, error } = await supabase
-      .from('tiktok_videos')
-      .select('video_id,title,creator_display_name,user_id,thumbnail_url,thumbnail,poster_url,storage_url,views_count,likes_count,comments_count,created_at')
-      .order(orderColumn, { ascending: false })
-      .limit(limit);
+    const { data, error } = await withTimeout(
+      supabase
+        .from('tiktok_videos')
+        .select('video_id,title,creator_display_name,user_id,thumbnail_url,thumbnail,poster_url,storage_url,views_count,likes_count,comments_count,created_at')
+        .order(orderColumn, { ascending: false })
+        .limit(limit),
+      ANALYTICS_QUERY_TIMEOUT_MS,
+      { data: [], error: null },
+      `top videos by ${orderColumn}`,
+    );
     if (error) return [];
     return (data || []).map((row) => ({
       videoId: String(row.video_id),
@@ -912,11 +1141,16 @@ async function enrichVideos(items) {
 async function fetchTopCreators() {
   if (!supabase) return [];
   try {
-    const { data, error } = await supabase
-      .from('tiktok_videos')
-      .select('user_id,creator_display_name,views_count,likes_count,comments_count,created_at')
-      .order('views_count', { ascending: false })
-      .limit(500);
+    const { data, error } = await withTimeout(
+      supabase
+        .from('tiktok_videos')
+        .select('user_id,creator_display_name,views_count,likes_count,comments_count,created_at')
+        .order('views_count', { ascending: false })
+        .limit(500),
+      ANALYTICS_QUERY_TIMEOUT_MS,
+      { data: [], error: null },
+      'top creators',
+    );
     if (error) return [];
     const map = new Map();
     for (const row of data || []) {
@@ -975,7 +1209,92 @@ function buildActivityFeed({ analyticsViews, engagementRows, userRows }) {
     .slice(0, 30);
 }
 
-export async function getAnalyticsOverview(query = {}) {
+export function createEmptyAnalyticsOverview(query = {}, reason = 'Analytics is temporarily unavailable') {
+  const { from, to, range } = resolveRange(query);
+  const granularity = normalizeGranularity(query.granularity, range);
+  const timeline = makeBuckets(from, to, granularity).map((row) => ({
+    ...row,
+    visitorGrowth: 0,
+    viewGrowth: 0,
+    watchGrowth: 0,
+    revenueGrowth: 0,
+  }));
+
+  return {
+    range: { from: from.toISOString(), to: to.toISOString(), granularity },
+    generatedAt: new Date().toISOString(),
+    degraded: true,
+    message: reason,
+    sources: {
+      analyticsFacts: false,
+      fallbackTables: ['existing platform tables'],
+      revenueFacts: false,
+      degraded: true,
+      reason,
+    },
+    kpis: {
+      visitors: { total: 0, today: 0, week: 0, month: 0, returning: 0, newVisitors: 0 },
+      users: { total: 0, activeToday: 0, activeWeek: 0, activeMonth: 0, returning: 0, newSignups: 0 },
+      creators: { total: 0, pstars: 0, channels: 0, pendingApplications: 0 },
+      videos: { totalViews: 0, viewsToday: 0, viewsWeek: 0, viewsMonth: 0 },
+      watchTime: { total: 0, today: 0, week: 0, month: 0, averagePerUser: 0, averagePerSession: 0, averagePerVideo: 0 },
+      sessions: { averageDuration: 0, longestToday: 0, longestWeek: 0, longestMonth: 0, totalTimeSpent: 0 },
+      engagement: { likes: 0, comments: 0, shares: 0, favorites: 0, subscriptions: 0, creatorFollows: 0 },
+      revenue: {
+        total: 0,
+        gross: 0,
+        externalPayments: 0,
+        premiumContent: 0,
+        adRevenue: 0,
+        creatorRevenue: 0,
+        today: 0,
+        week: 0,
+        month: 0,
+        transactions: 0,
+      },
+    },
+    charts: {
+      timeline,
+      visitors: timeline.map((row) => ({ date: row.date, visitors: 0, growth: 0 })),
+      users: timeline.map((row) => ({ date: row.date, activeUsers: 0, registrations: 0 })),
+      views: timeline.map((row) => ({ date: row.date, views: 0, growth: 0 })),
+      watchTime: timeline.map((row) => ({ date: row.date, watchTime: 0, growth: 0 })),
+      revenue: timeline.map((row) => ({
+        date: row.date,
+        revenue: 0,
+        grossRevenue: 0,
+        externalRevenue: 0,
+        premiumRevenue: 0,
+        adRevenue: 0,
+        creatorRevenue: 0,
+        transactions: 0,
+        growth: 0,
+      })),
+      revenueSources: [],
+      trafficSources: [],
+      deviceTypes: [],
+      browsers: [],
+      operatingSystems: [],
+      countries: [],
+      cities: [],
+      regions: [],
+    },
+    videoPerformance: [],
+    content: {
+      mostViewed: [],
+      mostLiked: [],
+      mostCommented: [],
+      mostShared: [],
+      highestWatchTime: [],
+      fastestGrowing: [],
+      topCreators: [],
+    },
+    realtime: emptyRealtimeAnalytics(),
+    activityFeed: [],
+  };
+}
+
+async function buildAnalyticsOverview(query = {}) {
   const { from, to, range } = resolveRange(query);
   const granularity = normalizeGranularity(query.granularity, range);
   const today = startOfDay(new Date());
@@ -996,17 +1315,22 @@ export async function getAnalyticsOverview(query = {}) {
     revenueRows,
     pendingCreatorApplications,
   ] = await Promise.all([
-    selectRows('analytics_visitors', 'id,session_id,user_id,country,region,city,device_type,browser,os,referrer,traffic_source,landing_page,visit_date,created_at', { from, to, column: 'visit_date', order: 'visit_date', dateOnly: true }),
-    selectRows('analytics_sessions', 'session_id,user_id,start_time,last_activity,end_time,duration_seconds,pages_visited,videos_watched,is_active,created_at', { from, to, column: 'start_time', order: 'start_time' }),
-    selectRows('analytics_video_views', 'id,watch_id,video_id,user_id,session_id,watch_start,watch_end,watch_duration,completed,progress_ratio,created_at,metadata', { from, to }),
-    selectRows('analytics_engagement', 'id,event_type,video_id,creator_id,user_id,session_id,value,created_at', { from, to }),
-    selectRows('analytics_daily_summary', 'date,visitors,active_users,views,watch_time,likes,comments,shares,registrations,sessions,avg_session_seconds', { from, to, column: 'date', order: 'date', dateOnly: true }),
-    selectRows('tiktok_video_views', 'id,video_id,user_id,session_id,viewer_key,fingerprint,qualified_watch_seconds,progress_ratio,created_at', { from, to }),
-    selectRows('playback_performance_events', 'video_id,user_id,fingerprint,event_type,current_time,duration,created_at', { from, to }),
-    selectRows('users', 'id,email,created_at', { from, to }),
-    getTimedUserDirectoryStats(today),
-    fetchRevenueFacts({ from, to }),
-    countCreatorApplicationsByStatus('pending'),
+    runSoon(() => selectRows('analytics_visitors', 'id,session_id,user_id,country,region,city,device_type,browser,os,referrer,traffic_source,landing_page,visit_date,created_at', { from, to, column: 'visit_date', order: 'visit_date', dateOnly: true })),
+    runSoon(() => selectRows('analytics_sessions', 'session_id,user_id,start_time,last_activity,end_time,duration_seconds,pages_visited,videos_watched,is_active,created_at', { from, to, column: 'start_time', order: 'start_time' })),
+    runSoon(() => selectRows('analytics_video_views', 'id,watch_id,video_id,user_id,session_id,watch_start,watch_end,watch_duration,completed,progress_ratio,created_at,metadata', { from, to })),
+    runSoon(() => selectRows('analytics_engagement', 'id,event_type,video_id,creator_id,user_id,session_id,value,created_at', { from, to })),
+    runSoon(() => selectRows('analytics_daily_summary', 'date,visitors,active_users,views,watch_time,likes,comments,shares,registrations,sessions,avg_session_seconds', { from, to, column: 'date', order: 'date', dateOnly: true })),
+    runSoon(() => selectRows('tiktok_video_views', 'id,video_id,user_id,session_id,viewer_key,fingerprint,qualified_watch_seconds,progress_ratio,created_at', { from, to })),
+    runSoon(() => selectRows('playback_performance_events', 'video_id,user_id,fingerprint,event_type,current_time,duration,created_at', { from, to })),
+    runSoon(() => selectRows('users', 'id,email,created_at', { from, to })),
+    runSoon(() => getTimedUserDirectoryStats(today)),
+    runSoon(() => fetchRevenueFacts({ from, to })),
+    runSoon(() => withTimeout(
+      countCreatorApplicationsByStatus('pending'),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'pending creator application count',
+    )),
   ]);
 
   const hasAnalyticsFacts = visitorRows.length || sessionRows.length || analyticsViews.length || engagementRows.length;
@@ -1123,17 +1447,44 @@ export async function getAnalyticsOverview(query = {}) {
     revenueGrowth: growthPct(row.revenue, rows[index - 1]?.revenue || 0),
   }));
 
-  const videoPerformance = await enrichVideos(aggregateVideoPerformance(analyticsViews, fallbackViewRows, engagementRows, TOP_LIMIT));
+  const videoPerformance = await withTimeout(
+    enrichVideos(aggregateVideoPerformance(analyticsViews, fallbackViewRows, engagementRows, TOP_LIMIT)),
+    OPTIONAL_AGGREGATE_TIMEOUT_MS,
+    [],
+    'video performance enrichment',
+  );
   const [mostLiked, mostCommented, mostViewedByCounters, topCreators] = await Promise.all([
-    fetchTopVideoCounters('likes_count', 10),
-    fetchTopVideoCounters('comments_count', 10),
-    fetchTopVideoCounters('views_count', 10),
-    fetchTopCreators(),
+    withTimeout(fetchTopVideoCounters('likes_count', 10), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'most liked videos'),
+    withTimeout(fetchTopVideoCounters('comments_count', 10), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'most commented videos'),
+    withTimeout(fetchTopVideoCounters('views_count', 10), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'most viewed videos'),
+    withTimeout(fetchTopCreators(), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'top creators'),
   ]);
   const highestWatchTime = [...videoPerformance].sort((a, b) => b.watchTime - a.watchTime).slice(0, 10);
   const fastestGrowing = [...videoPerformance].sort((a, b) => b.views - a.views).slice(0, 10);
 
-  const realtime = await getRealtimeAnalytics();
+  const realtime = await withTimeout(
+    getRealtimeAnalytics(),
+    OPTIONAL_AGGREGATE_TIMEOUT_MS,
+    emptyRealtimeAnalytics(),
+    'realtime analytics',
+  );
+
+  const engagementLikeCount = engagementRows.filter((row) => row.event_type === 'like').length;
+  const engagementCommentCount = engagementRows.filter((row) => row.event_type === 'comment').length;
+  const [fallbackLikeCount, fallbackCommentCount] = await Promise.all([
+    engagementLikeCount ? Promise.resolve(0) : withTimeout(
+      countRows('tiktok_video_likes', (q) => q.gte('created_at', from.toISOString()).lte('created_at', to.toISOString())),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'fallback like count',
+    ),
+    engagementCommentCount ? Promise.resolve(0) : withTimeout(
+      countRows('tiktok_video_comments', (q) => q.gte('created_at', from.toISOString()).lte('created_at', to.toISOString())),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'fallback comment count',
+    ),
+  ]);
 
   return {
     range: { from: from.toISOString(), to: to.toISOString(), granularity },
@@ -1189,8 +1540,8 @@ export async function getAnalyticsOverview(query = {}) {
         totalTimeSpent: sessionDurations.reduce((sum, n) => sum + n, 0),
       },
       engagement: {
-        likes: engagementRows.filter((row) => row.event_type === 'like').length || await countRows('tiktok_video_likes', (q) => q.gte('created_at', from.toISOString()).lte('created_at', to.toISOString())),
-        comments: engagementRows.filter((row) => row.event_type === 'comment').length || await countRows('tiktok_video_comments', (q) => q.gte('created_at', from.toISOString()).lte('created_at', to.toISOString())),
+        likes: engagementLikeCount || fallbackLikeCount,
+        comments: engagementCommentCount || fallbackCommentCount,
         shares: engagementRows.filter((row) => row.event_type === 'share').length,
         favorites: engagementRows.filter((row) => row.event_type === 'favorite').length,
         subscriptions: engagementRows.filter((row) => row.event_type === 'subscription').length,
@@ -1254,6 +1605,37 @@ export async function getAnalyticsOverview(query = {}) {
   };
 }
 
+function emptyRealtimeAnalytics() {
+  return {
+    usersOnlineNow: 0,
+    guestsOnlineNow: 0,
+    videosBeingWatched: 0,
+    newRegistrationsToday: 0,
+    newViewsLast60Minutes: 0,
+    newLikesLast60Minutes: 0,
+    newCommentsLast60Minutes: 0,
+    newRevenueLast60Minutes: 0,
+    newPaymentsLast60Minutes: 0,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function getAnalyticsOverview(query = {}) {
+  if (!ANALYTICS_DETAILED_OVERVIEW_ENABLED) {
+    return await getFastAnalyticsOverview(query);
+  }
+
+  return await withTimeout(
+    runSoon(() => buildAnalyticsOverview(query)),
+    ANALYTICS_OVERVIEW_HARD_TIMEOUT_MS,
+    createEmptyAnalyticsOverview(
+      query,
+      'Analytics is still loading. Showing a temporary safe fallback instead of failing the dashboard.',
+    ),
+    'analytics overview hard limit',
+  );
+}
+
 export async function getRealtimeAnalytics() {
   const activeSince = new Date(Date.now() - ACTIVE_WINDOW_MS);
   const lastHour = new Date(Date.now() - 60 * 60 * 1000);
@@ -1276,18 +1658,38 @@ export async function getRealtimeAnalytics() {
   ].filter(Boolean));
 
   const likesLastHour = recentEngagement.filter((row) => row.event_type === 'like').length
-    || await countRows('tiktok_video_likes', (q) => q.gte('created_at', lastHour.toISOString()));
+    || 0;
   const commentsLastHour = recentEngagement.filter((row) => row.event_type === 'comment').length
-    || await countRows('tiktok_video_comments', (q) => q.gte('created_at', lastHour.toISOString()));
+    || 0;
+  const [fallbackViewsLastHour, fallbackLikesLastHour, fallbackCommentsLastHour] = await Promise.all([
+    recentViews.length ? Promise.resolve(0) : withTimeout(
+      countRows('tiktok_video_views', (q) => q.gte('created_at', lastHour.toISOString())),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'realtime fallback views',
+    ),
+    likesLastHour ? Promise.resolve(0) : withTimeout(
+      countRows('tiktok_video_likes', (q) => q.gte('created_at', lastHour.toISOString())),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'realtime fallback likes',
+    ),
+    commentsLastHour ? Promise.resolve(0) : withTimeout(
+      countRows('tiktok_video_comments', (q) => q.gte('created_at', lastHour.toISOString())),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'realtime fallback comments',
+    ),
+  ]);
 
   return {
     usersOnlineNow: activeAuthed,
     guestsOnlineNow: activeGuests,
     videosBeingWatched: activeVideoIds.size,
     newRegistrationsToday: recentUsers.length,
-    newViewsLast60Minutes: recentViews.length || await countRows('tiktok_video_views', (q) => q.gte('created_at', lastHour.toISOString())),
-    newLikesLast60Minutes: likesLastHour,
-    newCommentsLast60Minutes: commentsLastHour,
+    newViewsLast60Minutes: recentViews.length || fallbackViewsLastHour,
+    newLikesLast60Minutes: likesLastHour || fallbackLikesLastHour,
+    newCommentsLast60Minutes: commentsLastHour || fallbackCommentsLastHour,
     newRevenueLast60Minutes: Math.round(recentRevenueTotals.platform * 100) / 100,
     newPaymentsLast60Minutes: recentRevenueTotals.transactions,
     updatedAt: new Date().toISOString(),
