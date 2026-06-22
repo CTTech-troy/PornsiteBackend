@@ -14,6 +14,7 @@ import {
   getPlatformActivity,
   testVastTag,
 } from '../controller/adminSystem.controller.js';
+import { subscribePlatformActivityEvents } from '../services/platformActivity.service.js';
 import {
   getAdminEmailTemplate,
   listAdminEmailTemplates,
@@ -39,12 +40,38 @@ import {
   runObservabilityIncidentScan,
   runObservabilitySummary,
 } from '../controller/apiObservability.controller.js';
+import {
+  archiveAdminLegalPolicy,
+  compareAdminLegalPolicyVersions,
+  createAdminLegalPolicy,
+  deleteAdminLegalPolicy,
+  getAdminLegalPolicy,
+  listAdminLegalPolicies,
+  publishAdminLegalPolicy,
+  restoreAdminLegalPolicyVersion,
+  updateAdminLegalPolicy,
+} from '../controller/legalDocument.controller.js';
 
 const router = Router();
 router.use(requireAdminAuth);
 
+function requireTermsPolicyPermission(req, res, next) {
+  if (req.admin?.is_super_admin || req.admin?.isSuperAdmin) return next();
+  const permissions = Array.isArray(req.admin?.permissions) ? req.admin.permissions : [];
+  const hasPermission = permissions.some((permission) => (
+    permission === '*' ||
+    permission === 'terms_policy' ||
+    permission === '/terms-policy' ||
+    permission?.key === 'terms_policy' ||
+    permission?.path === '/terms-policy'
+  ));
+  if (hasPermission) return next();
+  return res.status(403).json({ success: false, message: 'Terms & Policy permission is required.' });
+}
+
 router.get('/stats', getStats);
 router.get('/platform-activity', getPlatformActivity);
+router.get('/platform-activity/events', subscribePlatformActivityEvents);
 router.get('/settings', getSettings);
 router.put('/settings', updateSettings);
 router.put('/settings/:key', updateSetting);
@@ -61,6 +88,16 @@ router.post('/email-templates/:key/preview', previewAdminEmailTemplate);
 router.post('/email-templates/preview-message', previewAdminMessageEmail);
 router.post('/email-templates/:key/test-send', sendAdminEmailTemplateTest);
 router.put('/email-templates/:key', saveAdminEmailTemplate);
+
+router.get('/legal-policies', requireTermsPolicyPermission, listAdminLegalPolicies);
+router.post('/legal-policies', requireTermsPolicyPermission, createAdminLegalPolicy);
+router.get('/legal-policies/:id', requireTermsPolicyPermission, getAdminLegalPolicy);
+router.put('/legal-policies/:id', requireTermsPolicyPermission, updateAdminLegalPolicy);
+router.post('/legal-policies/:id/publish', requireTermsPolicyPermission, publishAdminLegalPolicy);
+router.post('/legal-policies/:id/archive', requireTermsPolicyPermission, archiveAdminLegalPolicy);
+router.delete('/legal-policies/:id', requireSuperAdmin, deleteAdminLegalPolicy);
+router.post('/legal-policies/:id/versions/:versionId/restore', requireTermsPolicyPermission, restoreAdminLegalPolicyVersion);
+router.get('/legal-policies/:id/versions/compare', requireTermsPolicyPermission, compareAdminLegalPolicyVersions);
 
 router.get('/observability/overview', getObservabilityOverview);
 router.get('/observability/apis', getObservedApis);

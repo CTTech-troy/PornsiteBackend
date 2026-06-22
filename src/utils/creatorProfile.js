@@ -2,6 +2,7 @@ import { supabase } from '../config/supabase.js';
 import { decryptApplicationData } from '../config/encrypt.js';
 
 const CACHE_TTL_MS = 60_000;
+const CACHE_MAX_KEYS = Math.max(100, Number(process.env.CREATOR_PUBLIC_FIELDS_CACHE_MAX_KEYS || 1000));
 const publicFieldsCache = new Map();
 
 function cleanString(value) {
@@ -171,6 +172,11 @@ export async function getCreatorPublicFields(uid) {
   if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) return cached.value;
   const value = await resolveCreatorPublicFields(cacheKey);
   publicFieldsCache.set(cacheKey, { cachedAt: Date.now(), value });
+  while (publicFieldsCache.size > CACHE_MAX_KEYS) {
+    const oldest = publicFieldsCache.keys().next().value;
+    if (!oldest) break;
+    publicFieldsCache.delete(oldest);
+  }
   return value;
 }
 

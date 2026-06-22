@@ -6,6 +6,8 @@ import { logAction as writeAuditAction } from '../services/adminAudit.service.js
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
 import { enqueueSearchIndex } from '../services/searchIndex.service.js';
 
+const ADMIN_CONTENT_SOURCE_SCAN_LIMIT = Math.min(5000, Math.max(250, Number(process.env.ADMIN_CONTENT_SOURCE_SCAN_LIMIT || 1500)));
+
 function invalidateCreatorLeaderboard() {
   try {
     invalidateTopCreatorsCache();
@@ -467,7 +469,7 @@ async function fetchRtdbVideos({ search, statusFilter, isPremium }) {
 // Fetch all matching videos from Supabase tiktok_videos (no pagination — we merge in memory).
 async function fetchSupabaseVideos({ search, statusFilter, isPremium, validationStatus }) {
   try {
-    let q = supabase.from('tiktok_videos').select('*').order('created_at', { ascending: false });
+    let q = supabase.from('tiktok_videos').select('*').order('created_at', { ascending: false }).limit(ADMIN_CONTENT_SOURCE_SCAN_LIMIT);
     if (statusFilter) q = q.eq('status', statusFilter);
     if (validationStatus) q = q.eq('validation_status', validationStatus);
     if (search) q = q.ilike('title', `%${search}%`);
@@ -476,7 +478,7 @@ async function fetchSupabaseVideos({ search, statusFilter, isPremium, validation
     if (error) {
       if (isMissingTable(error)) return [];
       if (isMissingColumn(error)) {
-        let retry = supabase.from('tiktok_videos').select('*').order('created_at', { ascending: false });
+        let retry = supabase.from('tiktok_videos').select('*').order('created_at', { ascending: false }).limit(ADMIN_CONTENT_SOURCE_SCAN_LIMIT);
         if (search) retry = retry.ilike('title', `%${search}%`);
         ({ data, error } = await retry);
         if (error) return [];

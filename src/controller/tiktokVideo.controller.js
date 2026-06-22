@@ -9,6 +9,8 @@ import { creditViewMilestone } from './earnings.controller.js';
 import { invalidVideoIdResponse, isValidPlatformVideoId } from '../utils/videoIdValidation.js';
 import { annotatePlayableVideo, filterPlayableVideos, validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
 import { getPlatformSettingsMap } from '../services/platformSettings.service.js';
+import { emitPlatformActivity, writePlatformActivityEvent } from '../services/platformActivity.service.js';
+import { resolveMediaDeliveryUrl, scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
 
 const VIDEOS_TABLE = 'tiktok_videos';
 const LIKES_TABLE = 'tiktok_video_likes';
@@ -16,6 +18,7 @@ const COMMENTS_TABLE = 'tiktok_video_comments';
 const PLAY_HISTORY_TABLE = 'video_play_history';
 const ADS_TABLE = 'video_ads';
 const AD_IMPRESSIONS_TABLE = 'video_ad_impressions';
+const SIGNED_STREAM_TTL_SEC = Math.max(30, Number(process.env.STREAM_SIGNED_URL_TTL_SEC || 120));
 
 function ensureSupabase() {
   if (!isSupabaseConfigured() || !supabase) throw new Error('Supabase not configured');
@@ -31,6 +34,129 @@ function hashValue(value) {
 function getClientIp(req) {
   const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   return forwarded || req.ip || req.socket?.remoteAddress || '';
+}
+
+function isProtectedVideoRow(row = {}) {
+  const accessType = String(row.access_type || row.accessType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, '_');
+  return (
+    row.is_premium_content === true ||
+    row.isPremiumContent === true ||
+    row.premium === true ||
+    Number(row.token_price ?? row.tokenPrice ?? row.coin_price ?? row.coinPrice ?? 0) > 0 ||
+    row.requires_membership === true ||
+    row.requiresMembership === true ||
+    row.subscription_access === true ||
+    row.subscriptionAccess === true ||
+    ['premium', 'members_only', 'coin_unlock', 'paid'].includes(accessType)
+  );
+}
+
+function redactProtectedPlayback(row = {}) {
+  if (!row || !isProtectedVideoRow(row)) return row;
+  return {
+    ...row,
+    storage_url: '',
+    storageUrl: '',
+    stream_url: '',
+    streamUrl: '',
+    primary_url: '',
+    primaryUrl: '',
+    backup_url: '',
+    backupUrl: '',
+    playback_url: '',
+    playbackUrl: '',
+    video_url: '',
+    videoUrl: '',
+    videoSrc: '',
+    playback_type: 'protected_stream',
+    playbackType: 'protected_stream',
+    source_type: 'protected_stream',
+    sourceType: 'protected_stream',
+    embed_allowed: false,
+    embedAllowed: false,
+    validation_status: 'protected_stream',
+    validationStatus: 'protected_stream',
+    playable: row.playable === true,
+    listableInFeed: true,
+    feedVisible: true,
+  };
+}
+
+function parseSupabaseObjectUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value || !/^https?:\/\//i.test(value)) return null;
+  try {
+    const parsed = new URL(value);
+    const marker = '/storage/v1/object/';
+    const markerIndex = parsed.pathname.indexOf(marker);
+    if (markerIndex < 0) return null;
+
+    const objectPath = parsed.pathname.slice(markerIndex + marker.length);
+    const parts = objectPath.split('/').filter(Boolean);
+    if (['public', 'sign', 'authenticated'].includes(parts[0])) parts.shift();
+    const bucket = parts.shift();
+    const path = parts.map((part) => decodeURIComponent(part)).join('/');
+    if (!bucket || !path) return null;
+    return { bucket, path };
+  } catch {
+    return null;
+  }
+}
+
+async function createSignedPlaybackUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return { url: '', signed: false, expiresAt: null };
+  const parsed = parseSupabaseObjectUrl(value);
+  if (!parsed || !supabase) return { url: value, signed: false, expiresAt: null };
+
+  const { data, error } = await supabase
+    .storage
+    .from(parsed.bucket || VIDEO_BUCKET)
+    .createSignedUrl(parsed.path, SIGNED_STREAM_TTL_SEC);
+
+  if (error || !data?.signedUrl) {
+    console.warn('[tiktokVideo] signed playback URL failed', error?.message || parsed.path);
+    return { url: '', signed: false, expiresAt: null };
+  }
+
+  return {
+    url: data.signedUrl,
+    signed: true,
+    expiresAt: Date.now() + (SIGNED_STREAM_TTL_SEC * 1000),
+  };
+}
+
+async function secureTiktokPlaybackRow(row = {}) {
+  if (!row) return row;
+  if (isProtectedVideoRow(row)) return redactProtectedPlayback(row);
+
+  const candidate = resolveMediaDeliveryUrl({
+    primaryUrl: row.primary_url || row.primaryUrl || row.stream_url || row.streamUrl || row.storage_url || row.storageUrl,
+    backupUrl: row.backup_url || row.backupUrl,
+  }) || row.playback_url || row.playbackUrl || row.video_url || row.videoUrl || '';
+  const signed = await createSignedPlaybackUrl(candidate);
+  const playbackUrl = signed.url || '';
+
+  return {
+    ...row,
+    storage_url: playbackUrl,
+    storageUrl: playbackUrl,
+    stream_url: playbackUrl,
+    streamUrl: playbackUrl,
+    playback_url: playbackUrl,
+    playbackUrl,
+    video_url: playbackUrl,
+    videoUrl: playbackUrl,
+    videoSrc: playbackUrl,
+    playback_type: signed.signed ? 'signed_stream' : row.playback_type,
+    playbackType: signed.signed ? 'signed_stream' : row.playbackType,
+    delivery: signed.signed ? 'signed_url' : row.delivery,
+    stream_expires_at: signed.expiresAt,
+    streamExpiresAt: signed.expiresAt,
+  };
 }
 
 function cleanCommentText(value) {
@@ -140,6 +266,9 @@ export async function uploadVideo(req, res) {
       user_id: uid,
       storage_url: storageUrl,
       stream_url: storageUrl,
+      primary_url: storageUrl,
+      storage_provider: 'supabase+r2',
+      replication_status: 'pending',
       title,
       description,
       status: 'published',
@@ -154,6 +283,26 @@ export async function uploadVideo(req, res) {
       playback_url: playbackValidation.playbackUrl,
       ...(await buildWatermarkMetadata()),
     });
+    scheduleMediaReplication({
+      sourceTable: VIDEOS_TABLE,
+      sourceId: videoId,
+      mediaType: 'video',
+      primaryBucket: VIDEO_BUCKET,
+      primaryPath: data.path || storagePath,
+      primaryUrl: storageUrl,
+      contentType,
+    });
+
+    void writePlatformActivityEvent({
+      eventType: 'creator_upload',
+      title: 'New video upload',
+      message: `${title} was uploaded.`,
+      actorId: uid,
+      targetType: 'video',
+      targetId: videoId,
+      payload: { videoId, title, source: 'tiktok_upload' },
+      io: req.app?.get?.('io'),
+    }).catch(() => {});
 
     return res.status(201).json({
       success: true,
@@ -194,17 +343,21 @@ export async function getFeed(req, res) {
       const { data: users } = await supabase.from('users').select('id, username').in('id', userIds);
       if (users) users.forEach(u => { usernameMap[u.id] = u.username; });
     }
-    const enriched = filterPlayableVideos(
+    const playable = filterPlayableVideos(
       videos.map((v) =>
         annotatePlayableVideo({
           ...v,
           id: v.video_id,
-          streamUrl: v.stream_url || v.storage_url,
+          streamUrl: resolveMediaDeliveryUrl({
+            primaryUrl: v.primary_url || v.stream_url || v.storage_url,
+            backupUrl: v.backup_url,
+          }),
           source: 'community',
           creator_username: usernameMap[v.user_id] || null,
         }),
       ),
     );
+    const enriched = await Promise.all(playable.map(secureTiktokPlaybackRow));
 
     return res.json({ success: true, data: enriched, page, limit });
   } catch (err) {
@@ -242,7 +395,9 @@ export async function getVideosByUser(req, res) {
       const { data: u } = await supabase.from('users').select('username').eq('id', userId).maybeSingle();
       creatorUsername = u?.username || null;
     }
-    const enriched = videos.map(v => ({ ...v, creator_username: creatorUsername }));
+    const enriched = await Promise.all(
+      videos.map((v) => secureTiktokPlaybackRow({ ...v, creator_username: creatorUsername })),
+    );
 
     return res.json({ success: true, data: enriched, page, limit });
   } catch (err) {
@@ -272,7 +427,10 @@ export async function getVideo(req, res) {
     const mapped = annotatePlayableVideo({
       ...data,
       id: data.video_id,
-      streamUrl: data.stream_url || data.storage_url,
+      streamUrl: resolveMediaDeliveryUrl({
+        primaryUrl: data.primary_url || data.stream_url || data.storage_url,
+        backupUrl: data.backup_url,
+      }),
       source: 'community',
     });
     if (mapped.playable !== true) {
@@ -282,7 +440,7 @@ export async function getVideo(req, res) {
       });
     }
 
-    return res.json({ success: true, data: mapped });
+    return res.json({ success: true, data: await secureTiktokPlaybackRow(mapped) });
   } catch (err) {
     console.error('tiktokVideo.getVideo error', err?.message || err);
     return res.status(500).json({ success: false, message: err?.message || 'Failed' });
@@ -309,6 +467,14 @@ export async function likeVideo(req, res) {
       p_user_id: uid,
     });
     if (error) throw error;
+    if (result?.duplicate !== true && result?.counted !== false) {
+      emitPlatformActivity(req.app?.get?.('io'), 'like', {
+        actorId: uid,
+        targetType: 'video',
+        targetId: videoId,
+        payload: { videoId, totalLikes: result?.total_likes || 0 },
+      });
+    }
 
     return res.json({ success: true, liked: true, likesCount: result?.total_likes || 0, duplicate: result?.duplicate === true });
   } catch (err) {
@@ -430,6 +596,20 @@ export async function recordView(req, res) {
         }
       }
 
+      emitPlatformActivity(req.app?.get?.('io'), 'video_view', {
+        actorId: uid,
+        targetType: 'video',
+        targetId: videoId,
+        payload: {
+          videoId,
+          sessionId: uid ? null : String(sessionId || '').slice(0, 128),
+          views: updatedViews,
+          counted: true,
+          watchSeconds: Math.floor(watchSeconds),
+          progressRatio,
+        },
+      });
+
       return res.json({ success: true, viewsCount: updatedViews, newView: true });
     }
 
@@ -519,6 +699,19 @@ export async function addComment(req, res) {
     });
     if (error) throw error;
     const commentRow = result?.comment || {};
+    if (result?.duplicate !== true) {
+      emitPlatformActivity(req.app?.get?.('io'), 'comment', {
+        actorId: uid,
+        targetType: 'video',
+        targetId: videoId,
+        payload: {
+          videoId,
+          commentId: commentRow.commentId,
+          parentCommentId: commentRow.parentCommentId || req.body?.parentCommentId || req.body?.parent_comment_id || null,
+          totalComments: Number(result?.total_comments || 0),
+        },
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -600,10 +793,20 @@ export async function getPlaybackState(req, res) {
 
     if (videoError || !video) return res.status(404).json({ success: false, message: 'Video not found' });
 
+    const responseVideo = await secureTiktokPlaybackRow(annotatePlayableVideo({
+      ...video,
+      id: video.video_id,
+      streamUrl: resolveMediaDeliveryUrl({
+        primaryUrl: video.primary_url || video.stream_url || video.storage_url,
+        backupUrl: video.backup_url,
+      }),
+      source: 'community',
+    }));
+
     if (!uid && !sessionId) {
       return res.json({
         success: true,
-        video,
+        video: responseVideo,
         shouldPlayAd: false,
         hasSeenAd: true,
         adUrl: null,
@@ -660,7 +863,7 @@ export async function getPlaybackState(req, res) {
 
     return res.json({
       success: true,
-      video,
+      video: responseVideo,
       shouldPlayAd,
       hasSeenAd,
       adUrl: adUrl || null,

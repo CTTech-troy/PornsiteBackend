@@ -413,7 +413,59 @@ async function toggleCreatorFollow(subscriberUserId, creatorId) {
  * When Supabase is back up, push all data that was written to RTDB (fallback) into Supabase.
  * Call periodically (e.g. every 2 min) from the server.
  */
-async function syncRtdbToSupabase() {
+const RTDB_SYNC_BATCH_SIZE = Math.min(1000, Math.max(50, Number(process.env.RTDB_SYNC_BATCH_SIZE || 250)));
+const RTDB_SYNC_MAX_ROWS_PER_BRANCH = Math.min(20_000, Math.max(0, Number(process.env.RTDB_SYNC_MAX_ROWS_PER_BRANCH || 5000)));
+
+async function readRtdbKeyPage(ref, { lastKey = null, pageSize = RTDB_SYNC_BATCH_SIZE } = {}) {
+  let query = ref.orderByKey();
+  if (lastKey) query = query.startAt(lastKey);
+  const requested = pageSize + (lastKey ? 1 : 0);
+  const snap = await query.limitToFirst(requested).once('value');
+  const entries = [];
+  snap.forEach((child) => {
+    entries.push([child.key, child.val()]);
+    return false;
+  });
+
+  const rows = lastKey && entries[0]?.[0] === lastKey ? entries.slice(1) : entries;
+  return {
+    rows,
+    nextKey: rows.length ? rows[rows.length - 1][0] : null,
+    hasMore: entries.length >= requested && rows.length > 0,
+  };
+}
+
+async function upsertRtdbBranch({ rtdb, branch, table, onConflict, mapRow, maxRowsPerBranch }) {
+  let synced = 0;
+  let lastKey = null;
+  const parsedMaxRows = Number(maxRowsPerBranch ?? RTDB_SYNC_MAX_ROWS_PER_BRANCH);
+  const maxRows = Math.max(0, Number.isFinite(parsedMaxRows) ? parsedMaxRows : RTDB_SYNC_MAX_ROWS_PER_BRANCH);
+  if (maxRows === 0) return 0;
+
+  while (synced < maxRows) {
+    const pageSize = Math.min(RTDB_SYNC_BATCH_SIZE, maxRows - synced);
+    const page = await readRtdbKeyPage(rtdb.ref(branch), { lastKey, pageSize });
+    const rows = page.rows
+      .map(([id, value]) => mapRow(id, typeof value === 'object' && value !== null ? value : {}))
+      .filter(Boolean);
+
+    if (rows.length > 0) {
+      const { error } = await supabase.from(table).upsert(rows, { onConflict });
+      if (error) throw error;
+      synced += rows.length;
+    }
+
+    if (!page.hasMore || !page.nextKey || page.nextKey === lastKey) break;
+    lastKey = page.nextKey;
+  }
+
+  if (synced >= maxRows) {
+    console.warn(`[syncRtdbToSupabase] ${branch} sync capped`, { maxRows });
+  }
+  return synced;
+}
+
+async function syncRtdbToSupabase({ maxRowsPerBranch = RTDB_SYNC_MAX_ROWS_PER_BRANCH } = {}) {
   if (!isConfigured()) return { users: 0, creator_applications: 0, media: 0 };
   if (!isFirebaseReady || !(await ensureFirebaseAdminUsable('RTDB to Supabase startup sync')) || !getFirebaseRtdb()) {
     if (!syncSkipLogged) {
@@ -432,57 +484,51 @@ async function syncRtdbToSupabase() {
   let mediaSynced = 0;
 
   try {
-    const usersSnap = await rtdb.ref('users').once('value');
-    const usersVal = usersSnap.val();
-    if (usersVal && typeof usersVal === 'object') {
-      const rows = Object.entries(usersVal).map(([id, v]) => {
-        const o = typeof v === 'object' && v !== null ? v : {};
-        return {
-          id,
-          username:            o.username ?? o.displayName ?? o.email ?? id,
-          creator:             !!o.creator,
-          verified:            o.verified ?? o.creatorStatus ?? null,
-          creator_application: o.creator_application ?? null,
-          followers:           Number(o.followers) || 0,
-          following:           Number(o.following) || 0,
-          avatar:              o.avatar || o.photoURL || null,
-        };
-      });
-      if (rows.length > 0) {
-        const { error } = await supabase.from('users').upsert(rows, { onConflict: 'id' });
-        if (!error) usersSynced = rows.length;
-      }
-    }
+    usersSynced = await upsertRtdbBranch({
+      rtdb,
+      branch: 'users',
+      table: 'users',
+      onConflict: 'id',
+      maxRowsPerBranch,
+      mapRow: (id, o) => ({
+        id,
+        username:            o.username ?? o.displayName ?? o.email ?? id,
+        creator:             !!o.creator,
+        verified:            o.verified ?? o.creatorStatus ?? null,
+        creator_application: o.creator_application ?? null,
+        followers:           Number(o.followers) || 0,
+        following:           Number(o.following) || 0,
+        avatar:              o.avatar || o.photoURL || null,
+      }),
+    });
   } catch (err) {
     markFirebaseAdminUnavailable(err, 'syncRtdbToSupabase users');
     console.warn('syncRtdbToSupabase users:', err?.message || err);
   }
 
   try {
-    const appSnap = await rtdb.ref('creator_applications').once('value');
-    const appVal = appSnap.val();
-    if (appVal && typeof appVal === 'object') {
-      const rows = Object.entries(appVal).map(([id, v]) => ({ ...(typeof v === 'object' && v ? v : {}), id }));
-      if (rows.length > 0) {
-        const { error } = await supabase.from('creator_applications').upsert(rows, { onConflict: 'id' });
-        if (!error) applicationsSynced = rows.length;
-      }
-    }
+    applicationsSynced = await upsertRtdbBranch({
+      rtdb,
+      branch: 'creator_applications',
+      table: 'creator_applications',
+      onConflict: 'id',
+      maxRowsPerBranch,
+      mapRow: (id, v) => ({ ...v, id }),
+    });
   } catch (err) {
     markFirebaseAdminUnavailable(err, 'syncRtdbToSupabase creator_applications');
     console.warn('syncRtdbToSupabase creator_applications:', err?.message || err);
   }
 
   try {
-    const mediaSnap = await rtdb.ref('media').once('value');
-    const mediaVal = mediaSnap.val();
-    if (mediaVal && typeof mediaVal === 'object') {
-      const rows = Object.entries(mediaVal).map(([id, v]) => ({ ...(typeof v === 'object' && v ? v : {}), id: id }));
-      if (rows.length > 0) {
-        const { error } = await supabase.from('media').upsert(rows, { onConflict: 'id' });
-        if (!error) mediaSynced = rows.length;
-      }
-    }
+    mediaSynced = await upsertRtdbBranch({
+      rtdb,
+      branch: 'media',
+      table: 'media',
+      onConflict: 'id',
+      maxRowsPerBranch,
+      mapRow: (id, v) => ({ ...v, id }),
+    });
   } catch (err) {
     markFirebaseAdminUnavailable(err, 'syncRtdbToSupabase media');
     console.warn('syncRtdbToSupabase media:', err?.message || err);

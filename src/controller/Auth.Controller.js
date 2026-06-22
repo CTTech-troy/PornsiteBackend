@@ -30,6 +30,8 @@ import {
   buildAppVerificationUrl,
   isLocalDevUrlsConfigured,
 } from '../utils/authPublicUrls.js';
+import { emitPlatformActivity, writePlatformActivityEvent } from '../services/platformActivity.service.js';
+import { scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
 
 const MIN_CREATOR_AGE = 18;
 
@@ -462,6 +464,16 @@ export async function signup(req, res) {
     mark('verificationEmail');
 
     recordAuth('signupOk');
+    void writePlatformActivityEvent({
+      eventType: 'user_registered',
+      title: 'New user registration',
+      message: `${name.trim()} registered an account.`,
+      actorId: uid,
+      targetType: 'user',
+      targetId: uid,
+      payload: { uid, email: emailNorm, displayName: name.trim(), provider: 'email' },
+      io: req.app?.get?.('io'),
+    }).catch(() => {});
     return res.status(201).json({
       success: true,
       uid,
@@ -659,6 +671,17 @@ export async function applyCreator(req, res) {
             const baseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
             const publicUrl = `${baseUrl}/storage/v1/object/public/${bucket}/${encodeURIComponent(data.path)}`;
             attachments.push({ name: file.originalname, path: data.path, url: publicUrl, contentType: file.mimetype });
+            if (/^(image|video)\//i.test(String(file.mimetype || ''))) {
+              scheduleMediaReplication({
+                sourceTable: 'creator_application_attachments',
+                sourceId: uid,
+                mediaType: String(file.mimetype || '').startsWith('video/') ? 'video' : 'image',
+                primaryBucket: bucket,
+                primaryPath: data.path,
+                primaryUrl: publicUrl,
+                contentType: file.mimetype,
+              });
+            }
 
             try {
               const meta = {
@@ -845,6 +868,15 @@ export async function uploadMedia(req, res) {
 
     const encodedPath = data.path.split('/').map(encodeURIComponent).join('/');
     const publicUrl = `${(process.env.SUPABASE_URL || '').replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${encodedPath}`;
+    scheduleMediaReplication({
+      sourceTable: 'user_media_uploads',
+      sourceId: uid,
+      mediaType: type,
+      primaryBucket: bucket,
+      primaryPath: data.path,
+      primaryUrl: publicUrl,
+      contentType,
+    });
 
     // Persist avatar changes across sessions/navigation when uploading a profile image.
     const isAvatarUpload =
@@ -1122,6 +1154,12 @@ export async function login(req, res) {
       emailVerified: true,
     });
     recordAuth('loginOk');
+    emitPlatformActivity(req.app?.get?.('io'), 'user_login', {
+      actorId: uid,
+      targetType: 'user',
+      targetId: uid,
+      payload: { uid, email: cleanEmail, provider: 'email' },
+    });
     return res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -1359,6 +1397,7 @@ export async function google(req, res) {
 
     // Check if user exists in Firebase Auth; if not, create
     let userRecord;
+    let createdGoogleUser = false;
     try {
       userRecord = await auth.getUserByEmail(cleanEmail);
     } catch (err) {
@@ -1368,6 +1407,7 @@ export async function google(req, res) {
           displayName: name,
           photoURL: photoURL || undefined,
         });
+        createdGoogleUser = true;
       } else {
         throw err;
       }
@@ -1433,6 +1473,25 @@ export async function google(req, res) {
       supaProfile: googleSupaProfile,
       firestoreProfile: firestoreProfileData(userDoc),
       emailVerified: googleEmailVerified,
+    });
+
+    if (createdGoogleUser) {
+      void writePlatformActivityEvent({
+        eventType: 'user_registered',
+        title: 'New user registration',
+        message: `${name} registered with Google.`,
+        actorId: uid,
+        targetType: 'user',
+        targetId: uid,
+        payload: { uid, email: cleanEmail, displayName: name, provider: 'google' },
+        io: req.app?.get?.('io'),
+      }).catch(() => {});
+    }
+    emitPlatformActivity(req.app?.get?.('io'), 'user_login', {
+      actorId: uid,
+      targetType: 'user',
+      targetId: uid,
+      payload: { uid, email: cleanEmail, provider: 'google' },
     });
 
     return res.status(200).json({

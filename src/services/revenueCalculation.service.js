@@ -8,11 +8,17 @@ export function money(value) {
 }
 
 export function isMissingDbFeature(error) {
+  const message = String(error?.message || error?.details || error?.hint || '').toLowerCase();
   return (
     error?.code === '42P01' ||
     error?.code === 'PGRST200' ||
+    error?.code === 'PGRST205' ||
     error?.code === '42703' ||
-    error?.code === 'PGRST204'
+    error?.code === 'PGRST204' ||
+    message.includes('schema cache') ||
+    message.includes('could not find the table') ||
+    (message.includes('relation') && message.includes('does not exist')) ||
+    (message.includes('column') && message.includes('does not exist'))
   );
 }
 

@@ -4,6 +4,8 @@ import { getFollowStatus, getPublicProfile, toggleCreatorFollow } from '../confi
 import { optionalAuth, requireAuth } from '../middleware/authFirebase.js';
 import { createRateLimitStore } from '../middleware/rateLimitStore.js';
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
+import { recordAnalyticsEngagement } from '../services/analytics.service.js';
+import { emitPlatformActivity } from '../services/platformActivity.service.js';
 
 const router = express.Router();
 
@@ -51,6 +53,17 @@ router.post('/:id/follow', requireAuth, followLimiter, async (req, res) => {
     }
     const result = await toggleCreatorFollow(req.uid, creatorId);
     invalidateTopCreatorsCache();
+    recordAnalyticsEngagement({
+      eventType: result?.subscribed ? 'creator_follow' : 'creator_unfollow',
+      creatorId,
+      userId: req.uid,
+    }).catch(() => {});
+    emitPlatformActivity(req.app?.get?.('io'), result?.subscribed ? 'creator_follow' : 'creator_unfollow', {
+      actorId: req.uid,
+      targetType: 'creator',
+      targetId: creatorId,
+      payload: { creatorId, userId: req.uid, subscribed: result?.subscribed === true },
+    });
     res.json({ ok: true, ...result });
   } catch (err) {
     console.error('users.follow error', err && err.message ? err.message : err);
@@ -67,6 +80,17 @@ router.delete('/:id/follow', requireAuth, followLimiter, async (req, res) => {
     if (current.subscribed) {
       result = await toggleCreatorFollow(req.uid, creatorId);
       invalidateTopCreatorsCache();
+      recordAnalyticsEngagement({
+        eventType: 'creator_unfollow',
+        creatorId,
+        userId: req.uid,
+      }).catch(() => {});
+      emitPlatformActivity(req.app?.get?.('io'), 'creator_unfollow', {
+        actorId: req.uid,
+        targetType: 'creator',
+        targetId: creatorId,
+        payload: { creatorId, userId: req.uid, subscribed: false },
+      });
     }
     res.json({ ok: true, ...result, subscribed: false });
   } catch (err) {

@@ -906,7 +906,7 @@ export async function getCreatorApplications(req, res) {
     let searchUserIds = null;
     if (search) {
       const { data: matchedUsers } = await supabase
-        .from('users').select('id').ilike('username', `%${search}%`);
+        .from('users').select('id').ilike('username', `%${search}%`).limit(500);
       searchUserIds = (matchedUsers || []).map(u => u.id);
       if (searchUserIds.length === 0) return res.json({ applications: [], total: 0, page, limit });
     }
@@ -921,7 +921,8 @@ export async function getCreatorApplications(req, res) {
       const rtdb = getFirebaseRtdb();
       if (!rtdb) return res.status(500).json({ message: countErr.message });
       try {
-        const snap = await rtdb.ref('creator_applications').once('value');
+        const fallbackLimit = Math.min(1000, Math.max(limit, offset + limit));
+        const snap = await rtdb.ref('creator_applications').orderByKey().limitToLast(fallbackLimit).once('value');
         const val = snap.val();
         if (!val) return res.json({ applications: [], total: 0, page, limit });
         let allApps = Object.entries(val).map(([id, a]) => {
@@ -942,6 +943,7 @@ export async function getCreatorApplications(req, res) {
           };
         });
         if (statusFilter) allApps = allApps.filter(a => a.status === statusFilter);
+        allApps.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
         const total = allApps.length;
         const paginated = allApps.slice(offset, offset + limit);
         return res.json({ applications: paginated, total, page, limit });

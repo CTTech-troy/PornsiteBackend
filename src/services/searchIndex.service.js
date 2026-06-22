@@ -456,7 +456,53 @@ export async function searchPostgres(q, { page = 1, limit = 20, filters = {} } =
     throw error;
   }
 
-  const items = (data || []).map(rowToSearchDoc).map(docToHomeCard).filter(Boolean);
+  let rows = Array.isArray(data) ? data : [];
+  if (term && rows.length < limitNum) {
+    const mergeRows = (extraRows = []) => {
+      const seen = new Set(rows.map((row) => String(row.video_id || row.videoId || row.id || '')));
+      for (const row of extraRows || []) {
+        const id = String(row.video_id || row.videoId || row.id || '');
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        rows.push(row);
+        if (rows.length >= limitNum) break;
+      }
+    };
+
+    const tagRows = await runOptionalSupabaseQuery(
+      supabase
+        .from('tiktok_videos')
+        .select('*')
+        .is('deleted_at', null)
+        .or('is_live.eq.true,status.eq.published')
+        .contains('tags', [term])
+        .order('created_at', { ascending: false })
+        .limit(limitNum),
+      'tag search fallback',
+      [],
+      (result) => result.data || [],
+    );
+    mergeRows(tagRows);
+
+    if (rows.length < limitNum) {
+      const categoryRows = await runOptionalSupabaseQuery(
+        supabase
+          .from('tiktok_videos')
+          .select('*')
+          .is('deleted_at', null)
+          .or('is_live.eq.true,status.eq.published')
+          .or(`main_orientation_category.ilike.%${term.replace(/[%_]/g, '')}%,category.ilike.%${term.replace(/[%_]/g, '')}%`)
+          .order('created_at', { ascending: false })
+          .limit(limitNum),
+        'category search fallback',
+        [],
+        (result) => result.data || [],
+      );
+      mergeRows(categoryRows);
+    }
+  }
+
+  const items = rows.map(rowToSearchDoc).map(docToHomeCard).filter(Boolean);
   const total = Number(count) || items.length;
   return { items, total, hasMore: offset + items.length < total };
 }
@@ -514,8 +560,32 @@ export async function searchPlatformVideos(q, options = {}) {
 export async function searchAllContent(q, { limit = 6, includeUsers = false } = {}) {
   const ms = getMeilisearchClient();
   const query = String(q || '').trim();
-  if (!ms || !query) {
+  if (!query) {
     return { videos: [], creators: [], users: [], liveStreams: [], tags: [], categories: [] };
+  }
+  if (!ms) {
+    const videoResult = await searchPostgres(query, { page: 1, limit }).catch(() => ({ items: [] }));
+    const videos = videoResult.items || [];
+    const creatorsByName = new Map();
+    const tagCounts = new Map();
+    const categoryCounts = new Map();
+    for (const video of videos) {
+      const creatorName = text(video.creatorDisplayName || video.creator_display_name || video.channel || video.creator);
+      const creatorId = String(video.creatorId || video.creator_id || video.userId || video.user_id || creatorName || '');
+      if (creatorName && !creatorsByName.has(creatorId)) {
+        creatorsByName.set(creatorId, { id: creatorId, displayName: creatorName, username: text(video.creatorUsername || video.creator_username), avatarUrl: video.creatorAvatarUrl || video.creator_avatar_url || video.avatar || '' });
+      }
+      for (const tag of normalizeArray(video.tags)) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+      for (const category of normalizeArray(video.categories || video.category)) categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+    }
+    return {
+      videos,
+      creators: [...creatorsByName.values()].slice(0, limit),
+      users: [],
+      liveStreams: [],
+      tags: [...tagCounts.entries()].map(([name, count]) => taxonomyDoc(name, 'tag', count)).slice(0, limit),
+      categories: [...categoryCounts.entries()].map(([name, count]) => taxonomyDoc(name, 'category', count)).slice(0, limit),
+    };
   }
   await ensureAllIndexes();
 

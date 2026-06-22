@@ -1,6 +1,8 @@
 import { supabase } from '../config/supabase.js';
 import { sendApplicationDecisionEmail } from '../services/emailService.js';
 import { invalidateCreatorPublicFields } from '../utils/creatorProfile.js';
+import { writePlatformActivityEvent } from '../services/platformActivity.service.js';
+import { scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const MIN_CREATOR_AGE = 18;
@@ -134,7 +136,19 @@ async function uploadToSupabase(file, userId, type) {
   if (error) throw new Error(`Upload failed: ${error.message}`);
   const baseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
   const publicPath = String(data.path || filename).split('/').map(encodeURIComponent).join('/');
-  return `${baseUrl}/storage/v1/object/public/${bucket}/${publicPath}`;
+  const publicUrl = `${baseUrl}/storage/v1/object/public/${bucket}/${publicPath}`;
+  if (/^(image|video)\//i.test(String(file.mimetype || ''))) {
+    scheduleMediaReplication({
+      sourceTable: 'creators_main_application',
+      sourceId: userId,
+      mediaType: String(file.mimetype || '').startsWith('video/') ? 'video' : 'image',
+      primaryBucket: bucket,
+      primaryPath: data.path || filename,
+      primaryUrl: publicUrl,
+      contentType: file.mimetype,
+    });
+  }
+  return publicUrl;
 }
 
 // ── POST /api/creators-main-application/submit ─────────────────────────────
@@ -237,6 +251,17 @@ export async function submitApplication(req, res) {
       status: 'submitted',
       reason: 'Your application has been submitted successfully.'
     });
+
+    void writePlatformActivityEvent({
+      eventType: 'creator_application_submitted',
+      title: 'New creator application',
+      message: `${fullName} submitted a creator application.`,
+      actorId: uid,
+      targetType: 'creator_application',
+      targetId: data.id,
+      payload: { userId: uid, status: 'pending', email, fullName },
+      io: req.app?.get?.('io'),
+    }).catch(() => {});
 
     return res.status(201).json({ success: true, message: 'Application submitted', application: data });
   } catch (err) {
@@ -367,6 +392,17 @@ export async function reapplyApplication(req, res) {
       reason: 'Your reapplication has been submitted successfully.'
     });
 
+    void writePlatformActivityEvent({
+      eventType: 'creator_application_submitted',
+      title: 'Creator application resubmitted',
+      message: `${fullName} resubmitted a creator application.`,
+      actorId: uid,
+      targetType: 'creator_application',
+      targetId: data.id,
+      payload: { userId: uid, status: 'pending', email, fullName, reapplication: true },
+      io: req.app?.get?.('io'),
+    }).catch(() => {});
+
     return res.status(201).json({ success: true, message: 'Reapplication submitted', application: data });
   } catch (err) {
     console.error('Reapply application error:', err);
@@ -482,6 +518,17 @@ export async function approveApplication(req, res) {
       reason
     });
 
+    void writePlatformActivityEvent({
+      eventType: 'creator_application_approved',
+      title: 'Creator application approved',
+      message: `${app.full_name || 'A creator'} was approved.`,
+      actorId: req.admin?.id || null,
+      targetType: 'creator_application',
+      targetId: app.id,
+      payload: { userId: app.user_id, status: 'approved' },
+      io: req.app?.get?.('io'),
+    }).catch(() => {});
+
     return res.json({ success: true, message: 'Application approved' });
   } catch (err) {
     console.error('Approve application error:', err);
@@ -532,6 +579,17 @@ export async function rejectApplication(req, res) {
       status: 'rejected',
       reason
     });
+
+    void writePlatformActivityEvent({
+      eventType: 'creator_application_rejected',
+      title: 'Creator application rejected',
+      message: `${app.full_name || 'A creator'} was rejected.`,
+      actorId: req.admin?.id || null,
+      targetType: 'creator_application',
+      targetId: app.id,
+      payload: { userId: app.user_id, status: 'rejected' },
+      io: req.app?.get?.('io'),
+    }).catch(() => {});
 
     return res.json({ success: true, message: 'Application rejected' });
   } catch (err) {

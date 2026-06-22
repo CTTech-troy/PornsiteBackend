@@ -252,7 +252,7 @@ async function ensureStorageBucket(bucket, { public: isPublic = false } = {}) {
 
 async function ensureBuckets() {
   if (!isConfigured()) return;
-  await ensureStorageBucket(VIDEO_BUCKET, { public: true });
+  await ensureStorageBucket(VIDEO_BUCKET, { public: false });
   await ensureStorageBucket(IMAGE_BUCKET, { public: true });
   await ensureStorageBucket(IMPORT_STAGING_BUCKET, { public: false });
 }

@@ -11,6 +11,7 @@ import {
 } from '../services/contentRemovalEvents.service.js';
 import { logAdminAction } from '../services/adminAudit.service.js';
 import { normalizeAdminMessage } from '../services/emailRenderer.js';
+import { scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
 
 export { subscribeContentRemovalEvents };
 
@@ -204,6 +205,17 @@ async function uploadEvidenceFiles(files = [], reqId) {
       upsert: false,
     });
     if (error) throw new Error(`Evidence upload failed: ${error.message}`);
+    if (/^(image|video)\//i.test(String(file.mimetype || ''))) {
+      scheduleMediaReplication({
+        sourceTable: 'content_removal_evidence',
+        sourceId: reqId,
+        mediaType: String(file.mimetype || '').startsWith('video/') ? 'video' : 'image',
+        primaryBucket: BUCKET,
+        primaryPath: data.path,
+        primaryUrl: null,
+        contentType: file.mimetype || 'application/octet-stream',
+      });
+    }
     uploaded.push({
       name: safeName,
       originalName: cleanString(file.originalname || safeName, 180),

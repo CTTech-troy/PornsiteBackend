@@ -13,7 +13,7 @@ import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platf
 
 const MIN_PAGES = 1;
 const MAX_PAGES = 5;
-const DEFAULT_LIMIT = 100;
+const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const HOME_FEED_COUNT_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_COUNT_TIMEOUT_MS || 1200));
 const HOME_FEED_LAYOUT_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_LAYOUT_TIMEOUT_MS || 1200));
@@ -106,7 +106,7 @@ export async function getHomeFeed(req, res) {
       const pageNumbers = Array.from({ length: pagesCount }, (_, i) => page + i);
       for (const p of pageNumbers) {
         const { ok, items } = await withTimeout(
-          fetchXnxxBestPage(p),
+          fetchXnxxBestPage(p, { timeoutMs: HOME_FEED_EXTERNAL_TIMEOUT_MS }),
           HOME_FEED_EXTERNAL_TIMEOUT_MS,
           { ok: false, items: [] },
           `external feed page ${p}`,
@@ -161,6 +161,9 @@ export async function getHomeFeed(req, res) {
       page,
       pagesCount,
       count: sliced.length,
+      pageSize: limit,
+      totalCount: total,
+      totalPages,
       structuredItems: feedLayout.items.length,
       adItems: feedLayout.items.filter((item) => item.type === 'ad').length,
       hasMore,
@@ -173,16 +176,19 @@ export async function getHomeFeed(req, res) {
 
     return res.json({
       success: true,
+      items: sliced,
       data: sliced,
       feed: feedLayout.items,
       layout: feedLayout.items,
       adLayout: feedLayout.meta,
       hasMore,
+      totalCount: total,
       total,
       totalPages,
       nextPage,
       nextCursor,
       page,
+      pageSize: limit,
       limit,
       batchSize: sliced.length,
       q: feedConfig.enabled && defaultCards.length > 0 ? 'mixed' : 'creators',
@@ -194,10 +200,16 @@ export async function getHomeFeed(req, res) {
     return res.status(200).json({
       success: false,
       data: [],
+      items: [],
       hasMore: false,
+      totalCount: 0,
+      total: 0,
+      totalPages: 0,
       nextPage: Math.max(1, parseInt(req.query.page, 10) || 1) + 1,
       nextCursor: null,
       page: Math.max(1, parseInt(req.query.page, 10) || 1),
+      pageSize: DEFAULT_LIMIT,
+      limit: DEFAULT_LIMIT,
       recoverable: true,
       error: err?.message || 'Failed to load home feed',
     });

@@ -6,6 +6,7 @@ import { getFirebaseRtdb } from '../config/firebase.js';
 import { mergeCreatorIntoPublicVideo } from './creatorProfile.js';
 import { getPathSafeVideoId } from './videoPathId.js';
 import { annotatePlayableVideo, isDirectPlayableStreamUrl, isPlayableVideo } from './videoPlaybackValidation.js';
+import { resolveMediaDeliveryUrl } from '../services/mediaRedundancy.service.js';
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
 const LEGACY_MEDIA_PREFIX = 'media-';
@@ -14,8 +15,11 @@ const PUBLIC_FEED_CACHE_MAX_KEYS = Math.max(10, Number(process.env.PUBLIC_VIDEO_
 const VIDEO_DELIVERY_SLOW_QUERY_MS = Math.max(50, Number(process.env.VIDEO_DELIVERY_SLOW_QUERY_MS || 250));
 const VIDEO_DELIVERY_DIAGNOSTICS = String(process.env.VIDEO_DELIVERY_DIAGNOSTICS || '').toLowerCase() === 'true';
 const PUBLIC_FEED_SOURCE_TIMEOUT_MS = Math.max(500, Number(process.env.PUBLIC_VIDEO_FEED_SOURCE_TIMEOUT_MS || 2500));
+const PUBLIC_VIDEO_COUNT_CACHE_TTL_MS = Math.max(5_000, Number(process.env.PUBLIC_VIDEO_COUNT_CACHE_TTL_MS || 30_000));
 
 const publicFeedCache = new Map();
+const publicCountCache = new Map();
+const missingSelectColumnsByLabel = new Map();
 
 const TIKTOK_PUBLIC_SELECT_COLUMNS = [
   'video_id',
@@ -28,6 +32,8 @@ const TIKTOK_PUBLIC_SELECT_COLUMNS = [
   'allow_people_to_comment',
   'storage_url',
   'stream_url',
+  'primary_url',
+  'backup_url',
   'thumbnail_url',
   'duration_seconds',
   'duration',
@@ -89,6 +95,8 @@ const MEDIA_PUBLIC_SELECT_COLUMNS = [
   'storage_url',
   'stream_url',
   'video_url',
+  'primary_url',
+  'backup_url',
   'url',
   'public_url',
   'thumbnail_url',
@@ -149,6 +157,25 @@ function setCachedFeed(key, rows) {
     const oldest = publicFeedCache.keys().next().value;
     if (!oldest) break;
     publicFeedCache.delete(oldest);
+  }
+}
+
+function getCachedCount(key) {
+  const hit = publicCountCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > PUBLIC_VIDEO_COUNT_CACHE_TTL_MS) {
+    publicCountCache.delete(key);
+    return null;
+  }
+  return hit.count;
+}
+
+function setCachedCount(key, count) {
+  publicCountCache.set(key, { ts: Date.now(), count: Number(count) || 0 });
+  while (publicCountCache.size > PUBLIC_FEED_CACHE_MAX_KEYS) {
+    const oldest = publicCountCache.keys().next().value;
+    if (!oldest) break;
+    publicCountCache.delete(oldest);
   }
 }
 
@@ -221,12 +248,18 @@ function extractMissingColumnName(err) {
   return null;
 }
 
+function getMissingSelectColumns(label) {
+  if (!missingSelectColumnsByLabel.has(label)) missingSelectColumnsByLabel.set(label, new Set());
+  return missingSelectColumnsByLabel.get(label);
+}
+
 async function runSelectWithColumnFallback(columns, runQuery, label) {
-  let active = [...columns];
+  const knownMissing = getMissingSelectColumns(label);
+  let active = columns.filter((column) => !knownMissing.has(column));
   const removed = [];
   const maxAttempts = Math.min(40, active.length + 2);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const result = await runQuery(active.join(','));
+    const result = await runQuery(active.length ? active.join(',') : '*');
     if (!result?.error) {
       if (removed.length && VIDEO_DELIVERY_DIAGNOSTICS) {
         console.warn('[video-delivery] lean select removed missing columns', { label, removed });
@@ -235,6 +268,7 @@ async function runSelectWithColumnFallback(columns, runQuery, label) {
     }
     const missing = extractMissingColumnName(result.error);
     if (missing && active.includes(missing)) {
+      knownMissing.add(missing);
       active = active.filter((column) => column !== missing);
       removed.push(missing);
       continue;
@@ -271,6 +305,33 @@ function getPlaybackTypeForPublicVideo(video = {}) {
   return ['imported_csv', 'imported', 'external_catalog', 'official_import', 'csv_import'].includes(source)
     ? 'external_redirect'
     : 'internal';
+}
+
+function normalizeAccessType(video = {}) {
+  return String(video.accessType || video.access_type || '')
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, '_');
+}
+
+function isProtectedAccessRecord(video = {}) {
+  const accessType = normalizeAccessType(video);
+  const premiumVisibility = String(video.premiumVisibility || video.premium_visibility || '')
+    .trim()
+    .toLowerCase();
+  return (
+    video.isPremiumContent === true ||
+    video.is_premium_content === true ||
+    video.isPremium === true ||
+    video.premium === true ||
+    Number(video.tokenPrice ?? video.token_price ?? video.coinPrice ?? video.coin_price ?? 0) > 0 ||
+    video.requiresMembership === true ||
+    video.requires_membership === true ||
+    video.subscriptionAccess === true ||
+    video.subscription_access === true ||
+    ['premium', 'members_only', 'coin_unlock', 'paid'].includes(accessType) ||
+    ['locked', 'paid', 'premium'].includes(premiumVisibility)
+  );
 }
 
 function isImportedSource(video = {}) {
@@ -342,9 +403,10 @@ function looksLikeVideoUrl(value) {
 }
 
 function getPrimaryVideoUrl(row = {}) {
-  return String(
+  const primaryUrl = String(
     row.videoUrl ||
     row.video_url ||
+    row.primary_url ||
     row.streamUrl ||
     row.stream_url ||
     row.storage_url ||
@@ -353,6 +415,10 @@ function getPrimaryVideoUrl(row = {}) {
     row.public_url ||
     ''
   ).trim();
+  return resolveMediaDeliveryUrl({
+    primaryUrl,
+    backupUrl: row.backup_url || row.backupUrl || '',
+  });
 }
 
 function getPrimaryThumbnailUrl(row = {}) {
@@ -410,6 +476,7 @@ async function runPublicListingQuery(buildQuery) {
 
 function mapTiktokRowToPublicVideo(row) {
   if (!row || typeof row !== 'object') return null;
+  const videoUrl = getPrimaryVideoUrl(row);
   return {
     id: row.video_id,
     videoId: row.video_id,
@@ -423,8 +490,8 @@ function mapTiktokRowToPublicVideo(row) {
     category: row.main_orientation_category || '',
     tags: row.tags || [],
     allowPeopleToComment: row.allow_people_to_comment !== false,
-    videoUrl: row.storage_url || row.stream_url || '',
-    streamUrl: row.stream_url || row.storage_url || '',
+    videoUrl,
+    streamUrl: videoUrl,
     thumbnailUrl: row.thumbnail_url || null,
     durationSeconds: Number(row.duration_seconds ?? row.duration ?? 0),
     creatorDisplayName: row.creator_display_name || null,
@@ -619,6 +686,20 @@ function formatDuration(seconds) {
 }
 
 function getPublicVideoPlaybackShape(v = {}) {
+  if (isProtectedAccessRecord(v)) {
+    return {
+      iframeEmbed: '',
+      playbackType: 'protected_stream',
+      isExternalEmbed: false,
+      pageUrl: '',
+      playbackUrl: '',
+      streamUrl: '',
+      sourceType: 'protected_stream',
+      embedAllowed: false,
+      externalUrl: '',
+    };
+  }
+
   const iframeEmbed = String(v.iframeEmbed || v.iframe_embed || '').trim();
   const playbackType = getPlaybackTypeForPublicVideo({ ...v, iframeEmbed, iframe_embed: iframeEmbed });
   const externalPageUrl = String(
@@ -668,7 +749,7 @@ export function publicVideoToHomeCard(v, index) {
   const id = v.videoId ?? v.id;
   if (!id) return null;
   const playback = getPublicVideoPlaybackShape(v);
-  const preview = String(v.previewVideo || '').trim();
+  const preview = isProtectedAccessRecord(v) ? '' : String(v.previewVideo || '').trim();
   const thumb = getPrimaryThumbnailUrl(v);
   const dur = Number(v.durationSeconds) || 0;
   const title = v.title || 'Video';
@@ -755,7 +836,7 @@ export function publicVideoToHomeCard(v, index) {
 export function publicVideoToFeedItem(v, index) {
   if (!v || typeof v !== 'object') return null;
   const duration = Number(v.durationSeconds) || 0;
-  const preview = String(v.previewVideo || '').trim();
+  const preview = isProtectedAccessRecord(v) ? '' : String(v.previewVideo || '').trim();
   const playback = getPublicVideoPlaybackShape(v);
   const id = v.videoId ?? v.id;
   if (!id) return null;
@@ -1031,30 +1112,57 @@ async function safeCount(queryPromise) {
   }
 }
 
+async function countWithError(queryPromise) {
+  try {
+    const { count, error } = await queryPromise;
+    return { count: error ? 0 : Number(count) || 0, error };
+  } catch (error) {
+    return { count: 0, error };
+  }
+}
+
+function buildTiktokPublicCountQuery({ premiumOnly, categoryFilter, useStatusFilter = true }) {
+  let query = supabase.from('tiktok_videos').select('video_id', { count: 'planned', head: true });
+  query = useStatusFilter ? applyPublicListingFilter(query) : query.eq('is_live', true);
+  if (premiumOnly) query = query.eq('is_premium_content', true);
+  if (categoryFilter) query = applyCategoryFilter(query, 'main_orientation_category', categoryFilter);
+  return query;
+}
+
+async function countTiktokPublicVideos({ premiumOnly, categoryFilter }) {
+  const first = await countWithError(buildTiktokPublicCountQuery({ premiumOnly, categoryFilter, useStatusFilter: true }));
+  if (!first.error) return first.count;
+  if (isMissingColumnError(first.error, 'status')) {
+    const fallback = await countWithError(buildTiktokPublicCountQuery({ premiumOnly, categoryFilter, useStatusFilter: false }));
+    return fallback.count;
+  }
+  return 0;
+}
+
 export async function countPublishedPublicVideos({ premiumOnly = false, category = null } = {}) {
   if (!isConfigured() || !supabase) return 0;
   const categoryFilter = normalizeCategoryFilter(category);
+  const cacheKey = `count:${premiumOnly ? 'premium' : 'all'}:${categoryFilter || 'all-categories'}`;
+  const cached = getCachedCount(cacheKey);
+  if (cached !== null) return cached;
 
-  let importedQuery = supabase.from('videos').select('id', { count: 'exact', head: true });
+  let importedQuery = supabase.from('videos').select('id', { count: 'planned', head: true });
   if (categoryFilter) importedQuery = applyCategoryFilter(importedQuery, 'category', categoryFilter);
 
-  let tiktokQuery = supabase.from('tiktok_videos').select('video_id', { count: 'exact', head: true });
-  tiktokQuery = applyPublicListingFilter(tiktokQuery);
-  if (premiumOnly) tiktokQuery = tiktokQuery.eq('is_premium_content', true);
-  if (categoryFilter) tiktokQuery = applyCategoryFilter(tiktokQuery, 'main_orientation_category', categoryFilter);
-
-  let mediaQuery = supabase.from('media').select('id', { count: 'exact', head: true });
+  let mediaQuery = supabase.from('media').select('id', { count: 'planned', head: true });
   if (!premiumOnly) mediaQuery = mediaQuery.eq('type', 'video');
   if (premiumOnly) mediaQuery = mediaQuery.eq('is_premium_content', true);
   if (categoryFilter) mediaQuery = applyCategoryFilter(mediaQuery, 'category', categoryFilter);
 
   const counts = await Promise.all([
     safeCount(importedQuery),
-    safeCount(tiktokQuery),
+    countTiktokPublicVideos({ premiumOnly, categoryFilter }),
     safeCount(mediaQuery),
   ]);
 
-  return counts.reduce((sum, value) => sum + value, 0);
+  const total = counts.reduce((sum, value) => sum + value, 0);
+  setCachedCount(cacheKey, total);
+  return total;
 }
 
 /**
@@ -1132,7 +1240,7 @@ export async function fetchPublishedVideoById(videoId, viewerUid = null) {
 
 function publicVideoToDetailItem(v) {
   const playback = getPublicVideoPlaybackShape(v);
-  const preview = String(v.previewVideo || '').trim();
+  const preview = isProtectedAccessRecord(v) ? '' : String(v.previewVideo || '').trim();
   return {
     id: String(v.videoId || v.id),
     videoId: String(v.videoId || v.id),

@@ -33,6 +33,15 @@ import {
   listFlutterwaveBanks,
   resolveFlutterwaveBankAccount,
 } from '../services/flutterwaveTransfer.service.js';
+import {
+  MAX_UPLOAD_DESCRIPTION_LENGTH,
+  MAX_UPLOAD_TITLE_LENGTH,
+  normalizeAllowPeopleToComment,
+  normalizeDescription,
+  normalizeMainOrientationCategory,
+  normalizeTags,
+  normalizeTitle,
+} from '../constants/uploadMetadata.js';
 
 function isMissingColumn(err) {
   const msg = String(err?.message || '');
@@ -281,6 +290,10 @@ function mapSupabaseCreatorVideo(row = {}) {
     userId: row.user_id,
     title: row.title || 'Untitled',
     description: row.description || '',
+    mainOrientationCategory: row.main_orientation_category || row.category || '',
+    category: row.main_orientation_category || row.category || '',
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    allowPeopleToComment: row.allow_people_to_comment !== false,
     totalViews: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
     views: Number(row.views_count ?? row.totalViews ?? row.views ?? 0) || 0,
     totalLikes: Number(row.likes_count ?? row.totalLikes ?? 0) || 0,
@@ -304,7 +317,8 @@ async function getSupabaseCreatorVideos(uid) {
       .from('tiktok_videos')
       .select('*')
       .eq('user_id', uid)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(500);
     if (error) {
       if (isMissingTable(error) || isMissingColumn(error)) return [];
       console.warn('[studio] creator videos supabase fallback:', error.message || error);
@@ -321,15 +335,42 @@ async function getLegacyCreatorVideos(uid) {
   try {
     const ref = videosRef();
     if (!ref) return [];
-    const snap = await ref.once('value');
-    const val = snap.val();
+    let snap = await ref.orderByChild('userId').equalTo(uid).limitToLast(500).once('value');
+    let val = snap.val();
+    if (!val) {
+      snap = await ref.orderByChild('user_id').equalTo(uid).limitToLast(500).once('value');
+      val = snap.val();
+    }
     if (!val || typeof val !== 'object') return [];
     return Object.entries(val)
       .map(([videoId, v]) => (typeof v === 'object' && v ? { videoId, ...v } : null))
-      .filter(v => v && v.userId === uid);
+      .filter(v => v && (v.userId === uid || v.user_id === uid));
   } catch {
     return [];
   }
+}
+
+async function updateStudioSupabaseVideo(table, keyColumn, keyValue, patch) {
+  let activePatch = { ...patch };
+  let lastError = null;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    if (!Object.keys(activePatch).length) {
+      return { data: null, error: new Error('No compatible fields to update') };
+    }
+    const result = await supabase
+      .from(table)
+      .update(activePatch)
+      .eq(keyColumn, keyValue)
+      .select()
+      .single();
+    if (!result.error) return result;
+    lastError = result.error;
+    const missing = extractMissingColumnName(result.error);
+    if (!missing || !(missing in activePatch)) return result;
+    activePatch = { ...activePatch };
+    delete activePatch[missing];
+  }
+  return { data: null, error: lastError || new Error('Failed to update video') };
 }
 
 async function getCreatorVideos(uid) {
@@ -667,6 +708,11 @@ export async function getVideos(req, res) {
       .map(v => ({
         id:             v.videoId,
         title:          v.title || 'Untitled',
+        description:    v.description || '',
+        mainOrientationCategory: v.mainOrientationCategory || v.main_orientation_category || v.category || '',
+        category:       v.mainOrientationCategory || v.main_orientation_category || v.category || '',
+        tags:           Array.isArray(v.tags) ? v.tags : [],
+        allowPeopleToComment: v.allowPeopleToComment !== false && v.allow_people_to_comment !== false,
         views:          Number(v.totalViews ?? v.views) || 0,
         likes:          Number(v.totalLikes) || 0,
         comments:       Number(v.totalComments) || 0,
@@ -1273,7 +1319,33 @@ export async function updateVideo(req, res) {
       if (existing) {
         if (existing.user_id !== uid) return res.status(404).json({ success: false, message: 'Video not found' });
         const patch = {};
-        if (typeof req.body.title === 'string') patch.title = req.body.title.trim().slice(0, 200);
+        if (typeof req.body.title === 'string') {
+          const title = normalizeTitle(req.body.title);
+          if (!title) return res.status(400).json({ success: false, message: 'Title is required' });
+          if (title.length > MAX_UPLOAD_TITLE_LENGTH) {
+            return res.status(400).json({ success: false, message: `Title must be at most ${MAX_UPLOAD_TITLE_LENGTH} characters` });
+          }
+          patch.title = title;
+        }
+        if (typeof req.body.description === 'string') {
+          const description = normalizeDescription(req.body.description);
+          if (description.length > MAX_UPLOAD_DESCRIPTION_LENGTH) {
+            return res.status(400).json({ success: false, message: `Description must be at most ${MAX_UPLOAD_DESCRIPTION_LENGTH} characters` });
+          }
+          patch.description = description;
+        }
+        if (req.body.mainOrientationCategory != null || req.body.category != null) {
+          const category = normalizeMainOrientationCategory(req.body.mainOrientationCategory ?? req.body.category);
+          if (!category) return res.status(400).json({ success: false, message: 'Main category is required' });
+          patch.main_orientation_category = category;
+        }
+        if (req.body.tags != null) {
+          const tags = normalizeTags(req.body.tags);
+          patch.tags = tags;
+        }
+        if (req.body.allowPeopleToComment != null) {
+          patch.allow_people_to_comment = normalizeAllowPeopleToComment(req.body.allowPeopleToComment);
+        }
         if (typeof req.body.isPremium === 'boolean') patch.is_premium_content = req.body.isPremium;
         if (req.body.tokenPrice != null) patch.token_price = Math.max(0, Number(req.body.tokenPrice) || 0);
         if (typeof req.body.isPublished === 'boolean') {
@@ -1283,11 +1355,7 @@ export async function updateVideo(req, res) {
         if (!Object.keys(patch).length) {
           return res.status(400).json({ success: false, message: 'No valid fields to update' });
         }
-        const { error: updateError } = await supabase
-          .from('tiktok_videos')
-          .update(patch)
-          .eq('video_id', videoId)
-          .eq('user_id', uid);
+        const { error: updateError } = await updateStudioSupabaseVideo('tiktok_videos', 'video_id', videoId, patch);
         if (updateError) throw updateError;
         return res.json({ success: true, data: { id: videoId, ...patch } });
       }
@@ -1303,10 +1371,27 @@ export async function updateVideo(req, res) {
     }
 
     const patch = {};
-    if (typeof req.body.title === 'string') patch.title = req.body.title.trim().slice(0, 200);
+    if (typeof req.body.title === 'string') {
+      const title = normalizeTitle(req.body.title);
+      if (!title) return res.status(400).json({ success: false, message: 'Title is required' });
+      patch.title = title;
+    }
+    if (typeof req.body.description === 'string') patch.description = normalizeDescription(req.body.description);
+    if (req.body.mainOrientationCategory != null || req.body.category != null) {
+      const category = normalizeMainOrientationCategory(req.body.mainOrientationCategory ?? req.body.category);
+      patch.mainOrientationCategory = category;
+      patch.category = category;
+    }
+    if (req.body.tags != null) patch.tags = normalizeTags(req.body.tags);
+    if (req.body.allowPeopleToComment != null) {
+      patch.allowPeopleToComment = normalizeAllowPeopleToComment(req.body.allowPeopleToComment);
+    }
     if (typeof req.body.isPremium === 'boolean') patch.isPremiumContent = req.body.isPremium;
     if (req.body.tokenPrice != null) patch.tokenPrice = Math.max(0, Number(req.body.tokenPrice) || 0);
-    if (typeof req.body.isPublished === 'boolean') patch.isLive = req.body.isPublished;
+    if (typeof req.body.isPublished === 'boolean') {
+      patch.isLive = req.body.isPublished;
+      patch.status = req.body.isPublished ? 'published' : 'draft';
+    }
 
     if (!Object.keys(patch).length) {
       return res.status(400).json({ success: false, message: 'No valid fields to update' });

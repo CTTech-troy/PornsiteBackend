@@ -14,6 +14,8 @@ import {
 } from '../utils/videoCommentsQuery.js';
 import { enqueueSearchIndex } from '../services/searchIndex.service.js';
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
+import { recordAnalyticsEngagement } from '../services/analytics.service.js';
+import { emitPlatformActivity } from '../services/platformActivity.service.js';
 
 function invalidateCreatorLeaderboard() {
   try {
@@ -117,6 +119,20 @@ export async function likeVideo(req, res) {
     if (error) throw error;
     enqueueSearchIndex(videoId, 'upsert').catch(() => {});
     invalidateCreatorLeaderboard();
+    if (result?.duplicate !== true && result?.counted !== false) {
+      recordAnalyticsEngagement({
+        eventType: 'like',
+        videoId,
+        userId: uid,
+        sessionId: req.body?.sessionId || req.body?.session_id || null,
+      }).catch(() => {});
+      emitPlatformActivity(req.app?.get?.('io'), 'like', {
+        actorId: uid,
+        targetType: 'video',
+        targetId: videoId,
+        payload: { videoId, totalLikes: result?.total_likes ?? 0 },
+      });
+    }
     return res.json({ liked: true, totalLikes: result?.total_likes ?? 0 });
   } catch (err) {
     console.error('videoInteractions.likeVideo', err?.message || err);
@@ -208,6 +224,19 @@ export async function addComment(req, res) {
     if (!inserted.duplicate) {
       enqueueSearchIndex(videoId, 'upsert').catch(() => {});
       invalidateCreatorLeaderboard();
+      recordAnalyticsEngagement({
+        eventType: 'comment',
+        videoId,
+        userId: uid,
+        sessionId: req.body?.sessionId || req.body?.session_id || null,
+        metadata: { parentCommentId },
+      }).catch(() => {});
+      emitPlatformActivity(req.app?.get?.('io'), 'comment', {
+        actorId: uid,
+        targetType: 'video',
+        targetId: videoId,
+        payload: { videoId, commentId: inserted.id, parentCommentId, totalComments: newTotal },
+      });
     }
 
     return res.status(201).json({
@@ -319,6 +348,19 @@ export async function recordPublicVideoView(req, res) {
     if (result?.counted === true || result?.duplicate !== true) {
       enqueueSearchIndex(videoId, 'upsert').catch(() => {});
       invalidateCreatorLeaderboard();
+      emitPlatformActivity(req.app?.get?.('io'), 'video_view', {
+        actorId: uid,
+        targetType: 'video',
+        targetId: videoId,
+        payload: {
+          videoId,
+          sessionId: uid ? null : sessionId.slice(0, 128),
+          views: result?.views ?? 0,
+          counted: result?.counted ?? false,
+          watchSeconds: Math.floor(watchSeconds),
+          progressRatio,
+        },
+      });
     }
 
     return res.json({

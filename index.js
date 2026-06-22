@@ -31,8 +31,14 @@ import creatorStudioRouter from './src/router/creatorStudio.route.js';
 import adminContentRouter from './src/router/adminContent.route.js';
 import adminModerationRouter from './src/router/adminModeration.route.js';
 import adminSystemRouter from './src/router/adminSystem.route.js';
+import adminAnalyticsRouter from './src/router/adminAnalytics.route.js';
 import adminCoinsRouter from './src/router/adminCoins.route.js';
+import analyticsRouter from './src/router/analytics.route.js';
+import promotionsRouter from './src/router/promotions.route.js';
+import adminPromotionsRouter from './src/router/adminPromotions.route.js';
+import adminStorageMonitoringRouter from './src/router/adminStorageMonitoring.route.js';
 import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
+import legalRouter from './src/router/legal.route.js';
 import { getPublicSettings, getPublicVastSettings } from './src/controller/adminSystem.controller.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
@@ -77,6 +83,7 @@ import {
   getR2ImportStorageStatus,
   validateR2ImportBucket,
 } from './src/services/r2ImportStorage.service.js';
+import { startStorageReplicationWorker } from './src/services/mediaRedundancy.service.js';
 import { getLocalMemoryCacheDiagnostics } from './src/services/localMemoryCache.service.js';
 import { resolveAdminSessionFromToken } from './src/middleware/adminAuth.js';
 import { getApiOverview } from './src/services/apiMonitoring.service.js';
@@ -86,6 +93,11 @@ import {
   getAiModerationOverview,
   recordModerationSignal,
 } from './src/services/aiModeration.service.js';
+import {
+  getMemoryDiagnostics,
+  logMemoryUsage,
+  startMemoryDiagnostics,
+} from './src/utils/memoryDiagnostics.js';
 
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
@@ -431,6 +443,10 @@ app.get('/api/health/redis', async (req, res) => {
   });
 });
 
+app.get('/api/health/memory', (_req, res) => {
+  res.json({ success: true, memory: getMemoryDiagnostics() });
+});
+
 app.get('/api/health/import-queue', async (_req, res) => {
   const health = await getEnterpriseImportQueueHealth();
   res.status(health.redis.configured && !health.redis.connected ? 503 : 200).json({ success: true, health });
@@ -442,6 +458,8 @@ app.get('/api/health/import-worker', (_req, res) => {
 
 app.get('/api/config/public', getPublicSettings);
 app.get('/api/settings/vast', getPublicVastSettings);
+app.get('/share/video/:id', renderVideoSharePreview);
+app.get('/api/share/video/:id', renderVideoSharePreview);
 
 app.use('/api/keepalive', keepAliveRouter);
 app.use('/api/internal/qstash/monitoring', apiMonitoringWorkflowRouter);
@@ -462,7 +480,10 @@ app.use('/api/admin/finance', financeRouter);
 app.use('/api/admin/content', adminContentRouter);
 app.use('/api/admin/moderation', adminModerationRouter);
 app.use('/api/admin/system', adminSystemRouter);
+app.use('/api/admin/analytics', adminAnalyticsRouter);
 app.use('/api/admin/coins', adminCoinsRouter);
+app.use('/api/admin/promotions', adminPromotionsRouter);
+app.use('/api/admin/storage', adminStorageMonitoringRouter);
 app.use('/api/admin/creators-main-application', creatorsMainApplicationRouter);
 app.get('/api/videos/stream/:id', (req, res) => streamCtrl.getStreamUrl(req, res));
 // Videos proxy routes
@@ -482,6 +503,9 @@ app.use('/api/messages', messagesRouter);
 app.use('/api/earnings', earningsRouter);
 app.use('/api/studio', creatorStudioRouter);
 app.use('/api/ads', adsRouter);
+app.use('/api/analytics', analyticsRouter);
+app.use('/api/promotions', promotionsRouter);
+app.use('/api/legal', legalRouter);
 console.info('[startup] Mounting ad provider routes at /api/ad-providers', {
   routes: [
     'GET /api/ad-providers/config',
@@ -1712,7 +1736,10 @@ server.on('close', () => {
   serverHasListened = false;
 });
 
+startMemoryDiagnostics();
+
 server.listen(PORT, async () => {
+  logMemoryUsage('server-started');
   console.log(`🚀 Server running on port ${PORT}`);
   const r2Status = getR2ImportStorageStatus();
   if (!r2Status.configured) {
@@ -1760,8 +1787,13 @@ server.listen(PORT, async () => {
   });
   startHealthScanScheduler();
   startSearchSyncScheduler();
+  startStorageReplicationWorker();
   syncCacheToSupabase().catch(() => {});
-  syncRtdbToSupabase().catch(() => {});
+  if (isEnabledEnvFlag(process.env.RTDB_TO_SUPABASE_STARTUP_SYNC, false)) {
+    syncRtdbToSupabase({ maxRowsPerBranch: Number(process.env.RTDB_SYNC_MAX_ROWS_PER_BRANCH || 1500) }).catch(() => {});
+  } else {
+    console.info('[syncRtdbToSupabase] Startup sync disabled by default; set RTDB_TO_SUPABASE_STARTUP_SYNC=true to run the paginated fallback sync.');
+  }
 });
 
 let shuttingDown = false;

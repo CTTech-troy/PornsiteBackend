@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET } from '../config/supabase.js';
+import { scheduleMediaReplication } from './mediaRedundancy.service.js';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const VIDEO_EXT = new Set(['.mp4', '.webm', '.m4v', '.mov']);
@@ -53,12 +54,31 @@ export async function resolveMediaUrls({ mediaDir, mediaFile, importJobId }) {
   if (IMAGE_EXT.has(ext)) {
     const thumbPath = `imports/${uid}/${stamp}-${safeName}`;
     await uploadFileToBucket(IMAGE_BUCKET, thumbPath, { path: filePath }, contentTypeForExt(ext));
+    scheduleMediaReplication({
+      sourceTable: 'import_media',
+      sourceId: importJobId || thumbPath,
+      mediaType: 'image',
+      primaryBucket: IMAGE_BUCKET,
+      primaryPath: thumbPath,
+      primaryUrl: getPublicUrl(IMAGE_BUCKET, thumbPath),
+      contentType: contentTypeForExt(ext),
+    });
     return { storageUrl: null, thumbnailUrl: getPublicUrl(IMAGE_BUCKET, thumbPath) };
   }
 
   if (VIDEO_EXT.has(ext)) {
     const videoPath = `imports/${uid}/${stamp}-${safeName}`;
-    const { publicUrl } = await uploadFileToBucket(VIDEO_BUCKET, videoPath, { path: filePath }, contentTypeForExt(ext));
+    await uploadFileToBucket(VIDEO_BUCKET, videoPath, { path: filePath }, contentTypeForExt(ext));
+    const publicUrl = getPublicUrl(VIDEO_BUCKET, videoPath);
+    scheduleMediaReplication({
+      sourceTable: 'import_media',
+      sourceId: importJobId || videoPath,
+      mediaType: 'video',
+      primaryBucket: VIDEO_BUCKET,
+      primaryPath: videoPath,
+      primaryUrl: publicUrl,
+      contentType: contentTypeForExt(ext),
+    });
     return { storageUrl: publicUrl, thumbnailUrl: null };
   }
 
@@ -75,8 +95,19 @@ export async function uploadRemoteThumbnail(url) {
     const buffer = Buffer.from(await res.arrayBuffer());
     if (buffer.length > 5 * 1024 * 1024) return trimmed;
     const thumbPath = `imports/thumbs/${randomUUID()}.jpg`;
-    await uploadFileToBucket(IMAGE_BUCKET, thumbPath, buffer, res.headers.get('content-type') || 'image/jpeg');
-    return getPublicUrl(IMAGE_BUCKET, thumbPath) || trimmed;
+    const contentType = res.headers.get('content-type') || 'image/jpeg';
+    await uploadFileToBucket(IMAGE_BUCKET, thumbPath, buffer, contentType);
+    const primaryUrl = getPublicUrl(IMAGE_BUCKET, thumbPath);
+    scheduleMediaReplication({
+      sourceTable: 'import_media',
+      sourceId: thumbPath,
+      mediaType: 'image',
+      primaryBucket: IMAGE_BUCKET,
+      primaryPath: thumbPath,
+      primaryUrl,
+      contentType,
+    });
+    return primaryUrl || trimmed;
   } catch {
     return trimmed;
   }

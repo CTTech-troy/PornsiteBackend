@@ -153,7 +153,7 @@ export function isDirectPlayableStreamUrl(url, options = {}) {
   const allowUnapprovedDirectHost = options.allowUnapprovedDirectHost === true;
   if (!isApprovedDirectHost(value) && !allowUnapprovedDirectHost) return false;
   if (DIRECT_STREAM_EXT.test(value)) return true;
-  if (/\/storage\/v1\/object\/public\//i.test(value)) return true;
+  if (/\/storage\/v1\/object\/(?:public|sign|authenticated)\//i.test(value)) return true;
   return isApprovedDirectHost(value) && /\/(video|videos|stream)\//i.test(value);
 }
 
@@ -181,7 +181,6 @@ function playbackCandidates(video = {}) {
     video.stream_url,
     video.storage_url,
     video.file_url,
-    video.download_url,
     video.videoUrl,
     video.video_url,
     video.url,
@@ -200,7 +199,6 @@ function directStreamCandidates(video = {}) {
     video.stream_url,
     video.storage_url,
     video.file_url,
-    video.download_url,
     video.videoSrc,
   ];
   return values
@@ -496,5 +494,4 @@ export function annotateFeedListableVideo(video = {}) {
 export function filterHomeFeedVideos(videos = []) {
   return (Array.isArray(videos) ? videos : [])
     .map(annotateFeedListableVideo)
-    .filter((video) => video.listableInFeed === true);
-}
+    .filter((video) => video.lista

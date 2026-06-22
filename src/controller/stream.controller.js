@@ -1,5 +1,5 @@
 import { getFirebaseRtdb } from '../config/firebase.js';
-import { supabase } from '../config/supabase.js';
+import { supabase, VIDEO_BUCKET } from '../config/supabase.js';
 import { lookupHomeFeedRow } from '../config/homeFeedCache.js';
 import { getVideoById as getFeedVideoById } from './videoFeed.controller.js';
 import { validateVideoPlaybackSource } from '../utils/videoPlaybackValidation.js';
@@ -45,6 +45,112 @@ function playableUrlFromRecord(record) {
   return validation.playable === true && validation.embedAllowed !== true
     ? validation.playbackUrl
     : '';
+}
+
+async function resolveUploadedVideoCandidate(videoId, requesterUid = null) {
+  if (!supabase || !videoId) return '';
+  try {
+    const { data, error } = await supabase
+      .from('tiktok_videos')
+      .select('*')
+      .eq('video_id', videoId)
+      .maybeSingle();
+    if (error) {
+      console.warn('stream.controller uploaded lookup failed:', error?.message || error);
+      return '';
+    }
+    if (!data) return '';
+
+    const status = String(data.status || '').trim().toLowerCase();
+    const isListed = data.is_live === true || status === 'published';
+    const isOwner = requesterUid && String(data.user_id || '') === String(requesterUid);
+    if (!isListed && !isOwner) return '';
+
+    const directUrl = String(
+      data.playback_url ||
+      data.stream_url ||
+      data.primary_url ||
+      data.storage_url ||
+      ''
+    ).trim();
+    if (!directUrl) return '';
+
+    return playableUrlFromRecord({
+      ...data,
+      source: 'community',
+      playback_url: directUrl,
+      stream_url: directUrl,
+      storage_url: data.storage_url || data.primary_url || directUrl,
+      videoUrl: directUrl,
+      video_url: directUrl,
+      playable: true,
+      validation_status: 'playable',
+      source_type: data.source_type || 'approved_stream',
+    });
+  } catch (err) {
+    console.warn('stream.controller uploaded lookup failed:', err?.message || err);
+    return '';
+  }
+}
+
+const SIGNED_STREAM_TTL_SEC = Math.max(30, Number(process.env.STREAM_SIGNED_URL_TTL_SEC || 120));
+
+function parseSupabaseObjectUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url.trim());
+    const match = parsed.pathname.match(/\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/]+)\/(.+)$/i);
+    if (!match) return null;
+    return {
+      bucket: decodeURIComponent(match[1]),
+      path: decodeURIComponent(match[2].replace(/\+/g, ' ')),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isPlatformStorageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const parsed = parseSupabaseObjectUrl(url);
+  if (parsed) return true;
+  const configuredHost = (() => {
+    try {
+      return process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).hostname : '';
+    } catch {
+      return '';
+    }
+  })();
+  if (!configuredHost) return false;
+  try {
+    return new URL(url).hostname === configuredHost;
+  } catch {
+    return false;
+  }
+}
+
+async function createSignedStreamUrl(candidate) {
+  const rawUrl = String(candidate || '').trim();
+  if (!rawUrl) return { url: '', expiresAt: null, signed: false };
+  const parsed = parseSupabaseObjectUrl(rawUrl);
+  if (!parsed || !supabase) {
+    return { url: rawUrl, expiresAt: null, signed: false };
+  }
+
+  const { data, error } = await supabase.storage
+    .from(parsed.bucket || VIDEO_BUCKET)
+    .createSignedUrl(parsed.path, SIGNED_STREAM_TTL_SEC);
+
+  if (error || !data?.signedUrl) {
+    console.warn('[stream] signed URL creation failed:', error?.message || error || parsed.path);
+    return { url: rawUrl, expiresAt: null, signed: false };
+  }
+
+  return {
+    url: data.signedUrl,
+    expiresAt: Date.now() + (SIGNED_STREAM_TTL_SEC * 1000),
+    signed: true,
+  };
 }
 
 function unsupportedResponse(res) {
@@ -153,46 +259,11 @@ export async function getStreamUrl(req, res) {
     }
 
     if (!candidate) {
+      candidate = await resolveUploadedVideoCandidate(id, uid);
+    }
+
+    if (!candidate) {
       try {
         const feedVideo = await getFeedVideoById(id);
         if (feedVideo) {
-          candidate = playableUrlFromRecord(feedVideo);
-        }
-      } catch (err) {
-        console.warn('stream.controller feed lookup failed:', err?.message || err);
-      }
-    }
-
-    if (!candidate) {
-      try {
-        const hf = lookupHomeFeedRow(id);
-        const play = playableUrlFromRecord(hf);
-        if (play) {
-          candidate = play;
-        }
-      } catch (err) {
-        console.warn('stream.controller home-feed lookup failed:', err?.message || err);
-      }
-    }
-
-    if (!candidate) {
-      return unsupportedResponse(res);
-    }
-
-    const payload = { url: String(candidate) };
-    if (premiumMeta.isPremium && uid) {
-      const signed = signPlaybackToken({ userId: uid, videoId: id });
-      payload.playbackToken = signed.token;
-      payload.expiresAt = signed.expiresAt;
-      payload.premium = true;
-    }
-
-    res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=30');
-    return res.json(payload);
-  } catch (err) {
-    console.error('getStreamUrl error', err?.message || err);
-    return res.status(500).json({ error: err?.message || 'failed' });
-  }
-}
-
-export default { getStreamUrl };
+          candidate = playableUrlFromRecord(feedVideo);

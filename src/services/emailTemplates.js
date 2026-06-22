@@ -8,15 +8,24 @@ import {
   safeUrl,
 } from './emailRenderer.js';
 
-const TEMPLATE_VERSION = '2026.05-premium-email-system';
+const TEMPLATE_VERSION = '2026.06-enterprise-email-design-system';
 
 const studioUrl = () => `${String(process.env.FRONTEND_URL || 'https://xstreamvideos.site').replace(/\/$/, '')}/studio`;
 const homeUrl = () => String(process.env.FRONTEND_URL || 'https://xstreamvideos.site').replace(/\/$/, '');
+const adminUrl = () => String(process.env.ADMIN_FRONTEND_URL || 'https://admin.xstreamvideos.site').replace(/\/$/, '');
 
 const REGISTRY = [
+  ['welcome', 'Welcome email', 'Authentication', 'Concise welcome email after account creation.'],
   ['email_verification', 'Email verification', 'Authentication', 'Secure account activation with fallback link.'],
   ['password_reset', 'Password reset', 'Authentication', 'Secure password reset email.'],
+  ['login_alert', 'Login alert', 'Authentication', 'Security notice for a new account login.'],
+  ['account_recovery', 'Account recovery', 'Authentication', 'Recovery instructions for account access issues.'],
   ['otp', 'One-time passcode', 'Authentication', 'OTP identity verification.'],
+  ['new_follower', 'New follower', 'User notifications', 'Notification when another user follows a profile.'],
+  ['new_comment', 'New comment', 'User notifications', 'Notification when a video receives a comment.'],
+  ['new_like', 'New like', 'User notifications', 'Notification when a video receives a like.'],
+  ['new_message', 'New message', 'User notifications', 'Notification when a user receives a message.'],
+  ['account_update', 'Account update', 'User notifications', 'Important account update notification.'],
   ['admin_invite', 'Admin invite', 'Admin', 'Invite an administrator with scoped permissions.'],
   ['account_deletion', 'Account deletion notice', 'Admin', 'Account removal notice sent by admins.'],
   ['creator_application_submitted', 'Creator application submitted', 'Creators', 'Confirmation after creator signup application.'],
@@ -24,6 +33,8 @@ const REGISTRY = [
   ['creator_application_rejected', 'Creator rejected', 'Creators', 'Rejection email with admin note.'],
   ['creator_application_info_requested', 'Creator info requested', 'Creators', 'Missing information request with secure update link.'],
   ['creator_application_reapplied', 'Creator reapplication received', 'Creators', 'Reapplication confirmation.'],
+  ['content_approved', 'Content approved', 'Creators', 'Creator notification when uploaded content is approved.'],
+  ['content_rejected', 'Content rejected', 'Creators', 'Creator notification when uploaded content is rejected.'],
   ['withdrawal_requested', 'Withdrawal requested', 'Finance', 'Creator withdrawal request confirmation.'],
   ['withdrawal_approved', 'Withdrawal approved', 'Finance', 'Creator payout approval notice.'],
   ['withdrawal_paid', 'Withdrawal paid', 'Finance', 'Creator payout paid notice.'],
@@ -32,6 +43,11 @@ const REGISTRY = [
   ['withdrawal_receipt_rejected', 'Withdrawal rejected receipt', 'Receipts', 'Invoice-style receipt for rejected withdrawals.'],
   ['payment_success', 'Payment success', 'Payments', 'Customer payment success receipt.'],
   ['payment_failure', 'Payment failure', 'Payments', 'Customer payment failure notice.'],
+  ['purchase_confirmation', 'Purchase confirmation', 'Payments', 'General purchase confirmation email.'],
+  ['subscription_confirmation', 'Subscription confirmation', 'Payments', 'Subscription or membership confirmation email.'],
+  ['subscription_renewal', 'Subscription renewal', 'Payments', 'Subscription renewal receipt email.'],
+  ['failed_payment', 'Failed payment', 'Payments', 'Payment failure email for billing attempts.'],
+  ['refund_notification', 'Refund notification', 'Payments', 'Refund confirmation and access update email.'],
   ['premium_purchase_receipt', 'Premium purchase receipt', 'Premium', 'Receipt for premium video purchases.'],
   ['premium_sale_creator', 'Premium sale creator earning', 'Premium', 'Creator earning notification after a premium sale.'],
   ['gift_notification', 'Gift notification', 'Live', 'Creator gift received notice.'],
@@ -40,6 +56,10 @@ const REGISTRY = [
   ['content_removal_confirmation', 'Content removal confirmation', 'Trust', 'Requester receipt for content removal applications.'],
   ['content_removal_status', 'Content removal status', 'Trust', 'Status update for content removal applications.'],
   ['content_removal_feedback', 'Content removal feedback', 'Trust', 'Admin message for a content removal request.'],
+  ['admin_new_creator_application', 'New creator application', 'Admin notifications', 'Admin alert for a new creator application.'],
+  ['admin_new_report', 'New report', 'Admin notifications', 'Admin alert for a new trust or abuse report.'],
+  ['admin_financial_alert', 'Financial alert', 'Admin notifications', 'Admin alert for payment, payout, or revenue issues.'],
+  ['admin_system_alert', 'System alert', 'Admin notifications', 'Admin alert for infrastructure and service issues.'],
   ['notification', 'General notification', 'Notifications', 'Reusable branded notification.'],
 ].map(([key, label, category, description]) => ({
   key,
@@ -51,6 +71,10 @@ const REGISTRY = [
 }));
 
 const SAMPLE_DATA = {
+  welcome: {
+    name: 'Korede',
+    dashboardUrl: homeUrl(),
+  },
   email_verification: {
     name: 'Korede',
     verificationUrl: `${homeUrl()}/auth/confirm-email?t=sample-token`,
@@ -59,7 +83,50 @@ const SAMPLE_DATA = {
     name: 'Korede',
     resetUrl: `${homeUrl()}/auth/reset-password?token=sample-token`,
   },
+  login_alert: {
+    name: 'Korede',
+    loginTime: new Date().toISOString(),
+    ipAddress: '102.89.23.10',
+    device: 'Chrome on Windows',
+    location: 'Lagos, Nigeria',
+    securityUrl: `${homeUrl()}/account/security`,
+  },
+  account_recovery: {
+    name: 'Korede',
+    recoveryUrl: `${homeUrl()}/auth/recover?token=sample-token`,
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  },
   otp: { otp: '482913' },
+  new_follower: {
+    name: 'Creator',
+    followerName: 'Ayo',
+    profileUrl: `${homeUrl()}/creator/ayo`,
+  },
+  new_comment: {
+    name: 'Creator',
+    commenterName: 'Maya',
+    videoTitle: 'Behind the scenes',
+    comment: 'This was excellent. Looking forward to more.',
+    videoUrl: `${homeUrl()}/watch/sample-video`,
+  },
+  new_like: {
+    name: 'Creator',
+    likerName: 'Member',
+    videoTitle: 'Premium video',
+    videoUrl: `${homeUrl()}/watch/sample-video`,
+  },
+  new_message: {
+    name: 'Korede',
+    senderName: 'Support',
+    messagePreview: 'We reviewed your request and sent an update.',
+    messagesUrl: `${homeUrl()}/messages`,
+  },
+  account_update: {
+    name: 'Korede',
+    updateTitle: 'Your payout method was updated',
+    message: 'Your creator payout method was changed. If this was not you, secure your account immediately.',
+    actionUrl: `${homeUrl()}/account/security`,
+  },
   admin_invite: {
     name: 'Admin',
     inviteUrl: `${homeUrl()}/invite/complete?token=sample-token`,
@@ -83,6 +150,19 @@ const SAMPLE_DATA = {
     reason: 'Please upload a clearer ID image and add your official profile link.',
   },
   creator_application_reapplied: { name: 'Creator' },
+  content_approved: {
+    creatorName: 'Creator',
+    videoTitle: 'New premium upload',
+    contentUrl: `${homeUrl()}/watch/sample-video`,
+    reviewedAt: new Date().toISOString(),
+  },
+  content_rejected: {
+    creatorName: 'Creator',
+    videoTitle: 'New premium upload',
+    reason: 'The thumbnail does not meet platform policy. Please replace it and resubmit.',
+    editUrl: `${studioUrl()}/videos/sample-video/edit`,
+    reviewedAt: new Date().toISOString(),
+  },
   withdrawal_requested: {
     name: 'Creator',
     amountUsd: 250,
@@ -155,6 +235,46 @@ const SAMPLE_DATA = {
     failedAt: new Date().toISOString(),
     reason: 'The payment provider declined the transaction.',
   },
+  purchase_confirmation: {
+    name: 'Member',
+    itemName: '300 Coins',
+    amountUsd: 7.99,
+    transactionId: 'PAY-2026-0042',
+    purchasedAt: new Date().toISOString(),
+    receiptUrl: `${homeUrl()}/wallet`,
+  },
+  subscription_confirmation: {
+    name: 'Member',
+    planName: 'Creator Supporter',
+    amountUsd: 14.99,
+    renewalDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    manageUrl: `${homeUrl()}/wallet`,
+  },
+  subscription_renewal: {
+    name: 'Member',
+    planName: 'Creator Supporter',
+    amountUsd: 14.99,
+    renewedAt: new Date().toISOString(),
+    nextRenewalDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    manageUrl: `${homeUrl()}/wallet`,
+  },
+  failed_payment: {
+    name: 'Member',
+    itemName: 'Creator Supporter',
+    amountUsd: 14.99,
+    failedAt: new Date().toISOString(),
+    reason: 'The card issuer declined this payment.',
+    billingUrl: `${homeUrl()}/wallet`,
+  },
+  refund_notification: {
+    name: 'Member',
+    itemName: 'Premium video',
+    amountUsd: 9.99,
+    transactionId: 'REF-2026-0019',
+    refundedAt: new Date().toISOString(),
+    reason: 'Your refund request was approved.',
+    walletUrl: `${homeUrl()}/wallet`,
+  },
   premium_purchase_receipt: {
     name: 'Member',
     videoTitle: 'Premium video',
@@ -212,6 +332,36 @@ const SAMPLE_DATA = {
     name: 'Requester',
     requestId: 'CR-2026-0142',
     message: '- First issue\n- Second issue\n\nPlease update your documents.\n\nRegards,\nAdmin Team',
+  },
+  admin_new_creator_application: {
+    adminName: 'Admin',
+    creatorName: 'New Creator',
+    creatorEmail: 'creator@example.com',
+    submittedAt: new Date().toISOString(),
+    reviewUrl: `${String(process.env.ADMIN_FRONTEND_URL || 'https://admin.xstreamvideos.site').replace(/\/$/, '')}/creator-applications`,
+  },
+  admin_new_report: {
+    adminName: 'Admin',
+    reportType: 'Content report',
+    reporterEmail: 'member@example.com',
+    contentTitle: 'Reported video',
+    submittedAt: new Date().toISOString(),
+    reportUrl: `${String(process.env.ADMIN_FRONTEND_URL || 'https://admin.xstreamvideos.site').replace(/\/$/, '')}/reports`,
+  },
+  admin_financial_alert: {
+    adminName: 'Finance team',
+    alertTitle: 'Large withdrawal pending review',
+    amountUsd: 1250,
+    referenceId: 'WDL-2026-0091',
+    message: 'A large withdrawal request requires approval before processing.',
+    actionUrl: `${String(process.env.ADMIN_FRONTEND_URL || 'https://admin.xstreamvideos.site').replace(/\/$/, '')}/finance`,
+  },
+  admin_system_alert: {
+    adminName: 'Admin',
+    alertTitle: 'Storage replication warning',
+    severity: 'warning',
+    message: 'Cloudflare R2 replication has failed for 3 media objects in the last hour.',
+    actionUrl: `${String(process.env.ADMIN_FRONTEND_URL || 'https://admin.xstreamvideos.site').replace(/\/$/, '')}/storage-monitoring`,
   },
   notification: {
     name: 'Member',
@@ -489,7 +639,275 @@ function receiptTemplate(type, vars) {
   };
 }
 
+function simpleActionTemplate({
+  subject,
+  heading,
+  preheader,
+  eyebrow,
+  name,
+  intro,
+  badge,
+  sections = [],
+  ctaLabel,
+  ctaUrl,
+  fallbackUrl,
+  footerNote,
+}) {
+  return {
+    subject,
+    title: heading,
+    preheader,
+    eyebrow,
+    heading,
+    badge,
+    intro: `Hi ${name || 'there'},\n\n${intro}`,
+    sections,
+    cta: ctaLabel && ctaUrl ? { label: ctaLabel, url: ctaUrl } : null,
+    fallbackUrl: fallbackUrl || ctaUrl,
+    footerNote,
+  };
+}
+
+function activityTemplate({ type, vars }) {
+  const config = {
+    follower: {
+      subject: `${vars.followerName || 'Someone'} followed you`,
+      heading: 'You have a new follower',
+      preheader: `${vars.followerName || 'Someone'} started following your profile.`,
+      badge: { label: 'New follower', variant: 'brand' },
+      intro: `${vars.followerName || 'Someone'} started following your profile.`,
+      ctaLabel: 'View profile',
+      ctaUrl: vars.profileUrl || homeUrl(),
+    },
+    comment: {
+      subject: `${vars.commenterName || 'Someone'} commented on your video`,
+      heading: 'New comment on your video',
+      preheader: `New comment on ${vars.videoTitle || 'your video'}.`,
+      badge: { label: 'Comment', variant: 'info' },
+      intro: `${vars.commenterName || 'Someone'} commented on **${vars.videoTitle || 'your video'}**.`,
+      sections: [{ type: 'notice', variant: 'neutral', title: 'Comment preview', body: vars.comment || 'Open the video to read the comment.' }],
+      ctaLabel: 'View comment',
+      ctaUrl: vars.videoUrl || homeUrl(),
+    },
+    like: {
+      subject: `${vars.likerName || 'Someone'} liked your video`,
+      heading: 'Your video got a new like',
+      preheader: `${vars.videoTitle || 'Your video'} received a like.`,
+      badge: { label: 'Like', variant: 'success' },
+      intro: `${vars.likerName || 'Someone'} liked **${vars.videoTitle || 'your video'}**.`,
+      ctaLabel: 'View video',
+      ctaUrl: vars.videoUrl || homeUrl(),
+    },
+    message: {
+      subject: `New message from ${vars.senderName || 'XstreamVideos'}`,
+      heading: 'You have a new message',
+      preheader: vars.messagePreview || 'Open your inbox to read the message.',
+      badge: { label: 'Message', variant: 'info' },
+      intro: `${vars.senderName || 'Someone'} sent you a message.`,
+      sections: [{ type: 'notice', variant: 'neutral', title: 'Preview', body: vars.messagePreview || 'Open your inbox to read the message.' }],
+      ctaLabel: 'Open messages',
+      ctaUrl: vars.messagesUrl || `${homeUrl()}/messages`,
+    },
+  }[type];
+
+  return simpleActionTemplate({
+    ...config,
+    eyebrow: 'Activity',
+    name: vars.name,
+    sections: config.sections || [],
+  });
+}
+
+function contentReviewTemplate(status, vars) {
+  const approved = status === 'approved';
+  return simpleActionTemplate({
+    subject: approved ? 'Your content was approved' : 'Your content needs changes',
+    heading: approved ? 'Your content is approved' : 'Your content was not approved',
+    preheader: approved
+      ? `${vars.videoTitle || 'Your upload'} is approved and ready for viewers.`
+      : `${vars.videoTitle || 'Your upload'} needs changes before publishing.`,
+    eyebrow: 'Creator content',
+    name: vars.creatorName || vars.name || 'Creator',
+    badge: { label: approved ? 'Approved' : 'Needs changes', variant: approved ? 'success' : 'danger' },
+    intro: approved
+      ? `**${vars.videoTitle || 'Your upload'}** has passed review and can now be viewed on the platform.`
+      : `**${vars.videoTitle || 'Your upload'}** could not be approved based on the current submission.`,
+    sections: [
+      {
+        type: 'keyValue',
+        title: 'Content details',
+        rows: rows([
+          { label: 'Title', value: vars.videoTitle },
+          { label: 'Reviewed at', value: formatDateTime(vars.reviewedAt) },
+        ]),
+      },
+      ...(!approved ? [{ type: 'notice', variant: 'danger', title: 'Reason', body: vars.reason || 'Please review the platform content policy and resubmit.' }] : []),
+    ],
+    ctaLabel: approved ? 'View content' : 'Edit and resubmit',
+    ctaUrl: approved ? (vars.contentUrl || homeUrl()) : (vars.editUrl || studioUrl()),
+  });
+}
+
+function purchaseTemplate(kind, vars) {
+  const item = vars.itemName || vars.productName || vars.videoTitle || 'Purchase';
+  const copy = {
+    purchase: {
+      subject: `Purchase confirmed - ${item}`,
+      heading: 'Purchase confirmed',
+      preheader: `Your purchase of ${item} is complete.`,
+      badge: { label: 'Purchased', variant: 'success' },
+      intro: `Your purchase of **${item}** was completed successfully.`,
+      ctaLabel: 'View purchase',
+      ctaUrl: vars.receiptUrl || vars.purchaseUrl || `${homeUrl()}/wallet`,
+    },
+    subscription_confirmation: {
+      subject: `Subscription confirmed - ${vars.planName || 'Plan'}`,
+      heading: 'Subscription confirmed',
+      preheader: `${vars.planName || 'Your plan'} is now active.`,
+      badge: { label: 'Active', variant: 'success' },
+      intro: `Your **${vars.planName || 'subscription'}** is now active.`,
+      ctaLabel: 'Manage subscription',
+      ctaUrl: vars.manageUrl || `${homeUrl()}/wallet`,
+    },
+    subscription_renewal: {
+      subject: `Subscription renewed - ${vars.planName || 'Plan'}`,
+      heading: 'Subscription renewed',
+      preheader: `${vars.planName || 'Your plan'} renewed successfully.`,
+      badge: { label: 'Renewed', variant: 'success' },
+      intro: `Your **${vars.planName || 'subscription'}** renewed successfully.`,
+      ctaLabel: 'Manage subscription',
+      ctaUrl: vars.manageUrl || `${homeUrl()}/wallet`,
+    },
+    failed_payment: {
+      subject: 'Payment failed',
+      heading: 'Payment failed',
+      preheader: `We could not complete payment for ${item}.`,
+      badge: { label: 'Failed', variant: 'danger' },
+      intro: `We could not complete payment for **${item}**.`,
+      ctaLabel: 'Update payment',
+      ctaUrl: vars.billingUrl || `${homeUrl()}/wallet`,
+    },
+    refund: {
+      subject: `Refund processed - ${item}`,
+      heading: 'Refund processed',
+      preheader: `Your refund for ${item} has been processed.`,
+      badge: { label: 'Refunded', variant: 'info' },
+      intro: `Your refund for **${item}** has been processed. Any related paid access may no longer be available.`,
+      ctaLabel: 'Open wallet',
+      ctaUrl: vars.walletUrl || `${homeUrl()}/wallet`,
+    },
+  }[kind];
+
+  const detailRows = rows([
+    { label: 'Item', value: item || vars.planName },
+    { label: 'Plan', value: vars.planName },
+    { label: 'Amount', value: vars.amountUsd == null ? null : formatUsd(vars.amountUsd) },
+    { label: 'Transaction ID', value: vars.transactionId },
+    { label: 'Purchased at', value: vars.purchasedAt ? formatDateTime(vars.purchasedAt) : null },
+    { label: 'Renewed at', value: vars.renewedAt ? formatDateTime(vars.renewedAt) : null },
+    { label: 'Refunded at', value: vars.refundedAt ? formatDateTime(vars.refundedAt) : null },
+    { label: 'Failed at', value: vars.failedAt ? formatDateTime(vars.failedAt) : null },
+    { label: 'Next renewal', value: vars.nextRenewalDate || vars.renewalDate ? formatDateTime(vars.nextRenewalDate || vars.renewalDate) : null },
+  ]);
+
+  const sections = [{ type: 'keyValue', title: 'Details', rows: detailRows }];
+  if (vars.reason || kind === 'failed_payment') {
+    sections.push({
+      type: 'notice',
+      variant: kind === 'failed_payment' ? 'danger' : 'neutral',
+      title: kind === 'failed_payment' ? 'Reason' : 'Note',
+      body: vars.reason || 'The payment provider declined the transaction.',
+    });
+  }
+
+  return simpleActionTemplate({
+    ...copy,
+    eyebrow: 'Payments',
+    name: vars.name,
+    sections,
+  });
+}
+
+function adminAlertTemplate(kind, vars) {
+  const config = {
+    creator: {
+      subject: 'New creator application',
+      heading: 'New creator application',
+      preheader: `${vars.creatorName || 'A creator'} submitted an application.`,
+      badge: { label: 'Review', variant: 'info' },
+      intro: `${vars.creatorName || 'A creator'} submitted a creator application that needs review.`,
+      ctaLabel: 'Review application',
+      ctaUrl: vars.reviewUrl || `${adminUrl()}/creator-applications`,
+      rows: [
+        { label: 'Creator', value: vars.creatorName },
+        { label: 'Email', value: vars.creatorEmail },
+        { label: 'Submitted at', value: formatDateTime(vars.submittedAt) },
+      ],
+    },
+    report: {
+      subject: 'New platform report',
+      heading: 'New report requires review',
+      preheader: `${vars.reportType || 'A report'} was submitted.`,
+      badge: { label: 'Report', variant: 'warning' },
+      intro: 'A new platform report requires admin review.',
+      ctaLabel: 'Open report',
+      ctaUrl: vars.reportUrl || `${adminUrl()}/reports`,
+      rows: [
+        { label: 'Report type', value: vars.reportType },
+        { label: 'Reporter', value: vars.reporterEmail },
+        { label: 'Content', value: vars.contentTitle },
+        { label: 'Submitted at', value: formatDateTime(vars.submittedAt) },
+      ],
+    },
+    finance: {
+      subject: vars.alertTitle || 'Financial alert',
+      heading: vars.alertTitle || 'Financial alert',
+      preheader: vars.message || 'A financial event requires attention.',
+      badge: { label: 'Finance', variant: 'warning' },
+      intro: vars.message || 'A financial event requires attention.',
+      ctaLabel: 'Open finance dashboard',
+      ctaUrl: vars.actionUrl || `${adminUrl()}/finance`,
+      rows: [
+        { label: 'Amount', value: vars.amountUsd == null ? null : formatUsd(vars.amountUsd) },
+        { label: 'Reference', value: vars.referenceId },
+      ],
+    },
+    system: {
+      subject: vars.alertTitle || 'System alert',
+      heading: vars.alertTitle || 'System alert',
+      preheader: vars.message || 'A system event requires attention.',
+      badge: { label: vars.severity || 'Alert', variant: String(vars.severity || '').toLowerCase() === 'critical' ? 'danger' : 'warning' },
+      intro: vars.message || 'A system event requires attention.',
+      ctaLabel: 'Open system dashboard',
+      ctaUrl: vars.actionUrl || `${adminUrl()}/it-operations`,
+      rows: [
+        { label: 'Severity', value: vars.severity },
+      ],
+    },
+  }[kind];
+
+  return simpleActionTemplate({
+    ...config,
+    eyebrow: 'Admin alert',
+    name: vars.adminName || 'Admin',
+    sections: [{ type: 'keyValue', title: 'Summary', rows: rows(config.rows) }],
+  });
+}
+
 const builders = {
+  welcome: (vars) => simpleActionTemplate({
+    subject: 'Welcome to XstreamVideos',
+    heading: 'Welcome to XstreamVideos',
+    preheader: 'Your account is ready.',
+    eyebrow: 'Welcome',
+    name: vars.name,
+    badge: { label: 'Account ready', variant: 'success' },
+    intro: 'Your account is ready. You can now explore videos, follow creators, and manage your wallet from one secure place.',
+    sections: [{ type: 'list', items: ['Complete your profile.', 'Follow creators you like.', 'Keep your account secure with a verified email.'] }],
+    ctaLabel: 'Start watching',
+    ctaUrl: vars.dashboardUrl || homeUrl(),
+  }),
+
   email_verification: (vars) => secureActionEmail({
     subject: 'Verify your email address',
     title: 'Verify your email address',
@@ -501,6 +919,45 @@ const builders = {
     footerNote: 'This verification link expires after 24 hours.',
   }),
 
+  login_alert: (vars) => simpleActionTemplate({
+    subject: 'New login to your XstreamVideos account',
+    heading: 'New login detected',
+    preheader: `A login was detected from ${vars.device || 'a new device'}.`,
+    eyebrow: 'Security',
+    name: vars.name,
+    badge: { label: 'Security', variant: 'warning' },
+    intro: 'We noticed a login to your account. Review the details below.',
+    sections: [
+      {
+        type: 'keyValue',
+        title: 'Login details',
+        rows: rows([
+          { label: 'Time', value: formatDateTime(vars.loginTime) },
+          { label: 'Device', value: vars.device },
+          { label: 'Location', value: vars.location },
+          { label: 'IP address', value: vars.ipAddress },
+        ]),
+      },
+      { type: 'notice', variant: 'warning', title: 'Was this not you?', body: 'Reset your password and contact support immediately if you do not recognize this activity.' },
+    ],
+    ctaLabel: 'Review security',
+    ctaUrl: vars.securityUrl || `${homeUrl()}/account/security`,
+  }),
+
+  account_recovery: (vars) => simpleActionTemplate({
+    subject: 'Recover your XstreamVideos account',
+    heading: 'Recover your account',
+    preheader: 'Use this secure link to recover account access.',
+    eyebrow: 'Security',
+    name: vars.name,
+    badge: { label: 'Recovery', variant: 'info' },
+    intro: 'Use the secure button below to continue account recovery. This link is time-limited for your protection.',
+    sections: vars.expiresAt ? [{ type: 'keyValue', title: 'Recovery details', rows: [{ label: 'Expires', value: formatDateTime(vars.expiresAt) }] }] : [],
+    ctaLabel: 'Recover account',
+    ctaUrl: vars.recoveryUrl,
+    footerNote: 'If you did not request recovery, you can safely ignore this email.',
+  }),
+
   password_reset: (vars) => secureActionEmail({
     subject: 'Reset your XstreamVideos password',
     title: 'Reset your password',
@@ -509,6 +966,22 @@ const builders = {
     actionText: 'We received a request to reset your password. Use the secure button below to choose a new password.',
     actionUrl: vars.resetUrl,
     buttonLabel: 'Choose a new password',
+  }),
+
+  new_follower: (vars) => activityTemplate({ type: 'follower', vars }),
+  new_comment: (vars) => activityTemplate({ type: 'comment', vars }),
+  new_like: (vars) => activityTemplate({ type: 'like', vars }),
+  new_message: (vars) => activityTemplate({ type: 'message', vars }),
+  account_update: (vars) => simpleActionTemplate({
+    subject: vars.updateTitle || 'Account update',
+    heading: vars.updateTitle || 'Account update',
+    preheader: vars.message || 'Your account has an update.',
+    eyebrow: 'Account',
+    name: vars.name,
+    badge: { label: 'Update', variant: 'info' },
+    intro: vars.message || 'Your account has an update.',
+    ctaLabel: vars.actionLabel || 'Review account',
+    ctaUrl: vars.actionUrl || `${homeUrl()}/account`,
   }),
 
   otp: (vars) => ({
@@ -558,6 +1031,8 @@ const builders = {
   creator_application_rejected: (vars) => buildApplication('rejected', vars),
   creator_application_info_requested: (vars) => buildApplication('info_requested', vars),
   creator_application_reapplied: (vars) => buildApplication('reapplied', vars),
+  content_approved: (vars) => contentReviewTemplate('approved', vars),
+  content_rejected: (vars) => contentReviewTemplate('rejected', vars),
 
   withdrawal_requested: (vars) => payoutTemplate('requested', vars),
   withdrawal_approved: (vars) => payoutTemplate('approved', vars),
@@ -611,6 +1086,12 @@ const builders = {
     ],
     cta: { label: 'Try again', url: homeUrl() },
   }),
+
+  purchase_confirmation: (vars) => purchaseTemplate('purchase', vars),
+  subscription_confirmation: (vars) => purchaseTemplate('subscription_confirmation', vars),
+  subscription_renewal: (vars) => purchaseTemplate('subscription_renewal', vars),
+  failed_payment: (vars) => purchaseTemplate('failed_payment', vars),
+  refund_notification: (vars) => purchaseTemplate('refund', vars),
 
   premium_purchase_receipt: (vars) => ({
     subject: `Premium video purchase receipt - ${formatUsd(vars.amountUsd)}`,
@@ -767,6 +1248,11 @@ const builders = {
       { type: 'notice', variant: 'brand', title: 'Message', body: vars.message || 'No message was provided.' },
     ],
   }),
+
+  admin_new_creator_application: (vars) => adminAlertTemplate('creator', vars),
+  admin_new_report: (vars) => adminAlertTemplate('report', vars),
+  admin_financial_alert: (vars) => adminAlertTemplate('finance', vars),
+  admin_system_alert: (vars) => adminAlertTemplate('system', vars),
 
   notification: (vars) => ({
     subject: vars.subject || 'Notification from XstreamVideos',

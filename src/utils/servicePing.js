@@ -7,6 +7,7 @@ import {
 import { supabase, isConfigured } from '../config/supabase.js';
 
 const STARTUP_CHECK_TIMEOUT_MS = 3500;
+const FIREBASE_DEEP_HEALTH_CHECK = String(process.env.FIREBASE_HEALTH_DEEP_CHECK || '').toLowerCase() === 'true';
 
 function envHasFirebaseCreds() {
   return Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS);
@@ -38,6 +39,9 @@ export async function pingFirebase() {
   const auth = getFirebaseAuth();
   if (!auth) {
     return { id: 'firebase', status: 'inactive', detail: 'Firebase Auth admin API unavailable' };
+  }
+  if (!FIREBASE_DEEP_HEALTH_CHECK) {
+    return { id: 'firebase', status: 'active', detail: 'Admin SDK initialized; deep Auth scan skipped' };
   }
   try {
     const fbRes = await Promise.race([

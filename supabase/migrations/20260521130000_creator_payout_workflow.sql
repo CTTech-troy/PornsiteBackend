@@ -437,8 +437,8 @@ begin
     coalesce(sum(amount_usd) filter (where status in ('paid', 'completed')), 0),
     coalesce(sum(amount_usd) filter (where status = 'failed'), 0),
     count(*)::integer,
-    count(*) filter (where status in ('paid', 'completed'))::integer,
-    count(*) filter (where status = 'failed')::integer,
+    (count(*) filter (where status in ('paid', 'completed')))::integer,
+    (count(*) filter (where status = 'failed'))::integer,
     coalesce(avg(extract(epoch from (coalesce(completed_at, paid_at, processed_at) - requested_at)) / 60)
       filter (where status in ('paid', 'completed') and requested_at is not null), 0),
     now()

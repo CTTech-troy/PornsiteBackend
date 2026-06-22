@@ -165,6 +165,16 @@ export function mapRawToHomeCard(v, index) {
 const bestPageCache = new Map(); // page -> { items, ts }
 const BEST_PAGE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes fresh TTL
 const BEST_PAGE_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days stale TTL (serves on 429/error)
+const BEST_PAGE_CACHE_MAX_KEYS = Math.max(20, Number(process.env.XNXX_BEST_PAGE_CACHE_MAX_KEYS || 120));
+
+function setBestPageCache(cacheKey, value) {
+  bestPageCache.set(cacheKey, value);
+  while (bestPageCache.size > BEST_PAGE_CACHE_MAX_KEYS) {
+    const oldest = bestPageCache.keys().next().value;
+    if (!oldest) break;
+    bestPageCache.delete(oldest);
+  }
+}
 
 /**
  * GET https://{host}/xn/best?page=1
@@ -173,8 +183,9 @@ const BEST_PAGE_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days stale TTL (ser
 export async function fetchXnxxBestPage(page = 1, options = {}) {
   await loadExternalFeedConfig();
   const { key, host, bestPath, provider } = getXnxxCredentials();
+  const timeoutMs = Math.max(500, Number(options.timeoutMs || process.env.XNXX_API_TIMEOUT_MS || 12000));
   if (!isXnxxApiConfigured()) {
-    const fallback = await fetchHomeDiscoveryFallback(page);
+    const fallback = await fetchHomeDiscoveryFallback(page, null, { timeoutMs });
     if (fallback.ok && fallback.items?.length > 0) return fallback;
     return { ok: false, error: 'not_configured', items: [], raw: null };
   }
@@ -194,7 +205,7 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
   if (period) url.searchParams.set('period', period);
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12000);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let res;
     try {
       res = await fetch(url.toString(), {
@@ -218,7 +229,7 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
         console.warn(`[xnxxBestPage] 429 quota exceeded for page ${pageNum}, serving stale cache (${hit.items.length} items)`);
         return { ok: true, items: hit.items, stale: true, status: 429 };
       }
-      const fallback = await fetchHomeDiscoveryFallback(pageNum, hit);
+      const fallback = await fetchHomeDiscoveryFallback(pageNum, hit, { timeoutMs });
       if (fallback.ok && fallback.items?.length > 0) return fallback;
       return { ok: false, status: 429, items: [], raw: text };
     }
@@ -228,7 +239,7 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
       if (hit && hit.items?.length > 0 && Date.now() - hit.ts < BEST_PAGE_STALE_TTL_MS) {
         return { ok: true, items: hit.items, stale: true, status: res.status };
       }
-      const fallback = await fetchHomeDiscoveryFallback(pageNum, hit);
+      const fallback = await fetchHomeDiscoveryFallback(pageNum, hit, { timeoutMs });
       if (fallback.ok && fallback.items?.length > 0) return fallback;
       return { ok: false, status: res.status, items: [], raw: text };
     }
@@ -237,7 +248,7 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
     try {
       data = JSON.parse(text);
     } catch {
-      const fallback = await fetchHomeDiscoveryFallback(pageNum, hit);
+      const fallback = await fetchHomeDiscoveryFallback(pageNum, hit, { timeoutMs });
       if (fallback.ok && fallback.items?.length > 0) return fallback;
       return { ok: false, items: [], raw: text };
     }
@@ -247,15 +258,24 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
     if (items.length === 0 && period) {
       const retryUrl = new URL(`https://${host}${path}`);
       retryUrl.searchParams.set('page', String(pageNum));
-      const retryRes = await fetch(retryUrl.toString(), {
-        method: 'GET',
-        headers: {
-          'x-rapidapi-key': key,
-          'x-rapidapi-host': host,
-          'Content-Type': 'application/json',
-        },
-      });
-      const retryText = await retryRes.text();
+      const retryCtrl = new AbortController();
+      const retryTimer = setTimeout(() => retryCtrl.abort(), timeoutMs);
+      let retryRes;
+      let retryText;
+      try {
+        retryRes = await fetch(retryUrl.toString(), {
+          method: 'GET',
+          signal: retryCtrl.signal,
+          headers: {
+            'x-rapidapi-key': key,
+            'x-rapidapi-host': host,
+            'Content-Type': 'application/json',
+          },
+        });
+        retryText = await retryRes.text();
+      } finally {
+        clearTimeout(retryTimer);
+      }
       if (retryRes.ok) {
         try {
           const retryData = JSON.parse(retryText);
@@ -266,10 +286,10 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
     }
 
     if (items.length > 0) {
-      bestPageCache.set(cacheKey, { items, ts: Date.now(), period });
+      setBestPageCache(cacheKey, { items, ts: Date.now(), period });
       return { ok: true, items, raw: data, period };
     }
-    const fallback = await fetchHomeDiscoveryFallback(pageNum, hit);
+    const fallback = await fetchHomeDiscoveryFallback(pageNum, hit, { timeoutMs });
     if (fallback.ok && fallback.items?.length > 0) return fallback;
     return { ok: true, items, raw: data, period };
   } catch (err) {
@@ -278,7 +298,7 @@ export async function fetchXnxxBestPage(page = 1, options = {}) {
       console.warn(`[xnxxBestPage] fetch error for page ${pageNum}, serving stale cache:`, err?.message || err);
       return { ok: true, items: hit.items, stale: true, error: err?.message };
     }
-    const fallback = await fetchHomeDiscoveryFallback(pageNum, hit);
+    const fallback = await fetchHomeDiscoveryFallback(pageNum, hit, { timeoutMs });
     if (fallback.ok && fallback.items?.length > 0) return fallback;
     return { ok: false, error: err?.message || String(err), items: [], raw: null };
   }
@@ -319,11 +339,12 @@ function shouldTrySearchFallback(primary) {
  * POST https://{host}/search — RapidAPI porn-xnxx-api (fallback when primary xnxx-api is down).
  * Body: JSON { q, page? } — override path via RAPIDAPI_PORN_XNXX_SEARCH_PATH (default /search).
  */
-async function fetchPornXnxxSearchPost(query, page = 1) {
+async function fetchPornXnxxSearchPost(query, page = 1, options = {}) {
   const { key, host } = getPornXnxxFallbackCredentials();
   if (!hasProviderKey(key)) {
     return { ok: false, items: [], raw: null };
   }
+  const timeoutMs = Math.max(500, Number(options.timeoutMs || process.env.XNXX_API_TIMEOUT_MS || 12000));
   const path =
     process.env.RAPIDAPI_PORN_XNXX_SEARCH_PATH ||
     process.env.RAPIDAPI_TRENDING_SEARCH_PATH ||
@@ -333,16 +354,25 @@ async function fetchPornXnxxSearchPost(query, page = 1) {
   const p = Math.max(1, parseInt(String(page), 10) || 1);
   const body = path.includes('/api/search') ? { q, pages: p } : { q, page: p };
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'x-rapidapi-key': key,
-        'x-rapidapi-host': host,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    let text;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: {
+          'x-rapidapi-key': key,
+          'x-rapidapi-host': host,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
     if (!res.ok) {
       return { ok: false, status: res.status, items: [], raw: text };
     }
@@ -364,11 +394,12 @@ async function fetchPornXnxxSearchPost(query, page = 1) {
  * GET https://pornhub2.p.rapidapi.com/v2/search as a final discovery fallback.
  * This keeps public browsing populated when the XNXX provider is unavailable.
  */
-async function fetchPornhub2SearchGet(query, page = 1) {
+async function fetchPornhub2SearchGet(query, page = 1, options = {}) {
   const { key, host } = getPornhub2Credentials();
   if (!hasProviderKey(key)) {
     return { ok: false, items: [], raw: null };
   }
+  const timeoutMs = Math.max(500, Number(options.timeoutMs || process.env.XNXX_API_TIMEOUT_MS || 12000));
   const q = String(query || '').trim() || 'trending';
   const p = Math.max(1, parseInt(String(page), 10) || 1);
   const url = new URL(`https://${host}/v2/search`);
@@ -378,15 +409,24 @@ async function fetchPornhub2SearchGet(query, page = 1) {
   url.searchParams.set('ordering', 'newest');
   url.searchParams.set('thumbsize', 'small');
   try {
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'x-rapidapi-key': key,
-        'x-rapidapi-host': host,
-        'Content-Type': 'application/json',
-      },
-    });
-    const text = await res.text();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    let text;
+    try {
+      res = await fetch(url.toString(), {
+        method: 'GET',
+        signal: ctrl.signal,
+        headers: {
+          'x-rapidapi-key': key,
+          'x-rapidapi-host': host,
+          'Content-Type': 'application/json',
+        },
+      });
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
     if (!res.ok) {
       return { ok: false, status: res.status, items: [], raw: text };
     }
@@ -404,19 +444,20 @@ async function fetchPornhub2SearchGet(query, page = 1) {
   }
 }
 
-async function fetchHomeDiscoveryFallback(page = 1, cacheHit = null) {
+async function fetchHomeDiscoveryFallback(page = 1, cacheHit = null, options = {}) {
   const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
   const query = String(process.env.HOME_FEED_FALLBACK_QUERY || 'trending').trim() || 'trending';
+  const timeoutMs = Math.max(500, Number(options.timeoutMs || process.env.XNXX_API_TIMEOUT_MS || 12000));
   const providers = [
-    () => fetchPornXnxxSearchPost(query, pageNum),
-    () => fetchPornhub2SearchGet(query, pageNum),
+    () => fetchPornXnxxSearchPost(query, pageNum, { timeoutMs }),
+    () => fetchPornhub2SearchGet(query, pageNum, { timeoutMs }),
   ];
 
   for (const load of providers) {
     const result = await load();
     if (result.ok && result.items?.length > 0) {
       const items = filterHomeFeedVideos(result.items.filter(Boolean));
-      bestPageCache.set(String(pageNum), { items, ts: Date.now() });
+      setBestPageCache(String(pageNum), { items, ts: Date.now() });
       console.warn(`[homeFeed] using ${result.source || 'fallback'} provider for page ${pageNum} (${items.length} items)`);
       return { ...result, ok: true, items, fallback: true };
     }
@@ -468,9 +509,19 @@ async function fetchXnxxSearchPrimary(query, page = 1, filter = 'relevance') {
 
 const searchCache = new Map();
 const searchInFlight = new Map();
+const SEARCH_CACHE_MAX_KEYS = Math.max(50, Number(process.env.SEARCH_CACHE_MAX_KEYS || 250));
 
 function searchCacheKey(q, page, filter) {
   return `${String(q).trim()}\t${page}\t${filter}`;
+}
+
+function setSearchCache(key, payload) {
+  searchCache.set(key, { ts: Date.now(), payload });
+  while (searchCache.size > SEARCH_CACHE_MAX_KEYS) {
+    const oldest = searchCache.keys().next().value;
+    if (!oldest) break;
+    searchCache.delete(oldest);
+  }
 }
 
 function getSearchCacheTtlMs() {
@@ -512,7 +563,7 @@ export async function fetchXnxxSearch(query, page = 1, filter = 'relevance') {
         const primary = await fetchXnxxSearchPrimary(q, p, f);
         if (primary.ok && primary.items?.length > 0) {
           if (ttl > 0) {
-            searchCache.set(key, { ts: Date.now(), payload: { ...primary } });
+            setSearchCache(key, { ...primary });
           }
           resolve(primary);
           return;
@@ -521,19 +572,19 @@ export async function fetchXnxxSearch(query, page = 1, filter = 'relevance') {
           const fb = await fetchPornXnxxSearchPost(q, p);
           if (fb.ok && fb.items?.length > 0) {
             if (ttl > 0) {
-              searchCache.set(key, { ts: Date.now(), payload: { ...fb } });
+              setSearchCache(key, { ...fb });
             }
             resolve(fb);
             return;
           }
           if (primary.ok && ttl > 0) {
-            searchCache.set(key, { ts: Date.now(), payload: { ...primary } });
+            setSearchCache(key, { ...primary });
           }
           resolve(primary.items?.length > 0 ? primary : fb);
           return;
         }
         if (primary.ok && ttl > 0) {
-          searchCache.set(key, { ts: Date.now(), payload: { ...primary } });
+          setSearchCache(key, { ...primary });
         }
         resolve(primary);
       } catch (e) {

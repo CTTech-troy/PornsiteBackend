@@ -156,11 +156,14 @@ export function firestoreUserDocToRow(id, u) {
   };
 }
 
-const MAX_RTDB_USER_SCAN = 8000;
-const MAX_AUTH_USER_SCAN = 10000;
-const MAX_FIRESTORE_USER_SCAN = 10000;
+const MAX_RTDB_USER_SCAN = Math.min(8000, Math.max(100, Number(process.env.ADMIN_MAX_RTDB_USER_SCAN || 2000)));
+const MAX_AUTH_USER_SCAN = Math.min(10000, Math.max(100, Number(process.env.ADMIN_MAX_AUTH_USER_SCAN || 2500)));
+const MAX_FIRESTORE_USER_SCAN = Math.min(10000, Math.max(100, Number(process.env.ADMIN_MAX_FIRESTORE_USER_SCAN || 2500)));
 const DIRECTORY_PROVIDER_TIMEOUT_MS = Math.max(3000, Number(process.env.ADMIN_DIRECTORY_PROVIDER_TIMEOUT_MS) || 12000);
 const USER_DIRECTORY_SUPABASE_WARN_MS = Math.max(30000, Number(process.env.USER_DIRECTORY_SUPABASE_WARN_MS || 120000));
+const ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN = ['true', '1', 'yes'].includes(
+  String(process.env.ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN || '').toLowerCase(),
+);
 let userDirectorySupabaseLastWarnAt = 0;
 
 function hasValue(value) {
@@ -314,7 +317,8 @@ export function firebaseAuthUserToRow(userRecord) {
   };
 }
 
-async function listFirebaseAuthRows() {
+async function listFirebaseAuthRows({ enabled = ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN } = {}) {
+  if (!enabled) return [];
   const auth = getFirebaseAuth();
   if (!auth) return [];
   const rows = [];
@@ -359,7 +363,8 @@ async function listSupabaseUserRows() {
   return rows;
 }
 
-async function listFirestoreUserRows() {
+async function listFirestoreUserRows({ enabled = ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN } = {}) {
+  if (!enabled) return [];
   const db = getFirebaseDb();
   if (!db) return [];
   const rows = [];
@@ -390,20 +395,36 @@ async function listFirestoreUserRows() {
   return rows;
 }
 
-async function listRtdbUserRows() {
+async function listRtdbUserRows({ enabled = ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN } = {}) {
+  if (!enabled) return [];
   const rtdb = getFirebaseRtdb();
   if (!rtdb) return [];
   try {
-    const snap = await withTimeout(rtdb.ref('users').once('value'), 'Firebase RTDB users scan');
-    const val = snap.val();
-    if (!val || typeof val !== 'object') return [];
-    const ids = Object.keys(val).filter(Boolean);
-    if (ids.length > MAX_RTDB_USER_SCAN) {
+    const rows = [];
+    let lastKey = null;
+    const CHUNK = 500;
+    do {
+      let query = rtdb.ref('users').orderByKey();
+      if (lastKey) query = query.startAt(lastKey);
+      const requested = CHUNK + (lastKey ? 1 : 0);
+      const snap = await withTimeout(query.limitToFirst(requested).once('value'), 'Firebase RTDB users scan');
+      const entries = [];
+      snap.forEach((child) => {
+        entries.push([child.key, child.val()]);
+        return false;
+      });
+      const pageRows = lastKey && entries[0]?.[0] === lastKey ? entries.slice(1) : entries;
+      for (const [id, value] of pageRows) {
+        if (!id || rows.length >= MAX_RTDB_USER_SCAN) break;
+        rows.push(rtdbUserToRow(id, typeof value === 'object' && value !== null ? value : {}));
+      }
+      if (entries.length < requested || !pageRows.length || rows.length >= MAX_RTDB_USER_SCAN) break;
+      lastKey = pageRows[pageRows.length - 1][0];
+    } while (lastKey);
+    if (rows.length >= MAX_RTDB_USER_SCAN) {
       console.warn('[userDirectory] RTDB user scan capped for admin list');
     }
-    return ids
-      .slice(0, MAX_RTDB_USER_SCAN)
-      .map((id) => rtdbUserToRow(id, typeof val[id] === 'object' && val[id] !== null ? val[id] : {}));
+    return rows;
   } catch (err) {
     console.warn('[userDirectory] listRtdbUserRows', err?.message || err);
     return [];
@@ -495,7 +516,10 @@ function buildDirectorySourceCounts(rows, sourceRows) {
   };
 }
 
-async function collectMergedUserDirectoryRows({ includeCreatorState = true } = {}) {
+async function collectMergedUserDirectoryRows({
+  includeCreatorState = true,
+  includeFirebaseSources = ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN,
+} = {}) {
   const supabaseRowsPromise = (async () => {
     try {
       return await listSupabaseUserRows();
@@ -507,9 +531,9 @@ async function collectMergedUserDirectoryRows({ includeCreatorState = true } = {
 
   const [supabaseRows, authRows, firestoreRows, rtdbRows] = await Promise.all([
     supabaseRowsPromise,
-    listFirebaseAuthRows(),
-    listFirestoreUserRows(),
-    listRtdbUserRows(),
+    listFirebaseAuthRows({ enabled: includeFirebaseSources }),
+    listFirestoreUserRows({ enabled: includeFirebaseSources }),
+    listRtdbUserRows({ enabled: includeFirebaseSources }),
   ]);
 
   let rows = mergeUserRowsById(authRows, firestoreRows, rtdbRows, supabaseRows);
@@ -629,7 +653,11 @@ export function applyAdminDirectoryFilters(rows, { searchTrim, statusFilter, ver
 
 export async function countFirebaseOnlyUsers() {
   try {
-    const { counts } = await collectMergedUserDirectoryRows({ includeCreatorState: false });
+    if (!ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN) return 0;
+    const { counts } = await collectMergedUserDirectoryRows({
+      includeCreatorState: false,
+      includeFirebaseSources: true,
+    });
     return counts.firebaseOnlyTotal;
   } catch (e) {
     console.warn('[userDirectory] countFirebaseOnlyUsers', e?.message || e);
@@ -643,7 +671,13 @@ export async function listFirebaseOnlyUsersForAdmin(query) {
   const { page, limit, offset } = paginateAdmin(query.page, query.limit || query.pageSize);
   const searchTrim = String(search || '').trim().replace(/,/g, ' ').slice(0, 120);
   try {
-    const { rows } = await collectMergedUserDirectoryRows({ includeCreatorState: true });
+    const includeFirebaseSources = query.includeFirebaseSources === true
+      || query.includeFirebaseSources === 'true'
+      || ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN;
+    if (!includeFirebaseSources) {
+      return { users: [], total: 0, page, limit, disabled: true };
+    }
+    const { rows } = await collectMergedUserDirectoryRows({ includeCreatorState: true, includeFirebaseSources });
     let rowsOnly = rows.filter((row) => rowHasFirebaseSource(row) && !rowHasSource(row, 'supabase'));
     rowsOnly = applyAdminDirectoryFilters(rowsOnly, { searchTrim, statusFilter, verifiedFilter });
     rowsOnly.sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime());
@@ -788,13 +822,71 @@ export async function enrichUsersFromFirebase(users) {
 export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
   const d = new Date(todayStart);
   d.setHours(0, 0, 0, 0);
-  const startMs = d.getTime();
-  const { rows, counts } = await collectMergedUserDirectoryRows({ includeCreatorState: true });
+  if (isSupabaseAvailable() && supabase) {
+    const [
+      totalUsers,
+      emailVerifiedUsers,
+      suspendedUsers,
+      bannedUsers,
+      newToday,
+      creatorsFromTable,
+      creatorsPstar,
+      creatorsChannel,
+    ] = await Promise.all([
+      safeCount(supabase.from('users').select('id', { count: 'planned', head: true })),
+      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('email_verified', true)),
+      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('suspended', true)),
+      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('banned', true)),
+      safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).gte('created_at', d.toISOString())),
+      safeCount(supabase.from('creators').select('id', { count: 'planned', head: true })),
+      safeCount(supabase.from('creators').select('id', { count: 'planned', head: true }).eq('creator_type', 'pstar')),
+      safeCount(supabase.from('creators').select('id', { count: 'planned', head: true }).eq('creator_type', 'channel')),
+    ]);
+    const creatorsTotal = creatorsFromTable || await safeCount(supabase.from('users').select('id', { count: 'planned', head: true }).eq('creator', true));
+    const counts = {
+      mergedTotal: totalUsers,
+      rawSourceTotal: totalUsers,
+      supabaseTotal: totalUsers,
+      firebaseAuthTotal: 0,
+      firestoreTotal: 0,
+      rtdbTotal: 0,
+      firebaseSourceTotal: 0,
+      firebaseOnlyTotal: 0,
+      supabaseOnlyTotal: totalUsers,
+      sharedProviderTotal: 0,
+      deduplicatedTotal: 0,
+    };
+    return {
+      totalUsers,
+      emailVerifiedUsers,
+      suspendedUsers,
+      bannedUsers,
+      newToday,
+      creatorsTotal,
+      creatorsPstar,
+      creatorsChannel,
+      firebaseOnlyUsers: 0,
+      supabaseTotal: counts.supabaseTotal,
+      firebaseAuthTotal: 0,
+      firestoreTotal: 0,
+      rtdbTotal: 0,
+      firebaseSourceTotal: 0,
+      mergedTotal: counts.mergedTotal,
+      rawSourceTotal: counts.rawSourceTotal,
+      deduplicatedTotal: 0,
+      sourceCounts: counts,
+    };
+  }
 
+  const { rows, counts } = await collectMergedUserDirectoryRows({
+    includeCreatorState: true,
+    includeFirebaseSources: ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN,
+  });
   const totalUsers = rows.length;
   const emailVerifiedUsers = rows.filter((row) => row.email_verified === true || row.emailVerified === true || row.is_verified === true).length;
   const suspendedUsers = rows.filter((row) => row.suspended === true).length;
   const bannedUsers = rows.filter((row) => row.banned === true).length;
+  const startMs = d.getTime();
   const newToday = rows.filter((row) => {
     const t = new Date(row.created_at || row.createdAt || 0).getTime();
     return Number.isFinite(t) && t >= startMs;
@@ -837,7 +929,13 @@ export async function listUsersForAdminFromDirectory(query) {
   const { page, limit, offset } = paginateAdmin(query.page, query.limit || query.pageSize || query.perPage);
   const searchTrim = String(search || '').trim().replace(/,/g, ' ').slice(0, 120);
 
-  const { rows: mergedUsers, counts } = await collectMergedUserDirectoryRows({ includeCreatorState: true });
+  const includeFirebaseSources = query.includeFirebaseSources === true
+    || query.includeFirebaseSources === 'true'
+    || ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN;
+  const { rows: mergedUsers, counts } = await collectMergedUserDirectoryRows({
+    includeCreatorState: true,
+    includeFirebaseSources,
+  });
   let allUsers = applyAdminDirectoryFilters(mergedUsers, { searchTrim, statusFilter, verifiedFilter });
 
   allUsers.sort((a, b) => {
@@ -860,7 +958,7 @@ export async function listUsersForAdminFromDirectory(query) {
     filteredTotal: total,
   };
   return {
-    source: 'supabase+firebase_auth+firebase_firestore+firebase_rtdb',
+    source: includeFirebaseSources ? 'supabase+firebase_auth+firebase_firestore+firebase_rtdb' : 'supabase',
     users,
     total,
     mergedTotal: counts.mergedTotal,

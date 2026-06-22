@@ -2,7 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { isLocalUrl, isProductionEnv, validateAppUrlConfig } from '../utils/appUrls.js';
+import {
+  isLocalUrl,
+  isProductionEnv,
+  resolveAdminFrontendUrl,
+  resolvePaymentServiceUrl,
+  resolvePublicApiUrl,
+  resolvePublicFrontendUrl,
+  validateAppUrlConfig,
+} from '../utils/appUrls.js';
 
 process.env.DOTENV_CONFIG_QUIET = process.env.DOTENV_CONFIG_QUIET || 'true';
 
@@ -48,6 +56,28 @@ function requireHttpsUrl(name, issues) {
   }
 }
 
+function setIfResolved(name, value) {
+  const resolved = String(value || '').trim().replace(/\/+$/, '');
+  if (resolved) process.env[name] = resolved;
+}
+
+function canonicalizeProductionUrls() {
+  if (!isProductionEnv()) return;
+
+  const publicFrontend = resolvePublicFrontendUrl();
+  const adminFrontend = resolveAdminFrontendUrl();
+  const publicApi = resolvePublicApiUrl();
+  const paymentService = resolvePaymentServiceUrl();
+
+  setIfResolved('FRONTEND_URL', publicFrontend);
+  setIfResolved('PUBLIC_SITE_URL', publicFrontend);
+  setIfResolved('ADMIN_FRONTEND_URL', adminFrontend);
+  setIfResolved('BACKEND_PUBLIC_URL', publicApi);
+  setIfResolved('API_PUBLIC_URL', publicApi);
+  setIfResolved('PUBLIC_API_URL', publicApi);
+  setIfResolved('PAYMENT_SERVICE_URL', paymentService);
+}
+
 function validateProductionEnv() {
   if (!isProductionEnv()) return;
   const issues = [];
@@ -73,4 +103,5 @@ function validateProductionEnv() {
 }
 
 validateAppUrlConfig();
+canonicalizeProductionUrls();
 validateProductionEnv();

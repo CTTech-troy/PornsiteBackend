@@ -10,6 +10,7 @@ import { fetchPublishedPublicVideos, fetchPublishedVideoById } from '../utils/pl
 import { writePlatformActivityEvent } from '../services/platformActivity.service.js';
 import { enqueueSearchIndex } from '../services/searchIndex.service.js';
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
+import { resolveMediaDeliveryUrl, scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
@@ -51,6 +52,36 @@ function invalidateCreatorLeaderboard() {
   try {
     invalidateTopCreatorsCache();
   } catch (_) {}
+}
+
+function safeStorageName(value, fallback = 'file') {
+  return String(value || fallback)
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/^\.+/, '')
+    .slice(0, 160) || fallback;
+}
+
+function resolveThumbnailExtension(filename, contentType) {
+  const ct = String(contentType || '').trim().toLowerCase();
+  const fromType = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'image/avif': 'avif',
+    'image/heic': 'heic',
+    'image/heif': 'heif',
+    'image/bmp': 'bmp',
+    'image/svg+xml': 'svg',
+  }[ct];
+  if (fromType) return fromType;
+
+  const ext = (safeStorageName(filename, 'thumbnail').match(/\.([a-z0-9]{2,8})$/i) || [])[1]?.toLowerCase();
+  return ext || 'jpg';
 }
 
 function normalizeClientWatermark(value) {
@@ -101,6 +132,43 @@ function applyPublicListingFilter(query) {
   return query.or('is_live.eq.true,status.eq.published');
 }
 
+async function fetchCreatorLiveLikeRows(uid) {
+  let { data, error } = await supabase
+    .from('tiktok_videos')
+    .select('likes_count')
+    .eq('user_id', uid)
+    .or('is_live.eq.true,status.eq.published');
+  if (error && isMissingColumnError(error, 'status')) {
+    ({ data, error } = await supabase
+      .from('tiktok_videos')
+      .select('likes_count')
+      .eq('user_id', uid)
+      .eq('is_live', true));
+  }
+  if (error) return [];
+  return Array.isArray(data) ? data : [];
+}
+
+async function fetchTiktokVideoWithStatusFallback(videoId, columns) {
+  let active = String(columns || '*')
+    .split(',')
+    .map((column) => column.trim())
+    .filter(Boolean);
+
+  for (let attempt = 0; attempt < Math.min(12, active.length + 1); attempt += 1) {
+    const { data, error } = await supabase
+      .from('tiktok_videos')
+      .select(active.length ? active.join(',') : '*')
+      .eq('video_id', videoId)
+      .maybeSingle();
+    if (!error) return { data, error };
+    const missing = extractMissingColumnName(error) || (isMissingColumnError(error, 'status') ? 'status' : null);
+    if (!missing || !active.includes(missing)) return { data, error };
+    active = active.filter((column) => column !== missing);
+  }
+  return supabase.from('tiktok_videos').select('*').eq('video_id', videoId).maybeSingle();
+}
+
 function mapVideo(row) {
   const resolvedDuration =
     Number(row.duration_seconds ?? row.duration ?? row.duration_sec ?? 0) || 0;
@@ -114,7 +182,11 @@ function mapVideo(row) {
     tokenPrice > 0 ||
     ['premium', 'coin_unlock'].includes(accessType) ||
     legacyCoinGate;
-  return annotatePlayableVideo({
+  const resolvedVideoUrl = resolveMediaDeliveryUrl({
+    primaryUrl: row.primary_url || row.storage_url || row.stream_url || '',
+    backupUrl: row.backup_url || '',
+  });
+  const mapped = annotatePlayableVideo({
     id:                     row.video_id,
     videoId:                row.video_id,
     userId:                 row.user_id || row.creator_id,
@@ -127,10 +199,10 @@ function mapVideo(row) {
     category:               row.main_orientation_category || '',
     tags:                   row.tags                   || [],
     allowPeopleToComment:   row.allow_people_to_comment !== false,
-    videoUrl:               row.storage_url            || row.stream_url || '',
-    video_url:              row.storage_url            || row.stream_url || '',
-    streamUrl:              row.stream_url             || row.storage_url || '',
-    stream_url:             row.stream_url             || row.storage_url || '',
+    videoUrl:               resolvedVideoUrl,
+    video_url:              resolvedVideoUrl,
+    streamUrl:              resolvedVideoUrl,
+    stream_url:             resolvedVideoUrl,
     thumbnailUrl:           row.thumbnail_url          || null,
     thumbnail_url:          row.thumbnail_url          || null,
     iframeEmbed:            '',
@@ -162,6 +234,28 @@ function mapVideo(row) {
     validationStatus:       row.validation_status,
     playbackUrl:            row.playback_url,
   });
+  if (!isPremiumContent) return mapped;
+  return {
+    ...mapped,
+    videoUrl: '',
+    video_url: '',
+    streamUrl: '',
+    stream_url: '',
+    playbackUrl: '',
+    playback_url: '',
+    videoSrc: '',
+    playbackType: 'protected_stream',
+    playback_type: 'protected_stream',
+    sourceType: 'protected_stream',
+    source_type: 'protected_stream',
+    embedAllowed: false,
+    embed_allowed: false,
+    validationStatus: 'protected_stream',
+    validation_status: 'protected_stream',
+    playable: mapped.playable === true,
+    listableInFeed: true,
+    feedVisible: true,
+  };
 }
 
 function isMissingColumnError(err, columnName) {
@@ -221,9 +315,9 @@ async function checkPremiumUploadGate(uid) {
   try {
     if (!supabase) return { allowed: true };
 
-    const [{ data: user }, { data: videos }] = await Promise.all([
+    const [{ data: user }, videos] = await Promise.all([
       supabase.from('users').select('followers, monthly_premium_uploads, premium_upload_month').eq('id', uid).maybeSingle(),
-      supabase.from('tiktok_videos').select('likes_count').eq('user_id', uid).or('is_live.eq.true,status.eq.published'),
+      fetchCreatorLiveLikeRows(uid),
     ]);
 
     const followers  = Number(user?.followers || 0);
@@ -463,14 +557,17 @@ export async function prepareUpload(req, res) {
     if (!uid)                   return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!isSupabaseConfigured()) return res.status(503).json({ success: false, message: 'Storage not configured' });
 
-    const videoFilename    = String(req.body?.videoFilename    || 'video').trim() || 'video';
-    const videoContentType = String(req.body?.videoContentType || 'video/mp4').trim();
-    const hasThumbnail     = req.body?.hasThumbnail === true || req.body?.hasThumbnail === 'true';
+    const videoFilename        = String(req.body?.videoFilename    || 'video').trim() || 'video';
+    const videoContentType     = String(req.body?.videoContentType || 'video/mp4').trim();
+    const hasThumbnail         = req.body?.hasThumbnail === true || req.body?.hasThumbnail === 'true';
+    const thumbnailFilename    = req.body?.thumbnailFilename || 'thumbnail.jpg';
+    const thumbnailContentType = req.body?.thumbnailContentType || 'image/jpeg';
 
     const timestamp  = Date.now();
     const safeName   = ensureVideoFilenameForStorage(videoFilename, videoContentType);
     const videoPath  = `${uid}/${timestamp}-${safeName}`;
-    const thumbPath  = hasThumbnail ? `${uid}/${timestamp}-thumb.jpg` : null;
+    const thumbExt   = resolveThumbnailExtension(thumbnailFilename, thumbnailContentType);
+    const thumbPath  = hasThumbnail ? `${uid}/${timestamp}-thumb.${thumbExt}` : null;
 
     const { data: videoData, error: videoErr } = await supabase.storage
       .from(VIDEO_BUCKET)
@@ -523,6 +620,7 @@ export async function publishFromStoragePath(req, res) {
       allowPeopleToComment: rawAllow, isPremiumContent: rawPremium,
       consentGiven: rawConsent, durationSeconds: rawDur,
       tokenPrice: rawTokenPrice,
+      isPublished: rawPublished,
     } = req.body || {};
 
     if (!videoPath) return res.status(400).json({ success: false, message: 'videoPath is required' });
@@ -536,6 +634,7 @@ export async function publishFromStoragePath(req, res) {
     const allowPeopleToComment   = parseBodyBoolean(rawAllow, true);
     const isPremiumContent       = rawPremium === true || rawPremium === 'true';
     const consentGiven           = rawConsent === true || rawConsent === 'true';
+    const isPublished            = rawPublished === undefined ? true : parseBodyBoolean(rawPublished, true);
     const tokenPrice             = isPremiumContent ? Math.max(0, parseInt(String(rawTokenPrice || '0'), 10) || 0) : 0;
 
     if (!mainOrientationCategory)
@@ -583,7 +682,7 @@ export async function publishFromStoragePath(req, res) {
 
     const { creatorDisplayName, creatorAvatarUrl } = await getCreatorPublicFields(uid);
     const videoId = crypto.randomUUID();
-    const isLive  = consentGiven;
+    const isLive  = consentGiven && isPublished;
     const watermarkFields = await buildWatermarkMetadata(req.body?.watermark);
 
     const insertRow = {
@@ -592,6 +691,9 @@ export async function publishFromStoragePath(req, res) {
       creator_id:               uid,
       storage_url:              videoUrl,
       stream_url:               videoUrl,
+      primary_url:              videoUrl,
+      storage_provider:         'supabase+r2',
+      replication_status:       'pending',
       title,
       description:              description || getDescriptionFallback(title),
       main_orientation_category: mainOrientationCategory,
@@ -613,6 +715,24 @@ export async function publishFromStoragePath(req, res) {
       ...watermarkFields,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
+    scheduleMediaReplication({
+      sourceTable: 'tiktok_videos',
+      sourceId: videoId,
+      mediaType: 'video',
+      primaryBucket: VIDEO_BUCKET,
+      primaryPath: videoPath,
+      primaryUrl: videoUrl,
+    });
+    if (thumbnailPath && thumbnailUrl) {
+      scheduleMediaReplication({
+        sourceTable: 'tiktok_video_thumbnails',
+        sourceId: videoId,
+        mediaType: 'image',
+        primaryBucket: IMAGE_BUCKET,
+        primaryPath: thumbnailPath,
+        primaryUrl: thumbnailUrl,
+      });
+    }
     await enqueueSearchIndex(videoId, 'upsert').catch(() => null);
     invalidateCreatorLeaderboard();
     if (isLive) {
@@ -732,6 +852,9 @@ export async function uploadAndPublish(req, res) {
       creator_id:               uid,
       storage_url:              videoUrl,
       stream_url:               videoUrl,
+      primary_url:              videoUrl,
+      storage_provider:         'supabase+r2',
+      replication_status:       'pending',
       title,
       description:              description || getDescriptionFallback(title),
       main_orientation_category: mainOrientationCategory,
@@ -753,6 +876,26 @@ export async function uploadAndPublish(req, res) {
       ...watermarkFields,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
+    scheduleMediaReplication({
+      sourceTable: 'tiktok_videos',
+      sourceId: videoId,
+      mediaType: 'video',
+      primaryBucket: VIDEO_BUCKET,
+      primaryPath: storagePath,
+      primaryUrl: videoUrl,
+      contentType,
+    });
+    if (thumbReady && thumbnailUrl) {
+      scheduleMediaReplication({
+        sourceTable: 'tiktok_video_thumbnails',
+        sourceId: videoId,
+        mediaType: 'image',
+        primaryBucket: IMAGE_BUCKET,
+        primaryPath: `${uid}/${timestamp}-thumb.jpg`,
+        primaryUrl: thumbnailUrl,
+        contentType: thumbFile.mimetype || 'image/jpeg',
+      });
+    }
     await enqueueSearchIndex(videoId, isLive ? 'upsert' : 'delete').catch(() => null);
     invalidateCreatorLeaderboard();
 
@@ -1078,7 +1221,8 @@ export async function likeVideo(req, res) {
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res);
 
-    const { data: video } = await supabase.from('tiktok_videos').select('is_live, status, likes_count').eq('video_id', videoId).maybeSingle();
+    const { data: video, error: videoError } = await fetchTiktokVideoWithStatusFallback(videoId, 'is_live, status, likes_count');
+    if (videoError) throw videoError;
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
     if (!isPubliclyListedRow(video)) return res.status(400).json({ success: false, message: 'Video is not live' });
 
@@ -1129,7 +1273,8 @@ export async function addComment(req, res) {
 
     const authorName = String(req.body?.authorName || '').trim().slice(0, 64) || 'Member';
 
-    const { data: video } = await supabase.from('tiktok_videos').select('is_live, status, allow_people_to_comment').eq('video_id', videoId).maybeSingle();
+    const { data: video, error: videoError } = await fetchTiktokVideoWithStatusFallback(videoId, 'is_live, status, allow_people_to_comment');
+    if (videoError) throw videoError;
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
     if (!isPubliclyListedRow(video)) return res.status(400).json({ success: false, message: 'Video is not live' });
     if (video.allow_people_to_comment === false) return res.status(403).json({ success: false, message: 'Comments are disabled for this video' });
@@ -1165,7 +1310,8 @@ export async function getComments(req, res) {
     const { videoId } = req.params;
     if (!isValidPlatformVideoId(videoId)) return invalidVideoIdResponse(res, { data: [] });
 
-    const { data: video } = await supabase.from('tiktok_videos').select('is_live, status').eq('video_id', videoId).maybeSingle();
+    const { data: video, error: videoError } = await fetchTiktokVideoWithStatusFallback(videoId, 'is_live, status');
+    if (videoError) throw videoError;
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
     if (!isPubliclyListedRow(video)) return res.status(404).json({ success: false, message: 'Video not available' });
 
@@ -1243,18 +1389,10 @@ async function resolvePurchasablePublicVideo(videoId) {
   if (!lookup || !isValidPlatformVideoId(lookup)) return null;
 
   if (supabase) {
-    let { data, error } = await supabase
-      .from('tiktok_videos')
-      .select('video_id, user_id, title, is_live, status, is_premium_content, token_price, coin_price, access_type, requires_membership, subscription_access, premium_visibility')
-      .eq('video_id', lookup)
-      .maybeSingle();
-    if (error && isMissingColumnError(error)) {
-      ({ data, error } = await supabase
-        .from('tiktok_videos')
-        .select('video_id, user_id, title, is_live, status, is_premium_content, token_price')
-        .eq('video_id', lookup)
-        .maybeSingle());
-    }
+    const { data, error } = await fetchTiktokVideoWithStatusFallback(
+      lookup,
+      'video_id, user_id, title, is_live, status, is_premium_content, token_price, coin_price, access_type, requires_membership, subscription_access, premium_visibility',
+    );
     if (error && !isMissingRelationError(error)) throw error;
     if (data) return normalizePurchasablePublicVideo(data, lookup);
 
@@ -1746,9 +1884,9 @@ export async function getCreatorLevel(req, res) {
     if (!uid)      return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!supabase) return res.status(503).json({ success: false, message: 'Service unavailable' });
 
-    const [{ data: user }, { data: videos }] = await Promise.all([
+    const [{ data: user }, videos] = await Promise.all([
       supabase.from('users').select('followers, monthly_premium_uploads, premium_upload_month').eq('id', uid).maybeSingle(),
-      supabase.from('tiktok_videos').select('likes_count').eq('user_id', uid).or('is_live.eq.true,status.eq.published'),
+      fetchCreatorLiveLikeRows(uid),
     ]);
 
     const followers  = Number(user?.followers || 0);

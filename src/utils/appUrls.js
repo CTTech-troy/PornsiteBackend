@@ -1,6 +1,7 @@
 const LOOPBACK_HOSTS = new Set([
   ['local', 'host'].join(''),
   ['127', '0', '0', '1'].join('.'),
+  ['0', '0', '0', '0'].join('.'),
   '[::1]',
   '::1',
 ]);
@@ -69,9 +70,10 @@ function pickUrl(candidates, { allowLocalhost = false } = {}) {
   return null;
 }
 
-const PRODUCTION_ADMIN_DEFAULT = 'https://admin.xstreamvideos.site';
-const PRODUCTION_PUBLIC_DEFAULT = 'https://xstreamvideos.site';
-const PRODUCTION_API_DEFAULT = 'https://pornsitebackend.onrender.com';
+export const PRODUCTION_ADMIN_DEFAULT = 'https://admin.xstreamvideos.site';
+export const PRODUCTION_PUBLIC_DEFAULT = 'https://xstreamvideos.site';
+export const PRODUCTION_API_DEFAULT = 'https://pornsitebackend.onrender.com';
+export const PRODUCTION_PAYMENT_SERVICE_DEFAULT = 'https://pornsite-paymentsystem-1.onrender.com';
 
 export function resolveAdminFrontendUrl() {
   const production = isProductionEnv();
@@ -116,6 +118,14 @@ export function resolvePublicApiUrl() {
   ], { allowLocalhost: !isProductionEnv() }) || PRODUCTION_API_DEFAULT;
 }
 
+export function resolvePaymentServiceUrl() {
+  return pickUrl([
+    process.env.PAYMENT_SERVICE_URL,
+    process.env.PAYMENT_API_URL,
+    PRODUCTION_PAYMENT_SERVICE_DEFAULT,
+  ], { allowLocalhost: !isProductionEnv() }) || PRODUCTION_PAYMENT_SERVICE_DEFAULT;
+}
+
 export function buildAdminInviteUrl(token) {
   const base = resolveAdminFrontendUrl();
   const safeToken = encodeURIComponent(String(token || '').trim());
@@ -156,6 +166,16 @@ export function validateAppUrlConfig({ log = console } = {}) {
     log.info?.(`[urls] Public API: ${apiUrl}`);
     if (production && isLocalUrl(apiUrl)) {
       issues.push('Public API URL resolves to a loopback URL in production.');
+    }
+  } catch (err) {
+    issues.push(err.message);
+  }
+
+  try {
+    const paymentUrl = resolvePaymentServiceUrl();
+    log.info?.(`[urls] Payment service: ${paymentUrl}`);
+    if (production && isLocalUrl(paymentUrl)) {
+      issues.push('Payment service URL resolves to a loopback URL in production.');
     }
   } catch (err) {
     issues.push(err.message);

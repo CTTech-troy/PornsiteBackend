@@ -1,5 +1,5 @@
 import { Resend } from 'resend';
-import { isValidEmail } from './emailRenderer.js';
+import { getEmailTheme, isValidEmail } from './emailRenderer.js';
 import {
   renderEmailTemplate,
   renderNotificationEmail,
@@ -79,6 +79,7 @@ async function sendTemplateEmail({
   }
 
   const from = validateFrom();
+  const theme = getEmailTheme();
   const rendered = await renderTemplateEmail(templateKey, variables, overrides);
   const { data, error } = await resend.emails.send({
     from,
@@ -86,6 +87,11 @@ async function sendTemplateEmail({
     subject: rendered.subject,
     html: rendered.html,
     text: rendered.text,
+    replyTo: theme.supportEmail,
+    tags: [
+      { name: 'template', value: templateKey },
+      { name: 'category', value: rendered.meta?.category || 'Email' },
+    ],
   });
 
   if (error) {
@@ -118,6 +124,16 @@ export async function sendVerificationEmail({ to, name, verificationUrl }) {
   });
 }
 
+export async function sendWelcomeEmail({ to, name, dashboardUrl }) {
+  return sendTemplateEmail({
+    to,
+    templateKey: 'welcome',
+    variables: { name, dashboardUrl },
+    required: false,
+    logLabel: 'welcome',
+  });
+}
+
 export async function sendPasswordResetEmail({ to, name, resetUrl }) {
   return sendTemplateEmail({
     to,
@@ -127,12 +143,42 @@ export async function sendPasswordResetEmail({ to, name, resetUrl }) {
   });
 }
 
+export async function sendLoginAlertEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'login_alert',
+    variables: payload,
+    required: false,
+    logLabel: 'login alert',
+  });
+}
+
+export async function sendAccountRecoveryEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'account_recovery',
+    variables: payload,
+    required: false,
+    logLabel: 'account recovery',
+  });
+}
+
 export async function sendAdminInviteEmail({ to, name, inviteUrl, permissions }) {
   return sendTemplateEmail({
     to,
     templateKey: 'admin_invite',
     variables: { name, inviteUrl, permissions },
     logLabel: 'admin invite',
+  });
+}
+
+export async function sendUserNotificationEmail(templateKey, payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey,
+    variables: payload,
+    required: false,
+    logLabel: `user notification ${templateKey}`,
   });
 }
 
@@ -153,6 +199,26 @@ export async function sendApplicationDecisionEmail({
   });
 }
 
+export async function sendContentApprovedEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'content_approved',
+    variables: payload,
+    required: false,
+    logLabel: 'content approved',
+  });
+}
+
+export async function sendContentRejectedEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'content_rejected',
+    variables: payload,
+    required: false,
+    logLabel: 'content rejected',
+  });
+}
+
 export async function sendAccountDeletionEmail({
   to,
   name,
@@ -164,6 +230,56 @@ export async function sendAccountDeletionEmail({
     templateKey: 'account_deletion',
     variables: { name, reason, platformUrl },
     logLabel: 'account deletion',
+  });
+}
+
+export async function sendPurchaseConfirmationEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'purchase_confirmation',
+    variables: payload,
+    required: false,
+    logLabel: 'purchase confirmation',
+  });
+}
+
+export async function sendSubscriptionConfirmationEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'subscription_confirmation',
+    variables: payload,
+    required: false,
+    logLabel: 'subscription confirmation',
+  });
+}
+
+export async function sendSubscriptionRenewalEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'subscription_renewal',
+    variables: payload,
+    required: false,
+    logLabel: 'subscription renewal',
+  });
+}
+
+export async function sendFailedPaymentEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'failed_payment',
+    variables: payload,
+    required: false,
+    logLabel: 'failed payment',
+  });
+}
+
+export async function sendRefundNotificationEmail(payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey: 'refund_notification',
+    variables: payload,
+    required: false,
+    logLabel: 'refund notification',
   });
 }
 
@@ -202,6 +318,32 @@ export async function sendContentRemovalFeedbackEmail({ to, name, requestId, mes
     variables: { name, requestId, message },
     logLabel: 'content removal feedback',
   });
+}
+
+export async function sendAdminNotificationEmail(templateKey, payload) {
+  return sendTemplateEmail({
+    to: payload?.to,
+    templateKey,
+    variables: payload,
+    required: false,
+    logLabel: `admin notification ${templateKey}`,
+  });
+}
+
+export async function sendAdminNewCreatorApplicationEmail(payload) {
+  return sendAdminNotificationEmail('admin_new_creator_application', payload);
+}
+
+export async function sendAdminNewReportEmail(payload) {
+  return sendAdminNotificationEmail('admin_new_report', payload);
+}
+
+export async function sendAdminFinancialAlertEmail(payload) {
+  return sendAdminNotificationEmail('admin_financial_alert', payload);
+}
+
+export async function sendAdminSystemAlertEmail(payload) {
+  return sendAdminNotificationEmail('admin_system_alert', payload);
 }
 
 export async function sendPayoutRequestedEmail(payload) {
@@ -317,6 +459,7 @@ export async function sendAdminEmail(to, subject, message) {
   if (!to || !isValidEmail(to)) throw new Error(`Invalid email recipient: ${to || '(empty)'}`);
   const resend = requireResend();
   const from = validateFrom();
+  const theme = getEmailTheme();
   const rendered = renderNotificationEmail({
     subject,
     heading: subject || 'Message from XstreamVideos',
@@ -331,6 +474,8 @@ export async function sendAdminEmail(to, subject, message) {
     subject: rendered.subject,
     html: rendered.html,
     text: rendered.text,
+    replyTo: theme.supportEmail,
+    tags: [{ name: 'template', value: rendered.key || 'notification' }],
   });
   if (error) throw new Error(`Resend error: ${error.message}`);
   console.log(`[email] admin message sent to ${to} (id: ${data?.id || 'n/a'})`);

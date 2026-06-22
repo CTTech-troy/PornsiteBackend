@@ -3,7 +3,8 @@ import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
 import { isMissingDbFeature } from './revenueCalculation.service.js';
 
-const TOKEN_TTL_SEC = Number(process.env.PLAYBACK_TOKEN_TTL_SEC) || 3600;
+const TOKEN_TTL_SEC = Number(process.env.PLAYBACK_TOKEN_TTL_SEC) || 300;
+const usedPlaybackTokens = new Map();
 
 function secret() {
   return process.env.PLAYBACK_TOKEN_SECRET || process.env.JWT_SECRET || 'change-playback-secret-in-production';
@@ -19,7 +20,8 @@ function fromB64url(str) {
 
 export function signPlaybackToken({ userId, videoId, ttlSec = TOKEN_TTL_SEC }) {
   const exp = Math.floor(Date.now() / 1000) + Math.max(60, ttlSec);
-  const payload = `${userId}:${videoId}:${exp}`;
+  const nonce = crypto.randomBytes(12).toString('base64url');
+  const payload = `${userId}:${videoId}:${exp}:${nonce}`;
   const sig = crypto.createHmac('sha256', secret()).update(payload).digest('base64url');
   return {
     token: `${b64url(payload)}.${sig}`,
@@ -42,6 +44,53 @@ export function verifyPlaybackToken(token, userId, videoId) {
   } catch {
     return false;
   }
+}
+
+function tokenHash(token) {
+  return crypto.createHash('sha256').update(`${secret()}:${String(token || '')}`).digest('hex');
+}
+
+function playbackTokenExpiry(token) {
+  try {
+    const [payloadPart] = String(token || '').split('.');
+    const payload = fromB64url(payloadPart).toString('utf8');
+    const [, , expStr] = payload.split(':');
+    const exp = Number(expStr);
+    return Number.isFinite(exp) ? exp : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function cleanupUsedPlaybackTokens(nowSec) {
+  for (const [hash, exp] of usedPlaybackTokens.entries()) {
+    if (!Number.isFinite(exp) || exp < nowSec) usedPlaybackTokens.delete(hash);
+  }
+}
+
+async function consumePlaybackToken(token, userId, videoId) {
+  if (!verifyPlaybackToken(token, userId, videoId)) return { ok: false, reason: 'invalid' };
+  const exp = playbackTokenExpiry(token);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!exp || exp < nowSec) return { ok: false, reason: 'expired' };
+
+  const hash = tokenHash(token);
+  if (supabase) {
+    const { error } = await supabase.from('playback_token_usage').insert({
+      token_hash: hash,
+      user_id: userId,
+      video_id: videoId,
+      expires_at: new Date(exp * 1000).toISOString(),
+    });
+    if (!error) return { ok: true };
+    if (error.code === '23505') return { ok: false, reason: 'reused' };
+    if (!isMissingDbFeature(error)) throw error;
+  }
+
+  cleanupUsedPlaybackTokens(nowSec);
+  if (usedPlaybackTokens.has(hash)) return { ok: false, reason: 'reused' };
+  usedPlaybackTokens.set(hash, exp);
+  return { ok: true };
 }
 
 async function legacyPurchaseExists(uid, videoId) {
@@ -108,8 +157,14 @@ export async function assertPremiumPlaybackAccess({ userId, videoId, creatorId, 
     throw err;
   }
 
-  if (playbackToken && verifyPlaybackToken(playbackToken, userId, videoId)) {
-    return true;
+  if (playbackToken) {
+    const consumed = await consumePlaybackToken(playbackToken, userId, videoId);
+    if (!consumed.ok) {
+      const err = new Error('Playback session expired. Please start playback again.');
+      err.statusCode = 401;
+      err.code = consumed.reason === 'reused' ? 'PLAYBACK_TOKEN_REUSED' : 'PLAYBACK_TOKEN_EXPIRED';
+      throw err;
+    }
   }
 
   const allowed = await userHasPremiumAccess(userId, videoId, creatorId);

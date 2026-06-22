@@ -12,6 +12,7 @@ import {
 import crypto from 'crypto';
 
 const CACHE_PATH = 'lives_cache';
+const LIVE_CACHE_SYNC_BATCH_SIZE = Math.min(1000, Math.max(50, Number(process.env.LIVE_CACHE_SYNC_BATCH_SIZE || 250)));
 
 function isRtdbAvailable() {
   return isFirebaseAdminReady && Boolean(getFirebaseRtdb());
@@ -120,51 +121,65 @@ async function syncCacheToSupabase() {
   let synced = 0;
   const errors = [];
   try {
-    const snap = await ref.once('value');
-    const val = snap.val();
-    if (!val || typeof val !== 'object') return { synced: 0, errors: [] };
-    const entries = Object.entries(val);
-    for (const [liveId, row] of entries) {
-      try {
-        const { error: insertErr } = await supabase.from('lives').upsert(
-          [{
-            id: row.id || liveId,
-            host_id: row.host_id,
-            status: row.status || 'live',
-            viewers_count: Number(row.viewers_count) || 0,
-            total_likes: Number(row.total_likes) || 0,
-            total_gifts_amount: Number(row.total_gifts_amount) || 0,
-            created_at: row.created_at,
-            ended_at: row.ended_at || null
-          }],
-          { onConflict: 'id' }
-        );
-        if (insertErr) throw insertErr;
-        if (row.status === 'ended' && row.host_id) {
-          const total = Number(row.total_gifts_amount || 0);
-          const companyShare = +(total * 0.3).toFixed(2);
-          const hostShare = +(total * 0.7).toFixed(2);
-          const hostId = row.host_id;
-          // Use atomic RPC for wallet credit (consistent with SEC-03 fix)
-          if (hostShare > 0) {
-            await supabase.rpc('credit_wallet', { p_owner_id: hostId, p_amount: hostShare });
+    let lastKey = null;
+    for (let batch = 0; batch < 100; batch += 1) {
+      let query = ref.orderByKey();
+      if (lastKey) query = query.startAt(lastKey);
+      const requested = LIVE_CACHE_SYNC_BATCH_SIZE + (lastKey ? 1 : 0);
+      const snap = await query.limitToFirst(requested).once('value');
+      const entries = [];
+      snap.forEach((child) => {
+        entries.push([child.key, child.val()]);
+        return false;
+      });
+      const rows = lastKey && entries[0]?.[0] === lastKey ? entries.slice(1) : entries;
+      if (!rows.length) break;
+
+      for (const [liveId, row] of rows) {
+        try {
+          const { error: insertErr } = await supabase.from('lives').upsert(
+            [{
+              id: row.id || liveId,
+              host_id: row.host_id,
+              status: row.status || 'live',
+              viewers_count: Number(row.viewers_count) || 0,
+              total_likes: Number(row.total_likes) || 0,
+              total_gifts_amount: Number(row.total_gifts_amount) || 0,
+              created_at: row.created_at,
+              ended_at: row.ended_at || null
+            }],
+            { onConflict: 'id' }
+          );
+          if (insertErr) throw insertErr;
+          if (row.status === 'ended' && row.host_id) {
+            const total = Number(row.total_gifts_amount || 0);
+            const companyShare = +(total * 0.3).toFixed(2);
+            const hostShare = +(total * 0.7).toFixed(2);
+            const hostId = row.host_id;
+            // Use atomic RPC for wallet credit (consistent with SEC-03 fix)
+            if (hostShare > 0) {
+              await supabase.rpc('credit_wallet', { p_owner_id: hostId, p_amount: hostShare });
+            }
+            if (companyShare > 0) {
+              await supabase.rpc('credit_wallet', { p_owner_id: 'company', p_amount: companyShare });
+              await supabase.from('transactions').insert([{
+                owner_id: 'company',
+                type: 'company_commission',
+                amount: companyShare,
+                balance_after: companyShare,
+                meta: { live_id: liveId, host_id: hostId }
+              }]);
+            }
           }
-          if (companyShare > 0) {
-            await supabase.rpc('credit_wallet', { p_owner_id: 'company', p_amount: companyShare });
-            await supabase.from('transactions').insert([{
-              owner_id: 'company',
-              type: 'company_commission',
-              amount: companyShare,
-              balance_after: companyShare,
-              meta: { live_id: liveId, host_id: hostId }
-            }]);
-          }
+          await ref.child(liveId).remove();
+          synced++;
+        } catch (e) {
+          errors.push({ liveId, message: e?.message || String(e) });
         }
-        await ref.child(liveId).remove();
-        synced++;
-      } catch (e) {
-        errors.push({ liveId, message: e?.message || String(e) });
       }
+
+      if (entries.length < requested) break;
+      lastKey = rows[rows.length - 1][0];
     }
     if (synced > 0) console.log('live-cache: synced', synced, 'lives to Supabase');
     if (errors.length > 0) console.warn('live-cache: sync errors', errors);

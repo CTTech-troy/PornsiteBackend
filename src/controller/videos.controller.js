@@ -3,9 +3,21 @@ import { mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 import { supabase, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
 import { filterPlayableVideos } from '../utils/videoPlaybackValidation.js';
 
+const USER_POSTS_LIMIT = Math.min(500, Math.max(25, Number(process.env.USER_POSTS_LIMIT || 250)));
+
 function videosRef() {
   const rtdb = getFirebaseRtdb();
   return rtdb ? rtdb.ref('videos') : null;
+}
+
+function isMissingColumnError(err, columnName) {
+  const msg = String(err?.message || '');
+  return (
+    err?.code === 'PGRST204' ||
+    err?.code === '42703' ||
+    (columnName && msg.includes(`'${columnName}'`)) ||
+    /schema cache|Could not find the .* column|does not exist/i.test(msg)
+  );
 }
 
 /**
@@ -26,8 +38,20 @@ export async function listPosts(req, res) {
     // 1. Fetch from Firebase RTDB
     let rtdbList = [];
     if (videosRef()) {
-      const snap = await videosRef().once('value');
-      const val = snap.val();
+      let snap = await videosRef()
+        .orderByChild('userId')
+        .equalTo(userId)
+        .limitToLast(USER_POSTS_LIMIT)
+        .once('value');
+      let val = snap.val();
+      if (!val) {
+        snap = await videosRef()
+          .orderByChild('user_id')
+          .equalTo(userId)
+          .limitToLast(USER_POSTS_LIMIT)
+          .once('value');
+        val = snap.val();
+      }
       if (val && typeof val === 'object') {
         rtdbList = Object.entries(val)
           .map(([videoId, v]) => ({
@@ -36,7 +60,7 @@ export async function listPosts(req, res) {
             id: videoId,
             source: 'rtdb'
           }))
-          .filter((row) => row.userId === userId);
+          .filter((row) => row.userId === userId || row.user_id === userId);
       }
     }
 
@@ -46,7 +70,16 @@ export async function listPosts(req, res) {
       let q = supabase.from('tiktok_videos').select('*').eq('user_id', userId);
       if (!isOwner) q = q.eq('status', 'published');
       
-      const { data, error } = await q.order('created_at', { ascending: false });
+      let { data, error } = await q.order('created_at', { ascending: false }).limit(USER_POSTS_LIMIT);
+      if (error && !isOwner && isMissingColumnError(error, 'status')) {
+        ({ data, error } = await supabase
+          .from('tiktok_videos')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('is_live', true)
+          .order('created_at', { ascending: false })
+          .limit(USER_POSTS_LIMIT));
+      }
       if (!error && data) {
         supabaseList = data.map(v => ({
           videoId: v.video_id,

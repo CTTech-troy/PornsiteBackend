@@ -12,7 +12,7 @@ const STORAGE_OPTIONS = ['supabase', 'firebase', 'cloudinary', 's3', 'mux', 'bun
 const WATERMARK_POSITION_OPTIONS = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
 const WATERMARK_ANIMATION_OPTIONS = ['none', 'pulse', 'fade'];
 const VAST_PROVIDER_OPTIONS = ['monetag', 'clickadilla', 'custom'];
-export const FEED_PAGE_SIZE_OPTIONS = [100, 200, 500];
+export const FEED_PAGE_SIZE_OPTIONS = [50, 100, 200, 500];
 
 export const VAST_PROVIDER_URLS = Object.freeze({
   monetag: 'https://s.magsrv.com/v1/vast.php?idz=5932212',
@@ -197,10 +197,10 @@ export const PLATFORM_SETTINGS_CATALOG = [
     label: 'Videos Per Feed Page',
     section: 'Discovery Feed',
     type: 'select',
-    defaultValue: '100',
+    defaultValue: '50',
     options: FEED_PAGE_SIZE_OPTIONS.map(String),
     public: true,
-    description: 'Controls public homepage, category, and search feed pagination. Minimum is 100 videos per page.',
+    description: 'Controls public homepage, category, and search feed pagination. Minimum is 50 videos per page.',
   },
 
   // Verification and creator onboarding
@@ -528,13 +528,13 @@ export async function getNumberSetting(key, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-export function normalizeFeedPageSize(value, fallback = 100) {
+export function normalizeFeedPageSize(value, fallback = 50) {
   const requested = Number(value);
-  const fallbackValue = FEED_PAGE_SIZE_OPTIONS.includes(Number(fallback)) ? Number(fallback) : 100;
+  const fallbackValue = FEED_PAGE_SIZE_OPTIONS.includes(Number(fallback)) ? Number(fallback) : 50;
   return FEED_PAGE_SIZE_OPTIONS.includes(requested) ? requested : fallbackValue;
 }
 
-export async function getFeedPageSizeSetting(fallback = 100) {
+export async function getFeedPageSizeSetting(fallback = 50) {
   const value = await getNumberSetting('feed_videos_per_page', fallback);
   return normalizeFeedPageSize(value, fallback);
 }

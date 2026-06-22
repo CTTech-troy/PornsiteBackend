@@ -6,24 +6,26 @@ const DEFAULT_FRONTEND_URL = 'https://xstreamvideos.site';
 const FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 const COLORS = {
-  background: '#F3F4F6',
+  background: '#F6F7FB',
   surface: '#FFFFFF',
-  text: '#111827',
-  muted: '#6B7280',
-  subtle: '#9CA3AF',
-  border: '#E5E7EB',
+  text: '#101828',
+  muted: '#667085',
+  subtle: '#98A2B3',
+  border: '#EAECF0',
   elevated: '#F9FAFB',
   brand: '#FF4654',
-  brandDark: '#D92D3B',
-  success: '#059669',
+  brandDark: '#E0313F',
+  brandSoft: '#FFF1F3',
+  success: '#047857',
   successBg: '#ECFDF5',
-  warning: '#B45309',
+  warning: '#B54708',
   warningBg: '#FFFBEB',
-  danger: '#DC2626',
+  danger: '#B42318',
   dangerBg: '#FEF2F2',
-  info: '#2563EB',
+  info: '#175CD3',
   infoBg: '#EFF6FF',
-  dark: '#111827',
+  dark: '#0B1020',
+  navy: '#111827',
 };
 
 const VARIANT = {
@@ -132,32 +134,61 @@ export function renderRichText(value) {
 
   if (/<\/?[a-z][\s\S]*>/i.test(raw)) {
     return sanitizeHtml(raw, {
-      allowedTags: ['p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'a', 'code'],
+      allowedTags: [
+        'h1', 'h2', 'h3', 'h4', 'p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'u',
+        'a', 'code', 'pre', 'blockquote', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'img',
+      ],
       allowedAttributes: {
         a: ['href', 'title', 'target', 'rel', 'style'],
+        img: ['src', 'alt', 'width', 'height', 'style'],
         p: ['style'],
+        h1: ['style'],
+        h2: ['style'],
+        h3: ['style'],
+        h4: ['style'],
         ul: ['style'],
         ol: ['style'],
         li: ['style'],
         code: ['style'],
+        pre: ['style'],
+        blockquote: ['style'],
+        table: ['style', 'width', 'cellpadding', 'cellspacing', 'role'],
+        th: ['style', 'align', 'width'],
+        td: ['style', 'align', 'width', 'colspan'],
       },
       allowedSchemes: ['http', 'https', 'mailto'],
       transformTags: {
+        h1: () => ({
+          tagName: 'h2',
+          attribs: { style: `margin:0 0 14px;font-size:22px;line-height:1.25;font-weight:900;color:${COLORS.text};` },
+        }),
+        h2: () => ({
+          tagName: 'h2',
+          attribs: { style: `margin:22px 0 12px;font-size:19px;line-height:1.3;font-weight:900;color:${COLORS.text};` },
+        }),
+        h3: () => ({
+          tagName: 'h3',
+          attribs: { style: `margin:20px 0 10px;font-size:16px;line-height:1.35;font-weight:800;color:${COLORS.text};` },
+        }),
+        h4: () => ({
+          tagName: 'h4',
+          attribs: { style: `margin:18px 0 8px;font-size:14px;line-height:1.4;font-weight:800;color:${COLORS.text};` },
+        }),
         p: () => ({
           tagName: 'p',
-          attribs: { style: `margin:0 0 16px;font-size:15px;line-height:1.7;color:${COLORS.text};` },
+          attribs: { style: `margin:0 0 16px;font-size:16px;line-height:1.65;color:${COLORS.text};` },
         }),
         ul: () => ({
           tagName: 'ul',
-          attribs: { style: `margin:0 0 18px 0;padding:0 0 0 22px;font-size:15px;line-height:1.7;color:${COLORS.text};` },
+          attribs: { style: `margin:0 0 18px 0;padding:0 0 0 22px;font-size:16px;line-height:1.65;color:${COLORS.text};` },
         }),
         ol: () => ({
           tagName: 'ol',
-          attribs: { style: `margin:0 0 18px 0;padding:0 0 0 22px;font-size:15px;line-height:1.7;color:${COLORS.text};` },
+          attribs: { style: `margin:0 0 18px 0;padding:0 0 0 22px;font-size:16px;line-height:1.65;color:${COLORS.text};` },
         }),
         li: () => ({
           tagName: 'li',
-          attribs: { style: `margin:0 0 8px;font-size:15px;line-height:1.7;color:${COLORS.text};` },
+          attribs: { style: `margin:0 0 8px;font-size:16px;line-height:1.65;color:${COLORS.text};` },
         }),
         a: (_tagName, attribs) => ({
           tagName: 'a',
@@ -171,6 +202,36 @@ export function renderRichText(value) {
         code: () => ({
           tagName: 'code',
           attribs: { style: 'font-family:Menlo,Consolas,monospace;background:#F3F4F6;border-radius:4px;padding:1px 4px;' },
+        }),
+        pre: () => ({
+          tagName: 'pre',
+          attribs: { style: 'margin:0 0 18px;padding:14px 16px;background:#111827;color:#F9FAFB;border-radius:12px;font-family:Menlo,Consolas,monospace;font-size:13px;line-height:1.55;overflow:auto;' },
+        }),
+        blockquote: () => ({
+          tagName: 'blockquote',
+          attribs: { style: `margin:18px 0;padding:14px 18px;border-left:4px solid ${COLORS.brand};background:${COLORS.brandSoft};border-radius:10px;color:${COLORS.text};font-size:15px;line-height:1.65;` },
+        }),
+        table: () => ({
+          tagName: 'table',
+          attribs: { width: '100%', cellpadding: '0', cellspacing: '0', role: 'presentation', style: `margin:18px 0;border:1px solid ${COLORS.border};border-radius:12px;border-collapse:separate;background:${COLORS.surface};` },
+        }),
+        th: () => ({
+          tagName: 'th',
+          attribs: { style: `padding:10px 12px;border-bottom:1px solid ${COLORS.border};font-size:12px;line-height:1.4;font-weight:800;color:${COLORS.muted};text-align:left;` },
+        }),
+        td: () => ({
+          tagName: 'td',
+          attribs: { style: `padding:10px 12px;border-bottom:1px solid ${COLORS.border};font-size:13px;line-height:1.5;color:${COLORS.text};` },
+        }),
+        img: (_tagName, attribs) => ({
+          tagName: 'img',
+          attribs: {
+            src: safeUrl(attribs.src, ''),
+            alt: escapeAttr(attribs.alt || ''),
+            width: attribs.width || undefined,
+            height: attribs.height || undefined,
+            style: 'display:block;max-width:100%;height:auto;border:0;border-radius:12px;',
+          },
         }),
       },
     });
@@ -187,14 +248,14 @@ export function renderRichText(value) {
     const inner = paragraph
       .map((line) => markdownLinkToHtml(line))
       .join('<br>');
-    parts.push(`<p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:${COLORS.text};">${inner}</p>`);
+    parts.push(`<p style="margin:0 0 16px;font-size:16px;line-height:1.65;color:${COLORS.text};">${inner}</p>`);
     paragraph = [];
   }
 
   function flushList() {
     if (!list.length) return;
     const tag = listType === 'ol' ? 'ol' : 'ul';
-    parts.push(`<${tag} style="margin:0 0 18px 0;padding:0 0 0 22px;font-size:15px;line-height:1.7;color:${COLORS.text};">${list.map((item) => `<li style="margin:0 0 8px;font-size:15px;line-height:1.7;color:${COLORS.text};">${markdownLinkToHtml(item)}</li>`).join('')}</${tag}>`);
+    parts.push(`<${tag} style="margin:0 0 18px 0;padding:0 0 0 22px;font-size:16px;line-height:1.65;color:${COLORS.text};">${list.map((item) => `<li style="margin:0 0 8px;font-size:16px;line-height:1.65;color:${COLORS.text};">${markdownLinkToHtml(item)}</li>`).join('')}</${tag}>`);
     list = [];
   }
 
@@ -227,7 +288,7 @@ export function renderRichText(value) {
 }
 
 export function paragraph(text, color = COLORS.text) {
-  return `<p style="margin:0 0 16px;font-size:15px;line-height:1.7;color:${color};">${escapeHtml(text)}</p>`;
+  return `<p style="margin:0 0 16px;font-size:16px;line-height:1.65;color:${color};">${escapeHtml(text)}</p>`;
 }
 
 export function divider() {
@@ -243,8 +304,8 @@ export function button({ label, url, variant = 'brand' }) {
   const href = safeUrl(url, '');
   if (!href) return '';
   const bg = variant === 'dark' ? COLORS.dark : COLORS.brand;
-  return `<table cellpadding="0" cellspacing="0" role="presentation" style="margin:24px auto 8px;"><tr><td align="center" bgcolor="${bg}" style="border-radius:10px;background:${bg};mso-padding-alt:14px 24px;">
-    <a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;border-radius:10px;color:#FFFFFF;font-size:15px;font-weight:800;line-height:1.2;text-decoration:none;padding:14px 24px;">${escapeHtml(label)}</a>
+  return `<table cellpadding="0" cellspacing="0" role="presentation" style="margin:30px auto 10px;" class="email-button-wrap"><tr><td align="center" bgcolor="${bg}" style="border-radius:14px;background:${bg};box-shadow:0 10px 22px rgba(255,70,84,0.20);mso-padding-alt:16px 28px;">
+    <a class="email-button" href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;min-width:220px;border-radius:14px;color:#FFFFFF;font-size:16px;font-weight:900;line-height:1.2;text-align:center;text-decoration:none;padding:16px 28px;">${escapeHtml(label)}</a>
   </td></tr></table>`;
 }
 
@@ -263,13 +324,13 @@ export function keyValueTable(rows = [], options = {}) {
   const title = options.title
     ? `<tr><td colspan="2" style="padding:0 0 12px;font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:${COLORS.muted};">${escapeHtml(options.title)}</td></tr>`
     : '';
-  return `<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:20px 0;border:1px solid ${COLORS.border};border-radius:12px;border-collapse:separate;background:${COLORS.elevated};">
+  return `<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:22px 0;border:1px solid ${COLORS.border};border-radius:14px;border-collapse:separate;background:${COLORS.elevated};">
     <tr><td style="padding:18px 20px;">
       <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
         ${title}
         ${visibleRows.map((row, index) => `<tr>
-          <td style="padding:${index === 0 ? '0' : '10px'} 12px ${index === visibleRows.length - 1 ? '0' : '10px'} 0;border-top:${index === 0 ? '0' : `1px solid ${COLORS.border}`};font-size:13px;line-height:1.5;color:${COLORS.muted};">${escapeHtml(row.label)}</td>
-          <td align="right" style="padding:${index === 0 ? '0' : '10px'} 0 ${index === visibleRows.length - 1 ? '0' : '10px'} 12px;border-top:${index === 0 ? '0' : `1px solid ${COLORS.border}`};font-size:13px;line-height:1.5;color:${COLORS.text};font-weight:700;word-break:break-word;">${escapeHtml(row.value)}</td>
+          <td style="padding:${index === 0 ? '0' : '11px'} 12px ${index === visibleRows.length - 1 ? '0' : '11px'} 0;border-top:${index === 0 ? '0' : `1px solid ${COLORS.border}`};font-size:13px;line-height:1.5;color:${COLORS.muted};">${escapeHtml(row.label)}</td>
+          <td align="right" style="padding:${index === 0 ? '0' : '11px'} 0 ${index === visibleRows.length - 1 ? '0' : '11px'} 12px;border-top:${index === 0 ? '0' : `1px solid ${COLORS.border}`};font-size:13px;line-height:1.5;color:${COLORS.text};font-weight:800;word-break:break-word;">${escapeHtml(row.value)}</td>
         </tr>`).join('')}
       </table>
     </td></tr>
@@ -278,8 +339,8 @@ export function keyValueTable(rows = [], options = {}) {
 
 export function noticeCard({ title, body, variant = 'neutral' }) {
   const tone = VARIANT[variant] || VARIANT.neutral;
-  return `<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:20px 0;border:1px solid ${tone.border};border-left:4px solid ${tone.color};border-radius:12px;border-collapse:separate;background:${tone.bg};">
-    <tr><td style="padding:16px 18px;">
+  return `<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:22px 0;border:1px solid ${tone.border};border-left:4px solid ${tone.color};border-radius:14px;border-collapse:separate;background:${tone.bg};">
+    <tr><td style="padding:17px 19px;">
       ${title ? `<p style="margin:0 0 8px;font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:${tone.color};">${escapeHtml(title)}</p>` : ''}
       <div style="font-size:14px;line-height:1.7;color:${COLORS.text};">${renderRichText(body)}</div>
     </td></tr>
@@ -363,11 +424,18 @@ export function renderEmailLayout({
   <meta name="supported-color-schemes" content="light dark">
   <title>${escapeHtml(title || heading || theme.brandName)}</title>
   <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; }
     @media only screen and (max-width: 620px) {
       .email-shell { width: 100% !important; }
       .email-pad { padding-left: 22px !important; padding-right: 22px !important; }
+      .email-hero { padding-top: 26px !important; padding-bottom: 22px !important; }
       .email-title { font-size: 24px !important; line-height: 1.2 !important; }
-      .email-wrap { padding: 20px 10px !important; }
+      .email-wrap { padding: 18px 10px !important; }
+      .email-button-wrap { width: 100% !important; }
+      .email-button { box-sizing: border-box !important; min-width: 0 !important; width: 100% !important; }
+      .email-brand-text { text-align: left !important; padding-left: 12px !important; }
     }
   </style>
 </head>
@@ -376,27 +444,35 @@ export function renderEmailLayout({
   <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:${COLORS.background};margin:0;padding:0;">
     <tr>
       <td align="center" class="email-wrap" style="padding:36px 14px;">
-        <table width="600" cellpadding="0" cellspacing="0" role="presentation" class="email-shell" style="width:600px;max-width:600px;background:${COLORS.surface};border:1px solid ${COLORS.border};border-radius:16px;border-collapse:separate;overflow:hidden;">
+        <table width="640" cellpadding="0" cellspacing="0" role="presentation" class="email-shell" style="width:640px;max-width:640px;border-collapse:separate;">
           <tr>
-            <td class="email-pad" style="background:${COLORS.dark};padding:28px 34px;text-align:left;">
+            <td style="padding:0 0 14px;text-align:center;">
+              <a href="${safeUrl(theme.frontUrl, DEFAULT_FRONTEND_URL)}" target="_blank" rel="noopener noreferrer" style="color:${COLORS.brand};font-size:12px;font-weight:800;letter-spacing:0.10em;text-decoration:none;text-transform:uppercase;">${escapeHtml(theme.brandName)}</a>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:${COLORS.surface};border:1px solid ${COLORS.border};border-radius:22px;box-shadow:0 22px 60px rgba(16,24,40,0.08);overflow:hidden;">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:separate;">
+          <tr>
+            <td class="email-pad email-hero" style="background:${COLORS.dark};padding:30px 38px;text-align:left;">
               <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
                 <tr>
-                  <td style="vertical-align:middle;">
-                    ${logoUrl ? `<img src="${logoUrl}" width="40" height="40" alt="${escapeAttr(theme.brandName)}" style="display:block;border:0;outline:none;text-decoration:none;border-radius:10px;max-width:40px;max-height:40px;">` : `<div style="width:40px;height:40px;border-radius:10px;background:${COLORS.brand};color:#FFFFFF;font-size:18px;font-weight:900;line-height:40px;text-align:center;">${escapeHtml(theme.brandName.slice(0, 1))}</div>`}
+                  <td width="52" style="width:52px;vertical-align:middle;">
+                    ${logoUrl ? `<img src="${logoUrl}" width="52" height="52" alt="${escapeAttr(theme.brandName)}" style="display:block;border:0;outline:none;text-decoration:none;border-radius:14px;max-width:52px;max-height:52px;">` : `<div style="width:52px;height:52px;border-radius:14px;background:${COLORS.brand};color:#FFFFFF;font-size:24px;font-weight:900;line-height:52px;text-align:center;">${escapeHtml(theme.brandName.slice(0, 1))}</div>`}
                   </td>
-                  <td align="right" style="vertical-align:middle;">
-                    <div style="font-size:20px;line-height:1.2;font-weight:900;letter-spacing:-0.3px;color:#FFFFFF;">${escapeHtml(theme.brandName)}</div>
-                    ${eyebrow ? `<div style="margin-top:6px;font-size:11px;line-height:1.4;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#D1D5DB;">${escapeHtml(eyebrow)}</div>` : ''}
+                  <td align="right" class="email-brand-text" style="vertical-align:middle;">
+                    <div style="font-size:22px;line-height:1.18;font-weight:900;letter-spacing:-0.3px;color:#FFFFFF;">${escapeHtml(theme.brandName)}</div>
+                    ${eyebrow ? `<div style="margin-top:7px;font-size:11px;line-height:1.4;font-weight:900;letter-spacing:0.14em;text-transform:uppercase;color:#FEE2E2;">${escapeHtml(eyebrow)}</div>` : ''}
                   </td>
                 </tr>
               </table>
             </td>
           </tr>
           <tr>
-            <td class="email-pad" style="padding:34px 34px 8px;background:${COLORS.surface};">
+            <td class="email-pad" style="padding:38px 38px 8px;background:${COLORS.surface};">
               ${badge?.label ? `<div style="margin:0 0 18px;">${statusBadge(badge.label, badge.variant)}</div>` : ''}
-              <h1 class="email-title" style="margin:0 0 14px;font-size:28px;line-height:1.18;font-weight:900;letter-spacing:-0.4px;color:${COLORS.text};">${escapeHtml(heading || title || '')}</h1>
-              ${intro ? `<div style="margin:0 0 20px;">${renderRichText(intro)}</div>` : ''}
+              <h1 class="email-title" style="margin:0 0 14px;font-size:30px;line-height:1.15;font-weight:900;letter-spacing:-0.4px;color:${COLORS.text};">${escapeHtml(heading || title || '')}</h1>
+              ${intro ? `<div style="margin:0 0 22px;">${renderRichText(intro)}</div>` : ''}
               ${bodyHtml}
               ${ctaHtml}
               ${secondaryCtaHtml}
@@ -404,20 +480,23 @@ export function renderEmailLayout({
             </td>
           </tr>
           <tr>
-            <td class="email-pad" style="padding:18px 34px 34px;background:${COLORS.surface};">
+            <td class="email-pad" style="padding:18px 38px 38px;background:${COLORS.surface};">
               ${noticeCard({
-                title: 'Support',
-                body: `Questions? Reply to this email or contact [${theme.supportEmail}](${supportHref}).`,
+                title: 'Need help?',
+                body: `Reply to this email or contact [${theme.supportEmail}](${supportHref}). We will never ask for your password or payment details by email.`,
                 variant: 'neutral',
               })}
               ${footerNote ? `<p style="margin:0 0 12px;font-size:12px;line-height:1.6;color:${COLORS.subtle};">${escapeHtml(footerNote)}</p>` : ''}
             </td>
           </tr>
           <tr>
-            <td class="email-pad" style="background:${COLORS.elevated};border-top:1px solid ${COLORS.border};padding:22px 34px;text-align:center;">
+            <td class="email-pad" style="background:${COLORS.elevated};border-top:1px solid ${COLORS.border};padding:24px 38px;text-align:center;">
               <p style="margin:0 0 6px;font-size:12px;line-height:1.6;color:${COLORS.muted};font-weight:700;">${escapeHtml(theme.brandName)}</p>
               <p style="margin:0;font-size:12px;line-height:1.6;color:${COLORS.subtle};">&copy; ${year} ${escapeHtml(theme.brandName)}. All rights reserved.${theme.address ? ` ${escapeHtml(theme.address)}` : ''}</p>
               ${templateKey ? `<p style="margin:8px 0 0;font-size:10px;line-height:1.4;color:#CBD5E1;">${escapeHtml(templateKey)}</p>` : ''}
+            </td>
+          </tr>
+        </table>
             </td>
           </tr>
         </table>
