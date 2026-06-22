@@ -59,7 +59,7 @@ function dateKey(value) {
 
 function startOfDay(value = new Date()) {
   const d = safeDate(value);
-  d.setHours(0, 0, 0, 0);
+  d.setUTCHours(0, 0, 0, 0);
   return d;
 }
 
@@ -163,7 +163,7 @@ function resolveRange(query = {}) {
   } else {
     from = addDays(to, -29);
   }
-  from.setHours(0, 0, 0, 0);
+  from.setUTCHours(0, 0, 0, 0);
   return { from, to, range };
 }
 
@@ -271,7 +271,7 @@ async function selectRows(table, columns, { from, to, column = 'created_at', ord
 async function countRows(table, configure = (query) => query) {
   if (!supabase) return 0;
   try {
-    const query = configure(supabase.from(table).select('id', { count: 'planned', head: true }));
+    const query = configure(supabase.from(table).select('id', { count: 'exact', head: true }));
     const { count, error } = await withTimeout(
       query,
       ANALYTICS_QUERY_TIMEOUT_MS,
@@ -343,15 +343,24 @@ function countFromContentRange(value) {
   return Number.isFinite(count) ? count : 0;
 }
 
-async function supabaseRestCount(table, filters = {}) {
+function restFilterEntries(filters = {}) {
+  if (Array.isArray(filters)) return filters;
+  return Object.entries(filters || {});
+}
+
+async function supabaseRestCount(table, filters = {}, select = '*') {
   const { url, key } = supabaseRestConfig();
   if (!url || !key || typeof fetch !== 'function') return 0;
 
   const endpoint = new URL(`${url}/rest/v1/${encodeURIComponent(table)}`);
-  endpoint.searchParams.set('select', 'id');
+  endpoint.searchParams.set('select', select || '*');
   endpoint.searchParams.set('limit', '1');
-  for (const [name, value] of Object.entries(filters || {})) {
-    if (value !== undefined && value !== null && value !== '') endpoint.searchParams.set(name, String(value));
+  for (const [name, value] of restFilterEntries(filters)) {
+    if (value === undefined || value === null || value === '') continue;
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      if (item !== undefined && item !== null && item !== '') endpoint.searchParams.append(name, String(item));
+    }
   }
 
   const controller = new AbortController();
@@ -362,7 +371,7 @@ async function supabaseRestCount(table, filters = {}) {
       headers: {
         apikey: key,
         Authorization: `Bearer ${key}`,
-        Prefer: 'count=planned',
+        Prefer: 'count=exact',
       },
       signal: controller.signal,
     });
@@ -375,84 +384,318 @@ async function supabaseRestCount(table, filters = {}) {
   }
 }
 
+function bucketRows(rows, granularity, dateField = 'created_at', valueFn = () => 1) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const rawDate = row?.[dateField];
+    if (!rawDate) continue;
+    const key = bucketKey(rawDate, granularity);
+    map.set(key, (map.get(key) || 0) + toNumber(valueFn(row)));
+  }
+  return map;
+}
+
+function exactCountSince(table, from, to, extraFilters = []) {
+  return supabaseRestCount(table, [
+    ['created_at', `gte.${from.toISOString()}`],
+    ['created_at', `lte.${to.toISOString()}`],
+    ...extraFilters,
+  ]);
+}
+
 async function getFastAnalyticsOverview(query = {}) {
   const overview = createEmptyAnalyticsOverview(
     query,
-    'Using fast platform counts while detailed BI rollups warm up.',
+    'Using live platform records while detailed BI rollups warm up.',
   );
-  const { from, to } = resolveRange(query);
+  const { from, to, range } = resolveRange(query);
+  const granularity = normalizeGranularity(query.granularity, range);
   const today = startOfDay(new Date());
   const weekStart = addDays(today, -6);
   const monthStart = addDays(today, -29);
+  const lastHour = new Date(Date.now() - 60 * 60 * 1000);
 
-  const counts = await withTimeout(
+  const [
+    userDir,
+    pendingApplications,
+    fallbackViewRows,
+    fallbackLikeRows,
+    fallbackCommentRows,
+    playbackRows,
+    userRows,
+    revenueRows,
+    exactCounts,
+    topCounters,
+    topCreators,
+    realtime,
+    visitorAnalyticsRows,
+    sessionAnalyticsRows,
+  ] = await Promise.all([
+    runSoon(() => getTimedUserDirectoryStats(today)),
+    runSoon(() => withTimeout(
+      countCreatorApplicationsByStatus('pending'),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      0,
+      'pending creator application count',
+    )),
+    runSoon(() => selectRows('tiktok_video_views', 'id,video_id,user_id,session_id,viewer_key,fingerprint,qualified_watch_seconds,progress_ratio,created_at', { from, to })),
+    runSoon(() => selectRows('tiktok_video_likes', 'video_id,user_id,created_at', { from, to })),
+    runSoon(() => selectRows('tiktok_video_comments', 'id,video_id,user_id,created_at', { from, to })),
+    runSoon(() => selectRows('playback_performance_events', 'video_id,user_id,fingerprint,event_type,current_time,duration,created_at', { from, to })),
+    runSoon(() => selectRows('users', 'id,created_at', { from, to })),
+    runSoon(() => withTimeout(
+      fetchRevenueFacts({ from, to }),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      [],
+      'fast revenue facts',
+    )),
+    runSoon(() => withTimeout(
     Promise.all([
-      runSoon(() => supabaseRestCount('users')),
-      runSoon(() => supabaseRestCount('users', { created_at: `gte.${today.toISOString()}` })),
-      runSoon(() => supabaseRestCount('users', { creator: 'is.true' })),
-      runSoon(() => supabaseRestCount('users', { verified: 'eq.approved' })),
-      runSoon(() => supabaseRestCount('creator_applications', { status: 'eq.pending' })),
-      runSoon(() => supabaseRestCount('creators_main_application', { status: 'eq.pending' })),
-      runSoon(() => supabaseRestCount('tiktok_video_views', {
-        created_at: `gte.${from.toISOString()}`,
-        created_at_lte: undefined,
-      })),
-      runSoon(() => supabaseRestCount('tiktok_video_views', { created_at: `gte.${today.toISOString()}` })),
-      runSoon(() => supabaseRestCount('tiktok_video_views', { created_at: `gte.${weekStart.toISOString()}` })),
-      runSoon(() => supabaseRestCount('tiktok_video_views', { created_at: `gte.${monthStart.toISOString()}` })),
-      runSoon(() => supabaseRestCount('tiktok_video_likes', {
-        created_at: `gte.${from.toISOString()}`,
-      })),
-      runSoon(() => supabaseRestCount('tiktok_video_comments', {
-        created_at: `gte.${from.toISOString()}`,
-      })),
+      exactCountSince('tiktok_video_views', from, to),
+      exactCountSince('tiktok_video_views', today, to),
+      exactCountSince('tiktok_video_views', weekStart, to),
+      exactCountSince('tiktok_video_views', monthStart, to),
+      exactCountSince('tiktok_video_likes', from, to),
+      exactCountSince('tiktok_video_comments', from, to),
+      exactCountSince('tiktok_video_views', lastHour, to),
+      exactCountSince('tiktok_video_likes', lastHour, to),
+      exactCountSince('tiktok_video_comments', lastHour, to),
     ]),
     Math.min(ANALYTICS_OVERVIEW_HARD_TIMEOUT_MS, 6000),
     [],
     'fast analytics counts',
-  );
+    )),
+    runSoon(() => Promise.all([
+      withTimeout(fetchTopVideoCounters('views_count', 10), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'fast most viewed videos'),
+      withTimeout(fetchTopVideoCounters('likes_count', 10), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'fast most liked videos'),
+      withTimeout(fetchTopVideoCounters('comments_count', 10), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'fast most commented videos'),
+    ])),
+    runSoon(() => withTimeout(fetchTopCreators(), OPTIONAL_AGGREGATE_TIMEOUT_MS, [], 'fast top creators')),
+    runSoon(() => withTimeout(getRealtimeAnalytics(), OPTIONAL_AGGREGATE_TIMEOUT_MS, emptyRealtimeAnalytics(), 'fast realtime analytics')),
+    runSoon(() => withTimeout(
+      selectRows('analytics_visitors', 'session_id,user_id,country,device_type,browser,os,traffic_source,referrer,visit_date,created_at', { from, to, column: 'visit_date', order: 'visit_date', dateOnly: true }),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      [],
+      'fast analytics visitor records',
+    )),
+    runSoon(() => withTimeout(
+      selectRows('analytics_sessions', 'session_id,user_id,start_time,last_activity,duration_seconds', { from, to, column: 'start_time', order: 'start_time' }),
+      OPTIONAL_AGGREGATE_TIMEOUT_MS,
+      [],
+      'fast analytics session records',
+    )),
+  ]);
 
   const [
-    totalUsers = 0,
-    newToday = 0,
-    creatorsByFlag = 0,
-    creatorsByApproved = 0,
-    pendingLegacy = 0,
-    pendingCurrent = 0,
     viewsInRange = 0,
     viewsToday = 0,
     viewsWeek = 0,
     viewsMonth = 0,
     likesInRange = 0,
     commentsInRange = 0,
-  ] = Array.isArray(counts) ? counts : [];
+    viewsLastHour = 0,
+    likesLastHour = 0,
+    commentsLastHour = 0,
+  ] = Array.isArray(exactCounts) ? exactCounts : [];
 
-  const totalCreators = Math.max(creatorsByFlag, creatorsByApproved);
-  const timeline = (overview.charts?.timeline || []).map((row, index, rows) => {
-    const isLast = index === rows.length - 1;
+  const viewBucketCounts = bucketRows(fallbackViewRows, granularity, 'created_at');
+  const likeBucketCounts = bucketRows(fallbackLikeRows, granularity, 'created_at');
+  const commentBucketCounts = bucketRows(fallbackCommentRows, granularity, 'created_at');
+  const signupBucketCounts = bucketRows(userRows, granularity, 'created_at');
+  const watchBucketCounts = bucketRows(
+    fallbackViewRows,
+    granularity,
+    'created_at',
+    (row) => positiveInt(row.qualified_watch_seconds, 0, 86400 * 2),
+  );
+  const playbackWatchBucketCounts = bucketRows(
+    playbackRows.filter((row) => ['watch_progress', 'ended'].includes(row.event_type)),
+    granularity,
+    'created_at',
+    (row) => positiveInt(row.current_time, 0, 86400 * 2),
+  );
+  const revenueBucketRows = bucketRows(revenueRows, granularity, 'createdAt', (row) => row.platformRevenue);
+  const grossRevenueBucketRows = bucketRows(revenueRows, granularity, 'createdAt', (row) => row.grossRevenue);
+  const premiumRevenueBucketRows = bucketRows(revenueRows, granularity, 'createdAt', (row) => row.premiumRevenue);
+  const adRevenueBucketRows = bucketRows(revenueRows, granularity, 'createdAt', (row) => row.adRevenue);
+  const creatorRevenueBucketRows = bucketRows(revenueRows, granularity, 'createdAt', (row) => row.creatorRevenue);
+  const revenueTransactionBucketRows = bucketRows(revenueRows, granularity, 'createdAt');
+
+  const visitorKeys = fallbackViewRows.map((row) => row.user_id || row.viewer_key || row.session_id || row.fingerprint);
+  const totalVisitorsInRange = uniqueCount(fallbackViewRows, (row) => row.user_id || row.viewer_key || row.session_id || row.fingerprint) || viewsInRange;
+  const visitorsToday = uniqueCount(
+    fallbackViewRows.filter((row) => new Date(row.created_at) >= today),
+    (row) => row.user_id || row.viewer_key || row.session_id || row.fingerprint,
+  ) || viewsToday;
+  const visitorsWeek = uniqueCount(
+    fallbackViewRows.filter((row) => new Date(row.created_at) >= weekStart),
+    (row) => row.user_id || row.viewer_key || row.session_id || row.fingerprint,
+  ) || viewsWeek;
+  const visitorsMonth = uniqueCount(
+    fallbackViewRows.filter((row) => new Date(row.created_at) >= monthStart),
+    (row) => row.user_id || row.viewer_key || row.session_id || row.fingerprint,
+  ) || viewsMonth;
+
+  const activeUsersToday = uniqueCount(
+    fallbackViewRows.filter((row) => new Date(row.created_at) >= today),
+    (row) => row.user_id,
+  );
+  const activeUsersWeek = uniqueCount(
+    fallbackViewRows.filter((row) => new Date(row.created_at) >= weekStart),
+    (row) => row.user_id,
+  );
+  const activeUsersMonth = uniqueCount(
+    fallbackViewRows.filter((row) => new Date(row.created_at) >= monthStart),
+    (row) => row.user_id,
+  );
+
+  const totalWatchTime = fallbackViewRows.reduce((sum, row) => sum + positiveInt(row.qualified_watch_seconds, 0, 86400 * 2), 0)
+    || playbackRows
+      .filter((row) => ['watch_progress', 'ended'].includes(row.event_type))
+      .reduce((sum, row) => sum + positiveInt(row.current_time, 0, 86400 * 2), 0);
+  const watchToday = fallbackViewRows
+    .filter((row) => new Date(row.created_at) >= today)
+    .reduce((sum, row) => sum + positiveInt(row.qualified_watch_seconds, 0, 86400 * 2), 0);
+  const watchWeek = fallbackViewRows
+    .filter((row) => new Date(row.created_at) >= weekStart)
+    .reduce((sum, row) => sum + positiveInt(row.qualified_watch_seconds, 0, 86400 * 2), 0);
+  const watchMonth = fallbackViewRows
+    .filter((row) => new Date(row.created_at) >= monthStart)
+    .reduce((sum, row) => sum + positiveInt(row.qualified_watch_seconds, 0, 86400 * 2), 0);
+
+  const revenueTotal = revenueTotals(revenueRows);
+  const revenueToday = revenueTotals(revenueRowsSince(revenueRows, today));
+  const revenueWeek = revenueTotals(revenueRowsSince(revenueRows, weekStart));
+  const revenueMonth = revenueTotals(revenueRowsSince(revenueRows, monthStart));
+
+  // Returning visitors: users who appeared on more than one distinct date (accurate using analytics_visitors)
+  // Fallback to view-based heuristic if the analytics table is empty
+  let effectiveReturning;
+  if (visitorAnalyticsRows.length) {
+    const firstSeenDate = new Map();
+    const returningSet = new Set();
+    for (const row of visitorAnalyticsRows) {
+      const key = row.user_id || row.session_id;
+      if (!key) continue;
+      if (firstSeenDate.has(key)) {
+        if (firstSeenDate.get(key) !== row.visit_date) returningSet.add(key);
+      } else {
+        firstSeenDate.set(key, row.visit_date);
+      }
+    }
+    effectiveReturning = returningSet.size;
+  } else {
+    // Heuristic: keys that appear on multiple distinct day-buckets
+    const keyDates = new Map();
+    for (const row of fallbackViewRows) {
+      const key = row.user_id || row.viewer_key || row.session_id || row.fingerprint;
+      if (!key) continue;
+      const day = dateKey(row.created_at);
+      if (!keyDates.has(key)) {
+        keyDates.set(key, day);
+      } else if (keyDates.get(key) !== day) {
+        keyDates.set(key, '__returning__');
+      }
+    }
+    effectiveReturning = Array.from(keyDates.values()).filter((v) => v === '__returning__').length;
+  }
+
+  // Better total visitor counts from analytics_visitors if available
+  const analyticsVisitorTotal = uniqueCount(visitorAnalyticsRows, (row) => row.user_id || row.session_id);
+  const analyticsVisitorToday = uniqueCount(
+    visitorAnalyticsRows.filter((row) => row.visit_date >= dateKey(today)),
+    (row) => row.user_id || row.session_id,
+  );
+  const analyticsVisitorWeek = uniqueCount(
+    visitorAnalyticsRows.filter((row) => row.visit_date >= dateKey(weekStart)),
+    (row) => row.user_id || row.session_id,
+  );
+  const analyticsVisitorMonth = uniqueCount(
+    visitorAnalyticsRows.filter((row) => row.visit_date >= dateKey(monthStart)),
+    (row) => row.user_id || row.session_id,
+  );
+  const effectiveVisitorTotal = analyticsVisitorTotal || totalVisitorsInRange;
+  const effectiveVisitorToday = analyticsVisitorToday || visitorsToday;
+  const effectiveVisitorWeek = analyticsVisitorWeek || visitorsWeek;
+  const effectiveVisitorMonth = analyticsVisitorMonth || visitorsMonth;
+
+  // Session duration stats from analytics_sessions
+  const sessionDurations = sessionAnalyticsRows
+    .map((row) => positiveInt(row.duration_seconds, 0, 86400 * 7))
+    .filter((n) => n > 0);
+  const avgSessionDuration = sessionDurations.length
+    ? Math.round(sessionDurations.reduce((sum, n) => sum + n, 0) / sessionDurations.length)
+    : 0;
+  const longestSessionToday = maxSessionDurationSince(sessionAnalyticsRows, today);
+  const longestSessionWeek = maxSessionDurationSince(sessionAnalyticsRows, weekStart);
+  const longestSessionMonth = maxSessionDurationSince(sessionAnalyticsRows, monthStart);
+
+  const totalUsers = userDir?.mergedTotal || userDir?.totalUsers || 0;
+  const totalCreators = userDir?.creatorsTotal || 0;
+  const [mostViewed = [], mostLiked = [], mostCommented = []] = Array.isArray(topCounters) ? topCounters : [];
+
+  const timeline = makeBuckets(from, to, granularity).map((row, index, rows) => {
+    const previous = rows[index - 1] || {};
+    const watchTime = toNumber(watchBucketCounts.get(row.date)) || toNumber(playbackWatchBucketCounts.get(row.date));
+    const revenue = toNumber(revenueBucketRows.get(row.date));
+    const views = toNumber(viewBucketCounts.get(row.date));
+    const visitors = views
+      ? uniqueCount(
+          fallbackViewRows.filter((item) => bucketKey(item.created_at, granularity) === row.date),
+          (item) => item.user_id || item.viewer_key || item.session_id || item.fingerprint,
+        ) || views
+      : 0;
     return {
       ...row,
-      visitors: isLast ? viewsInRange : row.visitors,
-      activeUsers: isLast ? viewsMonth : row.activeUsers,
-      registrations: isLast ? newToday : row.registrations,
-      views: isLast ? viewsInRange : row.views,
-      visitorGrowth: 0,
-      viewGrowth: 0,
-      watchGrowth: 0,
-      revenueGrowth: 0,
+      visitors,
+      activeUsers: uniqueCount(
+        fallbackViewRows.filter((item) => bucketKey(item.created_at, granularity) === row.date),
+        (item) => item.user_id,
+      ),
+      registrations: toNumber(signupBucketCounts.get(row.date)),
+      views,
+      watchTime,
+      likes: toNumber(likeBucketCounts.get(row.date)),
+      comments: toNumber(commentBucketCounts.get(row.date)),
+      revenue,
+      grossRevenue: toNumber(grossRevenueBucketRows.get(row.date)),
+      premiumRevenue: toNumber(premiumRevenueBucketRows.get(row.date)),
+      adRevenue: toNumber(adRevenueBucketRows.get(row.date)),
+      creatorRevenue: toNumber(creatorRevenueBucketRows.get(row.date)),
+      revenueTransactions: toNumber(revenueTransactionBucketRows.get(row.date)),
+      visitorGrowth: growthPct(visitors, previous.visitors || 0),
+      viewGrowth: growthPct(views, previous.views || 0),
+      watchGrowth: growthPct(watchTime, previous.watchTime || 0),
+      revenueGrowth: growthPct(revenue, previous.revenue || 0),
     };
   });
+
+  const fastEngagementRows = [
+    ...fallbackLikeRows.map((row) => ({ ...row, event_type: 'like' })),
+    ...fallbackCommentRows.map((row) => ({ ...row, event_type: 'comment' })),
+  ];
+  const videoPerformance = await withTimeout(
+    enrichVideos(aggregateVideoPerformance([], fallbackViewRows, fastEngagementRows, TOP_LIMIT)),
+    OPTIONAL_AGGREGATE_TIMEOUT_MS,
+    [],
+    'fast video performance enrichment',
+  );
+  const highestWatchTime = [...videoPerformance].sort((a, b) => b.watchTime - a.watchTime).slice(0, 10);
+  const fastestGrowing = [...videoPerformance].sort((a, b) => b.views - a.views).slice(0, 10);
 
   return {
     ...overview,
     degraded: true,
-    message: 'Using fast platform counts while detailed BI rollups warm up.',
+    message: 'Using live platform records while detailed BI rollups warm up.',
+    range: { from: from.toISOString(), to: to.toISOString(), granularity },
+    generatedAt: new Date().toISOString(),
     sources: {
-      analyticsFacts: false,
-      fallbackTables: ['users', 'creator_applications', 'creators_main_application', 'tiktok_video_views', 'tiktok_video_likes', 'tiktok_video_comments'],
-      revenueFacts: false,
+      analyticsFacts: visitorAnalyticsRows.length > 0 || sessionAnalyticsRows.length > 0,
+      fallbackTables: ['users', 'creator_applications', 'creators_main_application', 'tiktok_video_views', 'tiktok_video_likes', 'tiktok_video_comments', 'playback_performance_events'],
+      revenueFacts: revenueRows.length > 0,
       degraded: true,
       fastCounts: true,
+      userDirectory: userDir?.sourceCounts || null,
     },
     charts: {
       ...overview.charts,
@@ -460,30 +703,51 @@ async function getFastAnalyticsOverview(query = {}) {
       visitors: timeline.map((row) => ({ date: row.date, visitors: row.visitors, growth: row.visitorGrowth || 0 })),
       users: timeline.map((row) => ({ date: row.date, activeUsers: row.activeUsers, registrations: row.registrations })),
       views: timeline.map((row) => ({ date: row.date, views: row.views, growth: row.viewGrowth || 0 })),
+      watchTime: timeline.map((row) => ({ date: row.date, watchTime: row.watchTime, growth: row.watchGrowth || 0 })),
+      revenue: timeline.map((row) => ({
+        date: row.date,
+        revenue: row.revenue,
+        grossRevenue: row.grossRevenue,
+        premiumRevenue: row.premiumRevenue,
+        adRevenue: row.adRevenue,
+        creatorRevenue: row.creatorRevenue,
+        transactions: row.revenueTransactions,
+        growth: row.revenueGrowth || 0,
+      })),
+      revenueSources: summarizeNamed(revenueRows, (row) => row.source, (row) => row.platformRevenue || row.grossRevenue),
+      trafficSources: summarizeNamed(visitorAnalyticsRows, (row) => row.traffic_source || classifyTrafficSource(row.referrer)),
+      deviceTypes: summarizeNamed(visitorAnalyticsRows, (row) => row.device_type),
+      browsers: summarizeNamed(visitorAnalyticsRows, (row) => row.browser),
+      operatingSystems: summarizeNamed(visitorAnalyticsRows, (row) => row.os),
+      countries: summarizeNamed(visitorAnalyticsRows, (row) => row.country),
+      cities: summarizeNamed(visitorAnalyticsRows, (row) => row.city),
+      regions: summarizeNamed(visitorAnalyticsRows, (row) => row.region),
     },
     kpis: {
       ...overview.kpis,
       visitors: {
         ...overview.kpis.visitors,
-        total: viewsInRange,
-        today: viewsToday,
-        week: viewsWeek,
-        month: viewsMonth,
+        total: effectiveVisitorTotal,
+        today: effectiveVisitorToday,
+        week: effectiveVisitorWeek,
+        month: effectiveVisitorMonth,
+        returning: effectiveReturning,
+        newVisitors: Math.max(0, effectiveVisitorTotal - effectiveReturning),
       },
       users: {
         ...overview.kpis.users,
         total: totalUsers,
-        activeToday: viewsToday,
-        activeWeek: viewsWeek,
-        activeMonth: viewsMonth,
-        newSignups: newToday,
+        activeToday: activeUsersToday,
+        activeWeek: activeUsersWeek,
+        activeMonth: activeUsersMonth,
+        newSignups: userDir?.newToday || userRows.filter((row) => new Date(row.created_at) >= today).length,
       },
       creators: {
         ...overview.kpis.creators,
         total: totalCreators,
-        pstars: totalCreators,
-        channels: 0,
-        pendingApplications: pendingLegacy + pendingCurrent,
+        pstars: userDir?.creatorsPstar || 0,
+        channels: userDir?.creatorsChannel || 0,
+        pendingApplications,
       },
       videos: {
         ...overview.kpis.videos,
@@ -497,12 +761,66 @@ async function getFastAnalyticsOverview(query = {}) {
         likes: likesInRange,
         comments: commentsInRange,
       },
+      watchTime: {
+        ...overview.kpis.watchTime,
+        total: totalWatchTime,
+        today: watchToday,
+        week: watchWeek,
+        month: watchMonth,
+        averagePerUser: activeUsersMonth ? Math.round(watchMonth / activeUsersMonth) : 0,
+        averagePerVideo: viewsInRange ? Math.round(totalWatchTime / viewsInRange) : 0,
+      },
+      sessions: {
+        averageDuration: avgSessionDuration,
+        longestToday: longestSessionToday,
+        longestWeek: longestSessionWeek,
+        longestMonth: longestSessionMonth,
+        totalTimeSpent: sessionDurations.reduce((sum, n) => sum + n, 0),
+      },
+      revenue: {
+        ...overview.kpis.revenue,
+        total: Math.round(revenueTotal.platform * 100) / 100,
+        gross: Math.round(revenueTotal.gross * 100) / 100,
+        externalPayments: Math.round(revenueTotal.external * 100) / 100,
+        premiumContent: Math.round(revenueTotal.premium * 100) / 100,
+        adRevenue: Math.round(revenueTotal.ads * 100) / 100,
+        creatorRevenue: Math.round(revenueTotal.creator * 100) / 100,
+        today: Math.round(revenueToday.platform * 100) / 100,
+        week: Math.round(revenueWeek.platform * 100) / 100,
+        month: Math.round(revenueMonth.platform * 100) / 100,
+        transactions: revenueTotal.transactions,
+      },
     },
+    videoPerformance,
+    content: {
+      ...overview.content,
+      mostViewed: mostViewed.length ? mostViewed : videoPerformance.slice(0, 10),
+      mostLiked,
+      mostCommented,
+      highestWatchTime,
+      fastestGrowing,
+      topCreators,
+    },
+    realtime: {
+      ...realtime,
+      newViewsLast60Minutes: realtime?.newViewsLast60Minutes || viewsLastHour,
+      newLikesLast60Minutes: realtime?.newLikesLast60Minutes || likesLastHour,
+      newCommentsLast60Minutes: realtime?.newCommentsLast60Minutes || commentsLastHour,
+    },
+    activityFeed: buildActivityFeed({
+      analyticsViews: fallbackViewRows
+        .filter((row) => new Date(row.created_at) >= lastHour)
+        .map((row) => ({
+          ...row,
+          watch_duration: row.qualified_watch_seconds || 0,
+        })),
+      engagementRows: fastEngagementRows.filter((row) => new Date(row.created_at) >= lastHour),
+      userRows: userRows.filter((row) => new Date(row.created_at) >= lastHour),
+    }),
   };
 }
 
 async function getTimedUserDirectoryStats(today) {
-  if (!supabase) return null;
   try {
     const { getUserDirectoryAggregateStats } = await import('./userDirectoryService.js');
     return await withTimeout(
@@ -1322,7 +1640,7 @@ async function buildAnalyticsOverview(query = {}) {
     runSoon(() => selectRows('analytics_daily_summary', 'date,visitors,active_users,views,watch_time,likes,comments,shares,registrations,sessions,avg_session_seconds', { from, to, column: 'date', order: 'date', dateOnly: true })),
     runSoon(() => selectRows('tiktok_video_views', 'id,video_id,user_id,session_id,viewer_key,fingerprint,qualified_watch_seconds,progress_ratio,created_at', { from, to })),
     runSoon(() => selectRows('playback_performance_events', 'video_id,user_id,fingerprint,event_type,current_time,duration,created_at', { from, to })),
-    runSoon(() => selectRows('users', 'id,email,created_at', { from, to })),
+    runSoon(() => selectRows('users', 'id,created_at', { from, to })),
     runSoon(() => getTimedUserDirectoryStats(today)),
     runSoon(() => fetchRevenueFacts({ from, to })),
     runSoon(() => withTimeout(
@@ -1645,7 +1963,7 @@ export async function getRealtimeAnalytics() {
     selectRows('analytics_video_views', 'video_id,user_id,session_id,created_at', { from: lastHour, limit: 5000 }),
     selectRows('playback_performance_events', 'video_id,user_id,fingerprint,event_type,created_at', { from: activeSince, limit: 5000 }),
     selectRows('analytics_engagement', 'event_type,video_id,creator_id,user_id,created_at', { from: lastHour, limit: 5000 }),
-    selectRows('users', 'id,email,created_at', { from: today, limit: 5000 }),
+    selectRows('users', 'id,created_at', { from: today, limit: 5000 }),
     fetchRevenueFacts({ from: lastHour }),
   ]);
   const recentRevenueTotals = revenueTotals(recentRevenue);

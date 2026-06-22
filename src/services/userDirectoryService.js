@@ -162,9 +162,22 @@ const MAX_FIRESTORE_USER_SCAN = Math.min(10000, Math.max(100, Number(process.env
 const PLATFORM_CREATOR_TYPE_SCAN_LIMIT = Math.min(20000, Math.max(100, Number(process.env.ADMIN_PLATFORM_CREATOR_TYPE_SCAN_LIMIT || 5000)));
 const DIRECTORY_PROVIDER_TIMEOUT_MS = Math.max(3000, Number(process.env.ADMIN_DIRECTORY_PROVIDER_TIMEOUT_MS) || 12000);
 const USER_DIRECTORY_SUPABASE_WARN_MS = Math.max(30000, Number(process.env.USER_DIRECTORY_SUPABASE_WARN_MS || 120000));
-const ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN = ['true', '1', 'yes'].includes(
-  String(process.env.ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN || '').toLowerCase(),
-);
+function firebaseDirectoryScanEnabled() {
+  const raw = String(process.env.ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN || '').trim().toLowerCase();
+  if (raw) return ['true', '1', 'yes', 'on'].includes(raw);
+  return Boolean(
+    String(process.env.FIREBASE_DATABASE_URL || '').trim()
+    && (
+      String(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '').trim()
+      || String(process.env.FIREBASE_SERVICE_ACCOUNT || '').trim()
+      || String(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '').trim()
+      || String(process.env.FIREBASE_SERVICE_ACCOUNT_PATH || '').trim()
+      || String(process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim()
+    )
+  );
+}
+
+const ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN = firebaseDirectoryScanEnabled();
 let userDirectorySupabaseLastWarnAt = 0;
 
 function hasValue(value) {
@@ -842,8 +855,8 @@ export async function enrichUsersFromFirebase(users) {
 
 export async function getUserDirectoryAggregateStats(todayStart = new Date()) {
   const d = new Date(todayStart);
-  d.setHours(0, 0, 0, 0);
-  if (isSupabaseAvailable() && supabase) {
+  d.setUTCHours(0, 0, 0, 0);
+  if (isSupabaseAvailable() && supabase && !ADMIN_ENABLE_FIREBASE_DIRECTORY_SCAN) {
     const [
       totalUsers,
       emailVerifiedUsers,
