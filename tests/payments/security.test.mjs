@@ -26,6 +26,12 @@ async function importTestDataFilter(caseName) {
   return import(url.href);
 }
 
+async function importFlutterwaveKeys(caseName) {
+  const url = new URL('../../src/utils/flutterwaveKeys.js', import.meta.url);
+  url.searchParams.set('case', `${caseName}-${Date.now()}-${Math.random()}`);
+  return import(url.href);
+}
+
 function disableSupabaseEnv() {
   const previous = {
     SUPABASE_URL: process.env.SUPABASE_URL,
@@ -210,12 +216,34 @@ test('flutterwave webhook accepts legacy verif-hash secret', async () => {
   }
 });
 
+test('flutterwave production mode rejects test secret keys', async () => {
+  const { assertFlutterwaveLiveSecretForProduction, flutterwaveSecretMode } = await importFlutterwaveKeys('flutterwave-live-keys');
+
+  assert.equal(flutterwaveSecretMode('FLWSECK_TEST-unit'), 'test');
+  assert.equal(flutterwaveSecretMode('FLWSECK-live-key'), 'live');
+  assert.throws(
+    () => assertFlutterwaveLiveSecretForProduction('FLWSECK_TEST-unit', { NODE_ENV: 'production' }),
+    /Flutterwave TEST key/,
+  );
+  assert.doesNotThrow(
+    () => assertFlutterwaveLiveSecretForProduction('FLWSECK-live-key', { NODE_ENV: 'production' }),
+  );
+});
+
 test('flutterwave verification supports hosted checkout tx_ref fallback', async () => {
   const prev = {
+    nodeEnv: process.env.NODE_ENV,
+    appEnv: process.env.APP_ENV,
+    aspnetEnv: process.env.ASPNETCORE_ENVIRONMENT,
+    dotnetEnv: process.env.DOTNET_ENVIRONMENT,
     secretKey: process.env.FLUTTERWAVE_SECRET_KEY,
   };
   const previousFetch = globalThis.fetch;
   const calls = [];
+  process.env.NODE_ENV = 'development';
+  process.env.APP_ENV = 'development';
+  process.env.ASPNETCORE_ENVIRONMENT = 'Development';
+  process.env.DOTNET_ENVIRONMENT = 'Development';
   process.env.FLUTTERWAVE_SECRET_KEY = 'FLWSECK_TEST-unit';
   globalThis.fetch = async (url) => {
     calls.push(String(url));
@@ -253,6 +281,10 @@ test('flutterwave verification supports hosted checkout tx_ref fallback', async 
     assert.equal(calls[0], 'https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=intent_key_123');
   } finally {
     globalThis.fetch = previousFetch;
+    restoreEnv('NODE_ENV', prev.nodeEnv);
+    restoreEnv('APP_ENV', prev.appEnv);
+    restoreEnv('ASPNETCORE_ENVIRONMENT', prev.aspnetEnv);
+    restoreEnv('DOTNET_ENVIRONMENT', prev.dotnetEnv);
     restoreEnv('FLUTTERWAVE_SECRET_KEY', prev.secretKey);
   }
 });

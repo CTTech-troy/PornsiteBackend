@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { getRawRequestBody } from '../middleware/qstashSignature.js';
+import { assertFlutterwaveLiveSecretForProduction } from '../utils/flutterwaveKeys.js';
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || '';
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
@@ -246,6 +247,7 @@ async function verifyStripe(reference) {
 
 async function verifyFlutterwave(reference, orderKey = null) {
   if (!FLUTTERWAVE_SECRET_KEY) throw new Error('Flutterwave verification is not configured');
+  assertFlutterwaveLiveSecretForProduction(FLUTTERWAVE_SECRET_KEY);
 
   const tryVerify = async (url) => {
     const res = await fetch(url, {

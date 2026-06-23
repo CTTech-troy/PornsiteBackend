@@ -8,6 +8,7 @@ import {
   writeFinanceActivityEvent,
   writeFinancePayoutLog,
 } from './financePayoutEvents.service.js';
+import { assertFlutterwaveLiveSecretForProduction } from '../utils/flutterwaveKeys.js';
 
 const FLUTTERWAVE_BASE_URL = 'https://api.flutterwave.com/v3';
 
@@ -18,6 +19,7 @@ function flutterwaveHeaders() {
     err.code = 'FLUTTERWAVE_NOT_CONFIGURED';
     throw err;
   }
+  assertFlutterwaveLiveSecretForProduction(key);
   return {
     Authorization: `Bearer ${key}`,
     'Content-Type': 'application/json',
