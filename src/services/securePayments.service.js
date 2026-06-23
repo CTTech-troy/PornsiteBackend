@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { supabase, isConfigured } from '../config/supabase.js';
 import { upstashRedis } from '../config/redis.js';
 import { createCheckout } from './paymentServiceClient.js';
-import { getCoinPackage, fulfillCoinPurchase } from './coinWallet.service.js';
+import { getCoinPackage, fulfillCoinPurchase, resolveCoinPackageCheckoutMoney } from './coinWallet.service.js';
 import {
   normalizeWebhookPayload,
   verifyProviderTransaction,
@@ -112,24 +112,28 @@ async function officialProduct({ productType, productId, countryCode }) {
   if (type !== 'coins') {
     throw new Error('Only coin purchases are supported.');
   }
-  const isNigeria = String(countryCode || '').toUpperCase() === 'NG';
-  const currency = isNigeria ? 'NGN' : 'USD';
-
   const pkg = await getCoinPackage(productId);
   if (!pkg || (!pkg.isActive && process.env.NODE_ENV === 'production')) {
     throw new Error(`Unknown coin package: ${productId}`);
   }
-  const amount = isNigeria
-    ? (pkg.priceNgn || Math.round(pkg.priceUsd * NGN_PER_USD))
-    : (pkg.priceUsd || money((pkg.priceNgn || 0) / NGN_PER_USD));
+  const checkoutMoney = resolveCoinPackageCheckoutMoney(pkg, countryCode);
   return {
     productType: 'coins',
     productId: pkg.id,
     productName: pkg.name || `${pkg.totalCoins} Coins`,
-    amount: money(amount),
-    currency,
+    amount: money(checkoutMoney.amount),
+    currency: checkoutMoney.currency,
+    requestedAmount: checkoutMoney.requestedAmount,
+    requestedCurrency: checkoutMoney.requestedCurrency,
+    checkoutCurrencyFallback: checkoutMoney.fallbackApplied,
+    checkoutCurrencyFallbackReason: checkoutMoney.fallbackReason,
     officialUnits: Number(pkg.totalCoins || pkg.coins || 0),
-    snapshot: pkg,
+    snapshot: {
+      ...pkg,
+      requestedAmount: checkoutMoney.requestedAmount,
+      requestedCurrency: checkoutMoney.requestedCurrency,
+      checkoutCurrencyFallback: checkoutMoney.fallbackReason,
+    },
   };
 }
 
@@ -289,6 +293,9 @@ export async function createSecurePaymentSession({
           ipCountry,
           provider: gatewayPlan.primary,
           gatewayPlan,
+          requestedAmount: product.requestedAmount,
+          requestedCurrency: product.requestedCurrency,
+          checkoutCurrencyFallback: product.checkoutCurrencyFallbackReason || '',
         },
       })
       .select('id')
@@ -358,6 +365,9 @@ export async function createSecurePaymentSession({
         idempotencyKey,
         officialAmount: product.amount,
         officialUnits: product.officialUnits,
+        requestedAmount: product.requestedAmount,
+        requestedCurrency: product.requestedCurrency,
+        checkoutCurrencyFallback: product.checkoutCurrencyFallbackReason || '',
         userId,
         productType: product.productType,
         productId: product.productId,
@@ -409,6 +419,9 @@ export async function createSecurePaymentSession({
           retryCount: checkout.retryCount || 0,
           attemptedProviders: checkout.attemptedProviders || [],
           gatewayLog: checkout.gatewayLog || null,
+          requestedAmount: product.requestedAmount,
+          requestedCurrency: product.requestedCurrency,
+          checkoutCurrencyFallback: product.checkoutCurrencyFallbackReason || '',
         },
         updated_at: new Date().toISOString(),
       })

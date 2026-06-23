@@ -12,6 +12,7 @@ export const STATIC_COIN_PACKAGES = [
 ];
 
 const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
+const FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT = Math.max(0, Number(process.env.FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT || 2.99));
 
 function isMissingDbFeature(error) {
   const message = String(error?.message || '');
@@ -32,6 +33,34 @@ function toNumber(value, fallback = 0) {
 
 function roundCoins(value) {
   return Math.round(toNumber(value) * 100) / 100;
+}
+
+function roundMoney(value) {
+  return Math.round(toNumber(value) * 100) / 100;
+}
+
+export function resolveCoinPackageCheckoutMoney(pkg, countryCode = 'US') {
+  const normalizedCountry = String(countryCode || '').trim().toUpperCase();
+  const isNigeria = normalizedCountry === 'NG';
+  const usdAmount = pkg.priceUsd || roundMoney((pkg.priceNgn || 0) / NGN_PER_USD);
+  const ngnAmount = pkg.priceNgn || Math.round((pkg.priceUsd || 0) * NGN_PER_USD);
+  const requestedCurrency = isNigeria ? 'NGN' : 'USD';
+  const requestedAmount = isNigeria ? ngnAmount : usdAmount;
+  const fallbackApplied = !isNigeria
+    && FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT > 0
+    && usdAmount > 0
+    && usdAmount < FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT
+    && ngnAmount > 0;
+  const currency = isNigeria || fallbackApplied ? 'NGN' : 'USD';
+  const amount = currency === 'NGN' ? ngnAmount : usdAmount;
+  return {
+    amount: currency === 'NGN' ? Math.round(amount) : roundMoney(amount),
+    currency,
+    requestedAmount: requestedCurrency === 'NGN' ? Math.round(requestedAmount) : roundMoney(requestedAmount),
+    requestedCurrency,
+    fallbackApplied,
+    fallbackReason: fallbackApplied ? 'low_usd_to_ngn' : '',
+  };
 }
 
 function assertPaymentAmountMatches({ paidAmount, expectedAmount, currency, productId, allowOverpayment = false }) {
@@ -258,11 +287,9 @@ export async function createCoinPurchaseCheckout({
     throw new Error(`Unknown coin package: ${packageId}`);
   }
 
-  const isNigeria = String(countryCode || '').trim().toUpperCase() === 'NG';
-  const amount = isNigeria
-    ? (pkg.priceNgn || Math.round(pkg.priceUsd * NGN_PER_USD))
-    : (pkg.priceUsd || Math.round((pkg.priceNgn || 0) / NGN_PER_USD * 100) / 100);
-  const currency = isNigeria ? 'NGN' : 'USD';
+  const checkoutMoney = resolveCoinPackageCheckoutMoney(pkg, countryCode);
+  const amount = checkoutMoney.amount;
+  const currency = checkoutMoney.currency;
   const orderKey = `${userId}_${pkg.id}_${Date.now()}`;
   const idempotencyKey = `coins:${userId}:${pkg.id}:${Date.now()}:${randomUUID()}`;
 
@@ -279,7 +306,12 @@ export async function createCoinPurchaseCheckout({
         currency,
         status: 'pending',
         idempotency_key: idempotencyKey,
-        metadata: { package: pkg },
+        metadata: {
+          package: pkg,
+          requestedAmount: checkoutMoney.requestedAmount,
+          requestedCurrency: checkoutMoney.requestedCurrency,
+          checkoutCurrencyFallback: checkoutMoney.fallbackReason,
+        },
       })
       .select('id')
       .maybeSingle();
@@ -304,6 +336,9 @@ export async function createCoinPurchaseCheckout({
       idempotencyKey,
       coins: pkg.coins,
       bonusCoins: pkg.bonusCoins,
+      requestedAmount: checkoutMoney.requestedAmount,
+      requestedCurrency: checkoutMoney.requestedCurrency,
+      checkoutCurrencyFallback: checkoutMoney.fallbackReason,
     },
   });
 
@@ -368,6 +403,8 @@ export async function fulfillCoinPurchase({
       packageId: pkg.id,
       coins: pkg.coins,
       bonusCoins: pkg.bonusCoins,
+      priceUsd: pkg.priceUsd,
+      priceNgn: pkg.priceNgn,
       amountPaid,
       currency,
     },

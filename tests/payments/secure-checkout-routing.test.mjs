@@ -131,7 +131,7 @@ test('local payment-service URLs are normalized to HTTP before checkout', async 
   }
 });
 
-test('US coin checkout sends Flutterwave as the primary provider', async () => {
+test('low-value US coin checkout sends Flutterwave with NGN fallback', async () => {
   const envSnapshot = prepareIsolatedPaymentEnv();
   const fetchMock = installCheckoutFetch();
   try {
@@ -152,8 +152,39 @@ test('US coin checkout sends Flutterwave as the primary provider', async () => {
     assert.equal('primaryProvider' in fetchMock.calls[0].body, false);
     assert.equal('fallbackProvider' in fetchMock.calls[0].body, false);
     assert.equal(fetchMock.calls[0].body.countryCode, 'US');
-    assert.equal(fetchMock.calls[0].body.currency, 'USD');
+    assert.equal(fetchMock.calls[0].body.currency, 'NGN');
+    assert.equal(fetchMock.calls[0].body.amount, 125);
+    assert.equal(fetchMock.calls[0].body.metadata.requestedCurrency, 'USD');
+    assert.equal(fetchMock.calls[0].body.metadata.requestedAmount, 0.09);
+    assert.equal(fetchMock.calls[0].body.metadata.checkoutCurrencyFallback, 'low_usd_to_ngn');
     assert.equal(fetchMock.calls[0].body.inlineCheckout, true);
+  } finally {
+    fetchMock.restore();
+    restoreEnv(envSnapshot);
+  }
+});
+
+test('larger US coin checkout stays in USD', async () => {
+  const envSnapshot = prepareIsolatedPaymentEnv();
+  const fetchMock = installCheckoutFetch();
+  try {
+    const { createSecurePaymentSession } = await importSecurePayments('larger-us-coin-routing');
+    const checkout = await createSecurePaymentSession({
+      userId: 'user_test_us_large',
+      productType: 'coins',
+      productId: 'tokens_100',
+      countryCode: 'US',
+      customerEmail: 'member@example.test',
+      customerName: 'Member',
+      req: mockReq(),
+    });
+
+    assert.equal(checkout.provider, 'flutterwave');
+    assert.equal(fetchMock.calls.length, 1);
+    assert.equal(fetchMock.calls[0].body.countryCode, 'US');
+    assert.equal(fetchMock.calls[0].body.currency, 'USD');
+    assert.equal(fetchMock.calls[0].body.amount, 2.99);
+    assert.equal(fetchMock.calls[0].body.metadata.checkoutCurrencyFallback, '');
   } finally {
     fetchMock.restore();
     restoreEnv(envSnapshot);
