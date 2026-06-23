@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { isMissingDbFeature } from './revenueCalculation.service.js';
 import { countCreatorApplicationsByStatus } from './userDirectoryService.js';
+import { isTestDataRecord } from '../utils/testDataFilter.js';
 
 const configuredRawLimit = Number(process.env.ANALYTICS_RAW_QUERY_LIMIT || 5000);
 const configuredRawLimitMax = Number(process.env.ANALYTICS_RAW_QUERY_MAX || 5000);
@@ -1200,7 +1201,7 @@ async function fetchRevenueFacts({ from, to } = {}) {
     premiumPurchases,
     adEvents,
   ] = await Promise.all([
-    selectRows('payment_intents', 'id,product_type,product_id,status,official_amount,currency,provider,created_at,updated_at', { from, to, limit: RAW_LIMIT }),
+    selectRows('payment_intents', 'id,user_id,product_type,product_id,status,official_amount,currency,provider,provider_reference,intent_key,metadata,product_snapshot,created_at,updated_at', { from, to, limit: RAW_LIMIT }),
     selectRows('user_memberships', 'id,plan_id,status,payment_provider,amount_paid_usd,created_at,started_at', { from, to, column: 'created_at', order: 'created_at', limit: RAW_LIMIT }),
     selectRows('coin_wallet_transactions', 'id,type,amount,status,provider,source_type,source_id,metadata,created_at', { from, to, limit: RAW_LIMIT }),
     selectRows('premium_video_purchases', 'id,video_id,video_title,creator_id,purchase_amount_usd,creator_revenue_usd,platform_revenue_usd,payment_provider,access_status,refund_status,purchased_at', { from, to, column: 'purchased_at', order: 'purchased_at', limit: RAW_LIMIT }),
@@ -1209,6 +1210,7 @@ async function fetchRevenueFacts({ from, to } = {}) {
 
   const rows = [];
   for (const row of paymentIntents) {
+    if (isTestDataRecord(row)) continue;
     if (!successfulRevenueStatus(row.status)) continue;
     const amountUsd = amountToUsd(row.official_amount, row.currency);
     if (amountUsd <= 0) continue;
@@ -1229,6 +1231,7 @@ async function fetchRevenueFacts({ from, to } = {}) {
   const hasMembershipPayments = rows.some((row) => row.source === 'Memberships');
   if (!hasMembershipPayments) {
     for (const row of memberships) {
+      if (isTestDataRecord(row)) continue;
       if (!successfulRevenueStatus(row.status)) continue;
       const amountUsd = positiveMoney(row.amount_paid_usd);
       if (amountUsd <= 0) continue;
@@ -1250,6 +1253,7 @@ async function fetchRevenueFacts({ from, to } = {}) {
   const hasCoinPayments = rows.some((row) => row.source === 'Coin purchases');
   if (!hasCoinPayments) {
     for (const row of coinTransactions) {
+      if (isTestDataRecord(row)) continue;
       if (String(row.type || '').toLowerCase() !== 'purchase' || !successfulRevenueStatus(row.status)) continue;
       const metadata = metadataObject(row.metadata);
       const amountUsd = amountToUsd(positiveMoney(metadata.amountPaid, metadata.amount_paid, metadata.priceUsd, metadata.price_usd, metadata.paymentAmount, metadata.payment_amount), metadata.currency || 'USD');
@@ -1270,6 +1274,7 @@ async function fetchRevenueFacts({ from, to } = {}) {
   }
 
   for (const row of premiumPurchases) {
+    if (isTestDataRecord(row)) continue;
     if (!successfulRevenueStatus(row.access_status) || String(row.refund_status || 'none').toLowerCase() === 'completed') continue;
     const gross = positiveMoney(row.purchase_amount_usd);
     const platform = positiveMoney(row.platform_revenue_usd, gross - toNumber(row.creator_revenue_usd));
@@ -1290,6 +1295,7 @@ async function fetchRevenueFacts({ from, to } = {}) {
   }
 
   for (const row of adEvents) {
+    if (isTestDataRecord(row)) continue;
     const revenue = positiveMoney(row.revenue_usd);
     if (revenue <= 0) continue;
     rows.push({

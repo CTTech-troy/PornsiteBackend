@@ -20,6 +20,12 @@ async function importPaymentHistory(caseName) {
   return import(url.href);
 }
 
+async function importTestDataFilter(caseName) {
+  const url = new URL('../../src/utils/testDataFilter.js', import.meta.url);
+  url.searchParams.set('case', `${caseName}-${Date.now()}-${Math.random()}`);
+  return import(url.href);
+}
+
 function disableSupabaseEnv() {
   const previous = {
     SUPABASE_URL: process.env.SUPABASE_URL,
@@ -113,6 +119,26 @@ test('payment history uses paid amount for coin purchases instead of credited co
     restoreEnv('SUPABASE_URL', prevSupabase.SUPABASE_URL);
     restoreEnv('SUPABASE_SERVICE_ROLE_KEY', prevSupabase.SUPABASE_SERVICE_ROLE_KEY);
   }
+});
+
+test('admin payment reporting excludes clearly marked test records', async () => {
+  const { isTestDataRecord, filterProductionRecords } = await importTestDataFilter('payment-test-filter');
+  const productionPayment = {
+    id: 'pay_123',
+    user_id: 'user_456',
+    provider_reference: 'flw_live_123',
+    metadata: { amountPaid: 0.09, currency: 'USD' },
+  };
+  const testPayment = {
+    id: 'pay_test_123',
+    user_id: 'user_test_us',
+    provider_reference: 'sandbox-payment-1',
+    metadata: { isTest: true, amountPaid: 35, currency: 'USD' },
+  };
+
+  assert.equal(isTestDataRecord(productionPayment), false);
+  assert.equal(isTestDataRecord(testPayment), true);
+  assert.deepEqual(filterProductionRecords([productionPayment, testPayment]), [productionPayment]);
 });
 
 test('resolveGiftCost rejects unknown gift id', async () => {

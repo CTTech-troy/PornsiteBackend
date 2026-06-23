@@ -25,6 +25,7 @@ import {
   sendPaymentSuccessEmail,
 } from './emailService.js';
 import { writeFinanceActivityEvent } from './financePayoutEvents.service.js';
+import { filterProductionRecords } from '../utils/testDataFilter.js';
 
 const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
 const INTENT_TTL_MINUTES = Number(process.env.PAYMENT_INTENT_TTL_MINUTES || 30);
@@ -1083,7 +1084,7 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
 
   try {
     const [statsRes, fraudRes] = await Promise.all([
-      supabase.from('payment_intents').select('amount,status,currency,provider,product_type'),
+      supabase.from('payment_intents').select('id,user_id,product_type,product_id,amount,status,currency,provider,provider_reference,intent_key,metadata,product_snapshot'),
       supabase.from('fraud_detection_logs').select('id', { count: 'exact', head: true }).eq('status', 'open'),
     ]);
     if (statsRes.error && !isMissingDbFeature(statsRes.error)) throw statsRes.error;
@@ -1110,7 +1111,7 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
       throw error;
     }
 
-    const all = statsRes.data || [];
+    const all = filterProductionRecords(statsRes.data || []);
     const revenueUsd = (row) => {
       const amount = Number(row.amount || 0);
       return String(row.currency || 'USD').toUpperCase() === 'NGN' ? amount / NGN_PER_USD : amount;
@@ -1126,7 +1127,8 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
       conversionRate: all.length ? Math.round((all.filter((row) => isSuccessfulPaymentStatus(row.status)).length / all.length) * 10000) / 100 : 0,
     };
 
-    const payments = (data || []).map((row) => ({
+    const paymentRows = filterProductionRecords(data || []);
+    const payments = paymentRows.map((row) => ({
       id: row.id,
       reference: row.provider_reference || row.intent_key,
       userId: row.user_id,
@@ -1141,7 +1143,26 @@ export async function getPaymentMonitoring({ page = 1, limit = 25, search = '', 
       riskFlags: row.risk_flags || [],
     }));
 
-    return { payments, total: count || 0, page: safePage, limit: safeLimit, stats };
+    const filteredTotal = all.filter((row) => {
+      if (statusFilter) {
+        const status = String(row.status || '').toLowerCase();
+        if (isSuccessfulPaymentStatus(statusFilter)) {
+          if (!isSuccessfulPaymentStatus(status)) return false;
+        } else if (status !== statusFilter) return false;
+      }
+      if (methodFilter && row.provider !== methodFilter) return false;
+      if (search) {
+        const haystack = [
+          row.provider_reference,
+          row.intent_key,
+          row.user_id,
+        ].map((value) => String(value || '').toLowerCase()).join(' ');
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    }).length;
+
+    return { payments, total: filteredTotal, page: safePage, limit: safeLimit, stats };
   } catch (error) {
     if (!isMissingDbFeature(error)) throw error;
     return null;

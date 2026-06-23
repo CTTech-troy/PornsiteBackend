@@ -1,4 +1,5 @@
 import { supabase } from '../config/supabase.js';
+import { filterProductionRecords, isTestDataRecord } from '../utils/testDataFilter.js';
 
 const clients = new Set();
 
@@ -88,6 +89,7 @@ export function emitFinanceActivityEvent(io, eventName, activity, extra = {}) {
 
 export async function writeFinanceActivityEvent(activity = {}, { io = null } = {}) {
   if (!supabase || !activity.eventType) return null;
+  if (isTestDataRecord(activity)) return null;
 
   const row = {
     event_type: activity.eventType,
@@ -142,7 +144,8 @@ export async function listFinanceActivityEvents({ page = 1, limit = 30, eventTyp
     throw error;
   }
 
-  return { events: data || [], total: count || 0, page: safePage, limit: safeLimit };
+  const events = filterProductionRecords(data || []);
+  return { events, total: events.length, page: safePage, limit: safeLimit };
 }
 
 export async function writeFinancePayoutLog(payout, status, extra = {}) {

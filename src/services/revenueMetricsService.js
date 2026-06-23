@@ -12,6 +12,7 @@ import {
 } from './revenueCalculation.service.js';
 import { getPayoutMetrics } from './payoutMetricsService.js';
 import { getAdRewardAnalytics } from './creatorAdReward.service.js';
+import { filterProductionRecords } from '../utils/testDataFilter.js';
 
 const COMPLETED_PAYOUT = ['paid', 'completed'];
 const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
@@ -62,16 +63,16 @@ async function loadRevenueSources() {
 
   const [earningsRes, coinPaymentsRes, payoutsRes, transactionsRes] = await Promise.all([
     supabase.from('creator_earnings').select('creator_id, amount_usd, gross_usd, platform_fee_usd, source, created_at, reference_id'),
-    supabase.from('payment_intents').select('user_id, product_type, amount, currency, status, created_at, fulfilled_at'),
+    supabase.from('payment_intents').select('id,user_id,product_type,product_id,amount,currency,status,provider,provider_reference,intent_key,metadata,product_snapshot,created_at,fulfilled_at'),
     supabase.from('creator_payout_requests').select('creator_id, amount_usd, status, requested_at, completed_at, paid_at'),
     supabase.from('transactions').select('owner_id, type, amount, platform_fee, creator_earnings, created_at').limit(5000),
   ]);
 
   return {
-    earnings: earningsRes.error && isMissingDbFeature(earningsRes.error) ? [] : (earningsRes.data || []),
-    coinPayments: coinPaymentsRes.error && isMissingDbFeature(coinPaymentsRes.error) ? [] : (coinPaymentsRes.data || []),
-    payouts: payoutsRes.error && isMissingDbFeature(payoutsRes.error) ? [] : (payoutsRes.data || []),
-    transactions: transactionsRes.error && isMissingDbFeature(transactionsRes.error) ? [] : (transactionsRes.data || []),
+    earnings: earningsRes.error && isMissingDbFeature(earningsRes.error) ? [] : filterProductionRecords(earningsRes.data || []),
+    coinPayments: coinPaymentsRes.error && isMissingDbFeature(coinPaymentsRes.error) ? [] : filterProductionRecords(coinPaymentsRes.data || []),
+    payouts: payoutsRes.error && isMissingDbFeature(payoutsRes.error) ? [] : filterProductionRecords(payoutsRes.data || []),
+    transactions: transactionsRes.error && isMissingDbFeature(transactionsRes.error) ? [] : filterProductionRecords(transactionsRes.data || []),
     payments: [],
   };
 }

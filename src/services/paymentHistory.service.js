@@ -3,6 +3,7 @@ import { Readable } from 'stream';
 import { createGzip } from 'zlib';
 import { supabase, isConfigured } from '../config/supabase.js';
 import { listFinanceActivityEvents } from './financePayoutEvents.service.js';
+import { isTestDataRecord } from '../utils/testDataFilter.js';
 
 const FETCH_LIMIT = 1200;
 const MAX_EXPORT_ROWS = 5000;
@@ -293,6 +294,7 @@ function coinAmount(row) {
 
 function addRecord(records, seen, record) {
   if (!record?.id || !PAYMENT_TYPES.has(record.type)) return;
+  if (isTestDataRecord(record)) return;
   const reference = lower(record.transactionId);
   const key = reference ? `${record.type}:${reference}` : `${record.type}:${record.id}`;
   if (seen.has(key)) return;
@@ -606,7 +608,9 @@ async function buildRecords() {
     fetchVideos(videoIds),
   ]);
 
-  return records.map((record) => enrichRecord(record, userMap, creatorMap, approvedByMap, videoMap));
+  return records
+    .map((record) => enrichRecord(record, userMap, creatorMap, approvedByMap, videoMap))
+    .filter((record) => !isTestDataRecord(record));
 }
 
 export async function getPaymentHistory(query = {}) {
@@ -622,7 +626,7 @@ export async function getPaymentHistory(query = {}) {
   let activity = [];
   try {
     const result = await listFinanceActivityEvents({ page: 1, limit: 12 });
-    activity = result.events || [];
+    activity = (result.events || []).filter((event) => !isTestDataRecord(event));
   } catch {
     activity = [];
   }
