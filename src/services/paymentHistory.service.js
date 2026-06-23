@@ -20,16 +20,25 @@ const PAYMENT_TYPES = new Set([
 const CSV_COLUMNS = [
   ['type', 'Type'],
   ['transactionId', 'Transaction ID'],
+  ['providerTransactionId', 'Provider transaction ID'],
   ['status', 'Status'],
   ['provider', 'Provider'],
+  ['paymentMethod', 'Payment method'],
   ['userEmail', 'User email'],
   ['userName', 'User name'],
   ['creatorName', 'Creator'],
   ['item', 'Item'],
   ['amountUsd', 'Amount USD'],
+  ['amountPaid', 'Amount paid'],
   ['amountOriginal', 'Original amount'],
   ['currency', 'Currency'],
+  ['priceUsd', 'Price USD'],
+  ['priceNgn', 'Price NGN'],
+  ['purchasedCoins', 'Purchased coins'],
+  ['bonusCoins', 'Bonus coins'],
+  ['totalCoins', 'Total coins credited'],
   ['coins', 'Coins'],
+  ['orderKey', 'Order reference'],
   ['creatorEarnings', 'Creator earnings'],
   ['companyEarnings', 'Company earnings'],
   ['walletBalanceBefore', 'Wallet before'],
@@ -55,6 +64,15 @@ function lower(value) {
 
 function firstValue(...values) {
   return values.find((value) => value !== null && value !== undefined && value !== '');
+}
+
+function firstMoney(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 function amountToUsd(value, currency = 'USD') {
@@ -162,6 +180,143 @@ function emailOf(user) {
 function productSnapshot(row) {
   const snapshot = row?.product_snapshot || row?.metadata?.product_snapshot || row?.metadata?.product || {};
   return snapshot && typeof snapshot === 'object' ? snapshot : {};
+}
+
+function objectValue(value) {
+  return value && typeof value === 'object' ? value : {};
+}
+
+export function resolveCoinPurchaseHistoryDetails(row = {}) {
+  const metadata = objectValue(row.metadata);
+  const snapshot = productSnapshot(row);
+  const pkg = objectValue(firstValue(metadata.package, metadata.result?.package, metadata.product, snapshot));
+  const verification = objectValue(metadata.verification);
+  const raw = objectValue(verification.raw);
+  const rawData = objectValue(raw.data);
+  const currency = String(firstValue(
+    row.currency,
+    metadata.currency,
+    verification.currency,
+    rawData.currency,
+    snapshot.currency,
+    'USD',
+  )).toUpperCase();
+
+  const priceNgn = firstMoney(
+    metadata.priceNgn,
+    metadata.price_ngn,
+    pkg.priceNgn,
+    pkg.price_ngn,
+    snapshot.priceNgn,
+    snapshot.price_ngn,
+  );
+  const priceUsd = firstMoney(
+    metadata.priceUsd,
+    metadata.price_usd,
+    pkg.priceUsd,
+    pkg.price_usd,
+    snapshot.priceUsd,
+    snapshot.price_usd,
+  );
+  let amountPaid = firstMoney(
+    metadata.amountPaid,
+    metadata.amount_paid,
+    metadata.paymentAmount,
+    metadata.payment_amount,
+    metadata.providerAmount,
+    metadata.provider_amount,
+    verification.amount,
+    verification.providerAmount,
+    rawData.amount,
+    row.amount_paid,
+    row.payment_amount,
+  );
+  if (amountPaid === null) {
+    amountPaid = currency === 'NGN'
+      ? priceNgn
+      : currency === 'USD'
+        ? priceUsd
+        : null;
+  }
+
+  let purchasedCoins = firstMoney(
+    metadata.purchasedCoins,
+    metadata.purchased_coins,
+    metadata.coins,
+    pkg.coins,
+    snapshot.coins,
+  );
+  let bonusCoins = firstMoney(
+    metadata.bonusCoins,
+    metadata.bonus_coins,
+    pkg.bonusCoins,
+    pkg.bonus_coins,
+    snapshot.bonusCoins,
+    snapshot.bonus_coins,
+  );
+  let totalCoins = firstMoney(
+    metadata.totalCoins,
+    metadata.total_coins,
+    metadata.officialUnits,
+    metadata.official_units,
+    metadata.amountTokens,
+    metadata.amount_tokens,
+    pkg.totalCoins,
+    pkg.total_coins,
+    snapshot.totalCoins,
+    snapshot.total_coins,
+    row.official_units,
+    row.amount_tokens,
+    row.amount,
+  );
+  if (totalCoins === null && purchasedCoins !== null) totalCoins = purchasedCoins + money(bonusCoins);
+  if (purchasedCoins === null && totalCoins !== null && bonusCoins !== null) purchasedCoins = Math.max(0, totalCoins - bonusCoins);
+  if (bonusCoins === null && totalCoins !== null && purchasedCoins !== null) bonusCoins = Math.max(0, totalCoins - purchasedCoins);
+
+  const amountPaidUsd = priceUsd !== null
+    ? priceUsd
+    : amountPaid !== null
+      ? amountToUsd(amountPaid, currency)
+      : coinPaymentAmountUsd(row);
+  const providerTransactionId = firstValue(
+    metadata.providerTransactionId,
+    metadata.provider_transaction_id,
+    verification.providerTransactionId,
+    verification.provider_transaction_id,
+    rawData.id,
+    row.provider_transaction_id,
+  );
+  const orderKey = firstValue(
+    metadata.orderKey,
+    metadata.order_id,
+    metadata.orderId,
+    verification.orderKey,
+    verification.order_id,
+    rawData.tx_ref,
+    row.order_key,
+  );
+
+  return {
+    amountPaid: amountPaid === null ? amountPaidUsd : amountPaid,
+    amountPaidUsd,
+    currency,
+    priceNgn,
+    priceUsd,
+    purchasedCoins,
+    bonusCoins,
+    totalCoins,
+    paymentMethod: firstValue(
+      metadata.paymentMethod,
+      metadata.payment_method,
+      verification.paymentType,
+      verification.payment_type,
+      rawData.payment_type,
+      row.payment_method,
+    ) || null,
+    provider: firstValue(row.provider, metadata.provider, verification.provider),
+    providerTransactionId: providerTransactionId ? String(providerTransactionId) : null,
+    orderKey: orderKey ? String(orderKey) : null,
+  };
 }
 
 export function resolvePaymentHistoryAmountUsd(row = {}, fallbackKeys = DEFAULT_USD_FALLBACK_KEYS) {
@@ -308,7 +463,16 @@ function addRecord(records, seen, record) {
     rawStatus: '',
     amountUsd: 0,
     amountOriginal: 0,
+    amountPaid: null,
+    priceNgn: null,
+    priceUsd: null,
+    purchasedCoins: null,
+    bonusCoins: null,
+    totalCoins: null,
     coins: null,
+    paymentMethod: null,
+    providerTransactionId: null,
+    orderKey: null,
     creatorEarnings: null,
     companyEarnings: null,
     walletBalanceBefore: null,
@@ -459,6 +623,7 @@ async function buildRecords() {
     if (!type) continue;
     seenIntentIds.add(String(row.id));
     const ref = firstValue(row.provider_reference, row.intent_key, row.id);
+    const coinDetails = type === 'coin_purchase' ? resolveCoinPurchaseHistoryDetails(row) : null;
     if (type === 'coin_purchase') seenCoinRefs.add(lower(ref));
     addRecord(records, seen, {
       id: `intent-${row.id}`,
@@ -467,12 +632,21 @@ async function buildRecords() {
       type,
       userId: row.user_id,
       item: itemFromIntent(row, type),
-      amountUsd: amountUsd(row),
-      amountOriginal: originalAmount(row),
-      currency: firstValue(row.currency, row.metadata?.currency, 'USD'),
-      coins: type === 'coin_purchase' ? coinAmount(row) : null,
-      provider: firstValue(row.provider, row.metadata?.provider, row.metadata?.gatewayPlan?.primary, ''),
-      transactionId: ref,
+      amountUsd: coinDetails?.amountPaidUsd ?? amountUsd(row),
+      amountOriginal: coinDetails?.amountPaid ?? originalAmount(row),
+      amountPaid: coinDetails?.amountPaid ?? null,
+      currency: coinDetails?.currency ?? firstValue(row.currency, row.metadata?.currency, 'USD'),
+      priceNgn: coinDetails?.priceNgn ?? null,
+      priceUsd: coinDetails?.priceUsd ?? null,
+      purchasedCoins: coinDetails?.purchasedCoins ?? null,
+      bonusCoins: coinDetails?.bonusCoins ?? null,
+      totalCoins: coinDetails?.totalCoins ?? null,
+      coins: type === 'coin_purchase' ? (coinDetails?.totalCoins ?? coinAmount(row)) : null,
+      provider: firstValue(row.provider, coinDetails?.provider, row.metadata?.provider, row.metadata?.gatewayPlan?.primary, ''),
+      paymentMethod: coinDetails?.paymentMethod ?? null,
+      providerTransactionId: coinDetails?.providerTransactionId ?? null,
+      transactionId: firstValue(coinDetails?.providerTransactionId, ref),
+      orderKey: coinDetails?.orderKey ?? (String(ref || '').startsWith('xsc_') ? ref : null),
       status: normalizeStatus(row.status, type),
       rawStatus: row.status,
       date: recordDate(row.fulfilled_at, row.created_at),
@@ -486,21 +660,29 @@ async function buildRecords() {
     const ref = firstValue(row.provider_reference, row.wallet_transaction_id, row.intent_id, row.id);
     if (seenCoinRefs.has(lower(ref))) continue;
     seenCoinRefs.add(lower(ref));
-    const paidUsd = coinPaymentAmountUsd(row);
-    const original = coinPaymentOriginal(row);
+    const coinDetails = resolveCoinPurchaseHistoryDetails(row);
     addRecord(records, seen, {
       id: `token-credit-${row.id}`,
       sourceTable: 'token_credits',
       sourceId: row.id,
       type: 'coin_purchase',
       userId: row.user_id,
-      item: `${money(row.coins)} coins`,
-      amountUsd: paidUsd,
-      amountOriginal: original.amount,
-      currency: original.currency,
-      coins: coinAmount(row),
-      provider: row.provider || '',
-      transactionId: ref,
+      item: `${money(coinDetails.totalCoins ?? row.coins)} coins`,
+      amountUsd: coinDetails.amountPaidUsd,
+      amountOriginal: coinDetails.amountPaid,
+      amountPaid: coinDetails.amountPaid,
+      currency: coinDetails.currency,
+      priceNgn: coinDetails.priceNgn,
+      priceUsd: coinDetails.priceUsd,
+      purchasedCoins: coinDetails.purchasedCoins,
+      bonusCoins: coinDetails.bonusCoins,
+      totalCoins: coinDetails.totalCoins,
+      coins: coinDetails.totalCoins ?? coinAmount(row),
+      provider: firstValue(row.provider, coinDetails.provider, ''),
+      paymentMethod: coinDetails.paymentMethod,
+      providerTransactionId: coinDetails.providerTransactionId,
+      transactionId: firstValue(coinDetails.providerTransactionId, ref),
+      orderKey: coinDetails.orderKey ?? (String(ref || '').startsWith('xsc_') ? ref : null),
       status: 'success',
       rawStatus: 'success',
       date: recordDate(row.created_at),
@@ -513,21 +695,29 @@ async function buildRecords() {
     const ref = firstValue(row.reference, row.id);
     if (seenCoinRefs.has(lower(ref))) continue;
     seenCoinRefs.add(lower(ref));
-    const paidUsd = coinPaymentAmountUsd(row);
-    const original = coinPaymentOriginal(row);
+    const coinDetails = resolveCoinPurchaseHistoryDetails(row);
     addRecord(records, seen, {
       id: `wallet-purchase-${row.id}`,
       sourceTable: 'coin_wallet_transactions',
       sourceId: row.id,
       type: 'coin_purchase',
       userId: row.user_id,
-      item: `${money(row.amount)} coins`,
-      amountUsd: paidUsd,
-      amountOriginal: original.amount,
-      currency: original.currency,
-      coins: money(row.amount),
-      provider: row.provider || '',
-      transactionId: ref,
+      item: `${money(coinDetails.totalCoins ?? row.amount)} coins`,
+      amountUsd: coinDetails.amountPaidUsd,
+      amountOriginal: coinDetails.amountPaid,
+      amountPaid: coinDetails.amountPaid,
+      currency: coinDetails.currency,
+      priceNgn: coinDetails.priceNgn,
+      priceUsd: coinDetails.priceUsd,
+      purchasedCoins: coinDetails.purchasedCoins,
+      bonusCoins: coinDetails.bonusCoins,
+      totalCoins: coinDetails.totalCoins,
+      coins: coinDetails.totalCoins ?? money(row.amount),
+      provider: firstValue(row.provider, coinDetails.provider, ''),
+      paymentMethod: coinDetails.paymentMethod,
+      providerTransactionId: coinDetails.providerTransactionId,
+      transactionId: firstValue(coinDetails.providerTransactionId, ref),
+      orderKey: coinDetails.orderKey ?? (String(ref || '').startsWith('xsc_') ? ref : null),
       status: normalizeStatus(row.status, 'coin_purchase'),
       rawStatus: row.status,
       walletBalanceBefore: money(row.balance_before),

@@ -93,7 +93,7 @@ test('coin package static fallback matches live coins_30 price', async () => {
 test('payment history uses paid amount for coin purchases instead of credited coins', async () => {
   const prevSupabase = disableSupabaseEnv();
   try {
-    const { resolvePaymentHistoryAmountUsd } = await importPaymentHistory('coin-history-paid-amount');
+    const { resolveCoinPurchaseHistoryDetails, resolvePaymentHistoryAmountUsd } = await importPaymentHistory('coin-history-paid-amount');
     const walletPurchase = {
       amount: 35,
       currency: 'USD',
@@ -121,6 +121,32 @@ test('payment history uses paid amount for coin purchases instead of credited co
         currency: 'NGN',
       },
     }, ['amount_usd', 'purchase_amount_usd', 'official_amount']), 0.09);
+    const details = resolveCoinPurchaseHistoryDetails({
+      amount: 35,
+      provider: 'flutterwave',
+      metadata: {
+        coins: 30,
+        bonusCoins: 5,
+        totalCoins: 35,
+        priceNgn: 125,
+        priceUsd: 0.09,
+        amountPaid: 125,
+        currency: 'NGN',
+        providerTransactionId: '2057610217',
+        paymentMethod: 'bank_transfer',
+        orderKey: 'xsc_1782188510237_bccdf9125874',
+      },
+    });
+    assert.equal(details.amountPaid, 125);
+    assert.equal(details.amountPaidUsd, 0.09);
+    assert.equal(details.priceNgn, 125);
+    assert.equal(details.priceUsd, 0.09);
+    assert.equal(details.purchasedCoins, 30);
+    assert.equal(details.bonusCoins, 5);
+    assert.equal(details.totalCoins, 35);
+    assert.equal(details.providerTransactionId, '2057610217');
+    assert.equal(details.paymentMethod, 'bank_transfer');
+    assert.equal(details.orderKey, 'xsc_1782188510237_bccdf9125874');
   } finally {
     restoreEnv('SUPABASE_URL', prevSupabase.SUPABASE_URL);
     restoreEnv('SUPABASE_SERVICE_ROLE_KEY', prevSupabase.SUPABASE_SERVICE_ROLE_KEY);
