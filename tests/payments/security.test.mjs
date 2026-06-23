@@ -14,6 +14,12 @@ async function importCoinWallet(caseName) {
   return import(url.href);
 }
 
+async function importPaymentHistory(caseName) {
+  const url = new URL('../../src/services/paymentHistory.service.js', import.meta.url);
+  url.searchParams.set('case', `${caseName}-${Date.now()}-${Math.random()}`);
+  return import(url.href);
+}
+
 function disableSupabaseEnv() {
   const previous = {
     SUPABASE_URL: process.env.SUPABASE_URL,
@@ -66,6 +72,43 @@ test('coin package static fallback matches live coins_30 price', async () => {
     assert.equal(pkg.priceNgn, 125);
     assert.equal(pkg.bonusCoins, 5);
     assert.equal(pkg.totalCoins, 35);
+  } finally {
+    restoreEnv('SUPABASE_URL', prevSupabase.SUPABASE_URL);
+    restoreEnv('SUPABASE_SERVICE_ROLE_KEY', prevSupabase.SUPABASE_SERVICE_ROLE_KEY);
+  }
+});
+
+test('payment history uses paid amount for coin purchases instead of credited coins', async () => {
+  const prevSupabase = disableSupabaseEnv();
+  try {
+    const { resolvePaymentHistoryAmountUsd } = await importPaymentHistory('coin-history-paid-amount');
+    const walletPurchase = {
+      amount: 35,
+      currency: 'USD',
+      metadata: {
+        amountPaid: 0.09,
+        currency: 'USD',
+      },
+    };
+
+    assert.equal(resolvePaymentHistoryAmountUsd(walletPurchase, ['amount_usd', 'purchase_amount_usd', 'official_amount']), 0.09);
+    assert.equal(resolvePaymentHistoryAmountUsd({
+      amount: 35,
+      currency: 'NGN',
+      metadata: {
+        amountPaid: 125,
+        currency: 'NGN',
+      },
+    }, ['amount_usd', 'purchase_amount_usd', 'official_amount']), 125 / 1600);
+    assert.equal(resolvePaymentHistoryAmountUsd({
+      amount: 35,
+      currency: 'NGN',
+      metadata: {
+        amountPaid: 125,
+        priceUsd: 0.09,
+        currency: 'NGN',
+      },
+    }, ['amount_usd', 'purchase_amount_usd', 'official_amount']), 0.09);
   } finally {
     restoreEnv('SUPABASE_URL', prevSupabase.SUPABASE_URL);
     restoreEnv('SUPABASE_SERVICE_ROLE_KEY', prevSupabase.SUPABASE_SERVICE_ROLE_KEY);

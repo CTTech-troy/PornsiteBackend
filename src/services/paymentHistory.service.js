@@ -6,6 +6,9 @@ import { listFinanceActivityEvents } from './financePayoutEvents.service.js';
 
 const FETCH_LIMIT = 1200;
 const MAX_EXPORT_ROWS = 5000;
+const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
+const DEFAULT_USD_FALLBACK_KEYS = ['amount_usd', 'purchase_amount_usd', 'amount', 'official_amount'];
+const COIN_PAYMENT_USD_FALLBACK_KEYS = ['amount_usd', 'purchase_amount_usd', 'official_amount'];
 
 const PAYMENT_TYPES = new Set([
   'coin_purchase',
@@ -51,6 +54,13 @@ function lower(value) {
 
 function firstValue(...values) {
   return values.find((value) => value !== null && value !== undefined && value !== '');
+}
+
+function amountToUsd(value, currency = 'USD') {
+  const amount = money(value);
+  return String(currency || 'USD').toUpperCase() === 'NGN'
+    ? amount / NGN_PER_USD
+    : amount;
 }
 
 function isMissingDbFeature(error) {
@@ -153,7 +163,7 @@ function productSnapshot(row) {
   return snapshot && typeof snapshot === 'object' ? snapshot : {};
 }
 
-function amountUsd(row, fallbackKeys = ['amount_usd', 'purchase_amount_usd', 'amount', 'official_amount']) {
+export function resolvePaymentHistoryAmountUsd(row = {}, fallbackKeys = DEFAULT_USD_FALLBACK_KEYS) {
   const explicit = firstValue(row.amount_usd, row.purchase_amount_usd, row.creator_revenue_usd && row.platform_revenue_usd
     ? money(row.creator_revenue_usd) + money(row.platform_revenue_usd)
     : null);
@@ -161,22 +171,80 @@ function amountUsd(row, fallbackKeys = ['amount_usd', 'purchase_amount_usd', 'am
 
   const snapshot = productSnapshot(row);
   const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
-  const nested = firstValue(
+  const nestedUsd = firstValue(
     snapshot.price_usd,
     snapshot.amount_usd,
+    snapshot.amountUsd,
+    snapshot.priceUsd,
     snapshot.usd,
+    metadata.amountUsd,
     metadata.amount_usd,
+    metadata.paymentAmountUsd,
+    metadata.payment_amount_usd,
+    metadata.providerAmountUsd,
+    metadata.provider_amount_usd,
+    metadata.priceUsd,
     metadata.price_usd,
     metadata.officialAmountUsd,
   );
-  if (nested !== null && nested !== undefined && nested !== '') return money(nested);
-
   const currency = lower(row.currency || metadata.currency || snapshot.currency || 'USD');
+  if (nestedUsd !== null && nestedUsd !== undefined && nestedUsd !== '') return money(nestedUsd);
+
+  const nestedPaid = firstValue(
+    metadata.amountPaid,
+    metadata.amount_paid,
+    metadata.paymentAmount,
+    metadata.payment_amount,
+    metadata.providerAmount,
+    metadata.provider_amount,
+  );
+  if (nestedPaid !== null && nestedPaid !== undefined && nestedPaid !== '') return amountToUsd(nestedPaid, currency);
+
   for (const key of fallbackKeys) {
     const value = row[key];
     if (value !== null && value !== undefined && value !== '' && currency === 'usd') return money(value);
   }
   return 0;
+}
+
+function amountUsd(row, fallbackKeys = DEFAULT_USD_FALLBACK_KEYS) {
+  return resolvePaymentHistoryAmountUsd(row, fallbackKeys);
+}
+
+function coinPaymentAmountUsd(row) {
+  return resolvePaymentHistoryAmountUsd(row, COIN_PAYMENT_USD_FALLBACK_KEYS);
+}
+
+function coinPaymentCurrency(row) {
+  const snapshot = productSnapshot(row);
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  return firstValue(row.currency, metadata.currency, snapshot.currency, 'USD');
+}
+
+function coinPaymentPaidAmount(row) {
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  return firstValue(
+    metadata.amountPaid,
+    metadata.amount_paid,
+    metadata.paymentAmount,
+    metadata.payment_amount,
+    metadata.providerAmount,
+    metadata.provider_amount,
+  );
+}
+
+function coinPaymentOriginal(row) {
+  const paid = coinPaymentPaidAmount(row);
+  if (paid !== null && paid !== undefined && paid !== '') {
+    return {
+      amount: money(paid),
+      currency: coinPaymentCurrency(row),
+    };
+  }
+  return {
+    amount: coinPaymentAmountUsd(row),
+    currency: 'USD',
+  };
 }
 
 function originalAmount(row, fallback = 0) {
@@ -416,6 +484,8 @@ async function buildRecords() {
     const ref = firstValue(row.provider_reference, row.wallet_transaction_id, row.intent_id, row.id);
     if (seenCoinRefs.has(lower(ref))) continue;
     seenCoinRefs.add(lower(ref));
+    const paidUsd = coinPaymentAmountUsd(row);
+    const original = coinPaymentOriginal(row);
     addRecord(records, seen, {
       id: `token-credit-${row.id}`,
       sourceTable: 'token_credits',
@@ -423,9 +493,9 @@ async function buildRecords() {
       type: 'coin_purchase',
       userId: row.user_id,
       item: `${money(row.coins)} coins`,
-      amountUsd: amountUsd(row),
-      amountOriginal: amountUsd(row),
-      currency: 'USD',
+      amountUsd: paidUsd,
+      amountOriginal: original.amount,
+      currency: original.currency,
       coins: coinAmount(row),
       provider: row.provider || '',
       transactionId: ref,
@@ -441,6 +511,8 @@ async function buildRecords() {
     const ref = firstValue(row.reference, row.id);
     if (seenCoinRefs.has(lower(ref))) continue;
     seenCoinRefs.add(lower(ref));
+    const paidUsd = coinPaymentAmountUsd(row);
+    const original = coinPaymentOriginal(row);
     addRecord(records, seen, {
       id: `wallet-purchase-${row.id}`,
       sourceTable: 'coin_wallet_transactions',
@@ -448,9 +520,9 @@ async function buildRecords() {
       type: 'coin_purchase',
       userId: row.user_id,
       item: `${money(row.amount)} coins`,
-      amountUsd: amountUsd(row),
-      amountOriginal: money(row.amount),
-      currency: firstValue(row.metadata?.currency, 'USD'),
+      amountUsd: paidUsd,
+      amountOriginal: original.amount,
+      currency: original.currency,
       coins: money(row.amount),
       provider: row.provider || '',
       transactionId: ref,
