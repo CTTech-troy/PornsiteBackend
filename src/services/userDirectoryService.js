@@ -27,10 +27,50 @@ function defaultAvatarUrl(seed) {
   return `https://api.dicebear.com/7.x/avataaars/svg?seed=${s}`;
 }
 
+function cleanDirectoryText(value) {
+  return String(value || '').trim();
+}
+
+function isKnownUserIdValue(value, row) {
+  const text = cleanDirectoryText(value);
+  if (!text) return false;
+  return [
+    row?.id,
+    row?.supabase_user_id,
+    row?.firebase_uid,
+    row?.firestore_uid,
+    row?.rtdb_uid,
+  ].some((id) => cleanDirectoryText(id) === text);
+}
+
+function emailNameFallback(email) {
+  const local = cleanDirectoryText(email).split('@')[0] || '';
+  return local.replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function adminDisplayNameForRow(row, username, email) {
+  const candidates = [
+    row?.full_name,
+    row?.display_name,
+    row?.displayName,
+    row?.name,
+    username,
+  ];
+  for (const candidate of candidates) {
+    const value = cleanDirectoryText(candidate);
+    if (value && !value.includes('@') && !isKnownUserIdValue(value, row)) return value;
+  }
+  return emailNameFallback(email) || 'Unnamed user';
+}
+
 export function rowToAdminUserDto(u) {
   const email = String(u.email || '').trim().toLowerCase();
-  const username = String(u.username || u.id || '').trim() || String(u.id || '');
-  const fullName = String(u.full_name || u.display_name || u.displayName || u.name || username || '').trim() || username;
+  const rawUsername = cleanDirectoryText(u.username);
+  const publicUsername = rawUsername && !isKnownUserIdValue(rawUsername, u) ? rawUsername : '';
+  const username = publicUsername
+    ? rawUsername
+    : (email ? email.split('@')[0] : rawUsername || cleanDirectoryText(u.id));
+  const fullName = adminDisplayNameForRow(u, publicUsername, email);
   const rawA = u.avatar_url || u.avatar || u.photoURL || null;
   const avatar = rawA && String(rawA).trim() ? String(rawA).trim() : defaultAvatarUrl(email || u.id);
   const createdAt = u.created_at || u.createdAt || null;
