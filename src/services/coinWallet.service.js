@@ -4,6 +4,8 @@ import { createCheckout } from './paymentServiceClient.js';
 import { sendGiftNotificationEmail } from './emailService.js';
 
 export const STATIC_COIN_PACKAGES = [
+  { id: 'coins_30', coins: 30, bonusCoins: 5, priceUsd: 0.09, priceNgn: 125, name: '30 Coins', description: '30 coins access', isActive: true, sortOrder: 0 },
+  { id: 'coins_120', coins: 120, bonusCoins: 0, priceUsd: 5.99, priceNgn: 9000, name: '120 Coins', description: '120 coins access', isActive: true, sortOrder: 0 },
   { id: 'tokens_30', coins: 30, bonusCoins: 0, priceUsd: 0.99, priceNgn: 1499, name: '30 Coins', description: 'Starter coin package', isActive: true, sortOrder: 10 },
   { id: 'tokens_100', coins: 100, bonusCoins: 0, priceUsd: 2.99, priceNgn: 4499, name: '100 Coins', description: 'Popular coin package', isActive: true, sortOrder: 20 },
   { id: 'tokens_300', coins: 300, bonusCoins: 0, priceUsd: 7.99, priceNgn: 11999, name: '300 Coins', description: 'Best value coin package', isActive: true, sortOrder: 30 },
@@ -32,15 +34,18 @@ function roundCoins(value) {
   return Math.round(toNumber(value) * 100) / 100;
 }
 
-function assertPaymentAmountMatches({ paidAmount, expectedAmount, currency, productId }) {
+function assertPaymentAmountMatches({ paidAmount, expectedAmount, currency, productId, allowOverpayment = false }) {
   if (paidAmount == null) return;
   const paid = Number(paidAmount);
   const expected = Number(expectedAmount || 0);
   const tolerance = String(currency || '').toUpperCase() === 'NGN' ? 1 : 0.01;
-  if (!Number.isFinite(paid) || Math.abs(paid - expected) > tolerance) {
+  const mismatch = allowOverpayment
+    ? paid + tolerance < expected
+    : Math.abs(paid - expected) > tolerance;
+  if (!Number.isFinite(paid) || mismatch) {
     const err = new Error(`Payment amount mismatch for ${productId}`);
     err.code = 'PAYMENT_AMOUNT_MISMATCH';
-    err.details = { paidAmount: paid, expectedAmount: expected, currency };
+    err.details = { paidAmount: paid, expectedAmount: expected, currency, allowOverpayment };
     throw err;
   }
 }
@@ -327,6 +332,7 @@ export async function fulfillCoinPurchase({
   amountPaid = null,
   currency = 'USD',
   metadata = {},
+  allowOverpayment = false,
 }) {
   if (!userId || !packageId) throw new Error('userId and packageId required');
   const pkg = await getCoinPackage(packageId, { includeInactive: true });
@@ -343,6 +349,7 @@ export async function fulfillCoinPurchase({
     expectedAmount,
     currency,
     productId: pkg.id,
+    allowOverpayment,
   });
 
   const amount = roundCoins(pkg.totalCoins || pkg.coins);

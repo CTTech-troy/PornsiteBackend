@@ -56,6 +56,22 @@ test('gift catalog static fallback has positive costs', async () => {
   }
 });
 
+test('coin package static fallback matches live coins_30 price', async () => {
+  const prevSupabase = disableSupabaseEnv();
+  try {
+    const { getCoinPackage } = await importCoinWallet('coin-package-static');
+    const pkg = await getCoinPackage('coins_30');
+    assert.equal(pkg.id, 'coins_30');
+    assert.equal(pkg.priceUsd, 0.09);
+    assert.equal(pkg.priceNgn, 125);
+    assert.equal(pkg.bonusCoins, 5);
+    assert.equal(pkg.totalCoins, 35);
+  } finally {
+    restoreEnv('SUPABASE_URL', prevSupabase.SUPABASE_URL);
+    restoreEnv('SUPABASE_SERVICE_ROLE_KEY', prevSupabase.SUPABASE_SERVICE_ROLE_KEY);
+  }
+});
+
 test('resolveGiftCost rejects unknown gift id', async () => {
   const prevSupabase = disableSupabaseEnv();
   try {
@@ -143,7 +159,7 @@ test('flutterwave verification supports hosted checkout tx_ref fallback', async 
             id: 987654,
             tx_ref: 'intent_key_123',
             status: 'successful',
-            amount: 0.99,
+            amount: 0.09,
             currency: 'USD',
             meta: {
               userId: 'user_123',

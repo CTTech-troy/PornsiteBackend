@@ -1408,6 +1408,7 @@ export async function refreshAndFulfillDirectCoinPayment({ reference, orderKey =
       provider,
       amountPaid: verified.amount,
       currency: verified.currency,
+      allowOverpayment: true,
       metadata: {
         directPaymentService: true,
         orderKey: directOrderKey,

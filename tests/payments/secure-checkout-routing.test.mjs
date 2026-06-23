@@ -29,6 +29,8 @@ function prepareIsolatedPaymentEnv() {
   process.env.PAYMENT_SERVICE_URL = 'https://payments.example.test';
   process.env.PAYMENT_SERVICE_SHARED_SECRET = '';
   process.env.FLUTTERWAVE_ENABLED = 'true';
+  process.env.NODE_ENV = 'development';
+  process.env.APP_ENV = 'development';
   return snapshot;
 }
 
@@ -115,7 +117,7 @@ test('local payment-service URLs are normalized to HTTP before checkout', async 
       productId: 'coins_30',
       countryCode: 'US',
       currency: 'USD',
-      amount: 0.99,
+      amount: 0.09,
       productName: '30 coins',
       customerEmail: 'member@example.test',
       customerName: 'Member',
