@@ -1,9 +1,11 @@
 import {
+  GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import crypto from 'crypto';
 import { pipeline } from 'stream/promises';
 import { PassThrough } from 'stream';
@@ -14,6 +16,7 @@ import {
   isSupabaseAvailable,
   supabase,
 } from '../config/supabase.js';
+import { resolvePublicApiUrl } from '../utils/appUrls.js';
 
 function trim(value) {
   return String(value || '').trim();
@@ -158,6 +161,75 @@ function backupUrlForKey(key) {
   const env = readR2MediaEnv();
   if (!env.publicBaseUrl || !key) return null;
   return `${env.publicBaseUrl}/${encodeKey(key)}`;
+}
+
+function backendMediaUrlForKey(key) {
+  if (!key) return null;
+  const apiBase = resolvePublicApiUrl().replace(/\/+$/, '');
+  const encodedKey = Buffer.from(String(key), 'utf8').toString('base64url');
+  return `${apiBase}/api/videos/media/r2/${encodedKey}`;
+}
+
+function cleanMetadata(metadata = {}) {
+  return Object.fromEntries(
+    Object.entries(metadata || {})
+      .filter(([, value]) => value != null && value !== '')
+      .map(([name, value]) => [String(name).toLowerCase(), String(value).slice(0, 2048)]),
+  );
+}
+
+export function getR2MediaPublicUrl(key) {
+  return backupUrlForKey(key);
+}
+
+export function getR2MediaDeliveryUrl(key) {
+  return backupUrlForKey(key) || backendMediaUrlForKey(key);
+}
+
+export function canUseR2MediaDirectUploads() {
+  return isR2MediaStorageConfigured();
+}
+
+export async function createR2MediaSignedUploadUrl({ key, contentType, metadata = {}, expiresIn = 15 * 60 }) {
+  if (!key) throw new Error('R2 upload key is required');
+  if (!canUseR2MediaDirectUploads()) {
+    const status = getR2MediaStorageStatus();
+    throw new Error(`Cloudflare R2 media direct upload is not configured. Missing credentials: ${status.missing.join(', ') || 'unknown R2 setting'}`);
+  }
+  const env = readR2MediaEnv();
+  const command = new PutObjectCommand({
+    Bucket: env.bucket,
+    Key: key,
+    ContentType: contentType || 'application/octet-stream',
+    Metadata: cleanMetadata(metadata),
+  });
+  return {
+    provider: 'cloudflare_r2',
+    bucket: env.bucket,
+    key,
+    publicUrl: getR2MediaDeliveryUrl(key),
+    uploadUrl: await getSignedUrl(getR2MediaClient(), command, { expiresIn }),
+    expiresIn,
+  };
+}
+
+export async function getR2MediaObject({ key, range }) {
+  if (!key) throw new Error('R2 media key is required');
+  const env = readR2MediaEnv();
+  const cleanRange = /^bytes=\d*-\d*$/i.test(String(range || '')) ? String(range) : undefined;
+  const result = await getR2MediaClient().send(new GetObjectCommand({
+    Bucket: env.bucket,
+    Key: key,
+    ...(cleanRange ? { Range: cleanRange } : {}),
+  }));
+  return {
+    body: result.Body,
+    contentType: result.ContentType || 'application/octet-stream',
+    contentLength: result.ContentLength,
+    contentRange: result.ContentRange || '',
+    etag: result.ETag || '',
+    lastModified: result.LastModified || null,
+  };
 }
 
 function replicaIdentity(payload) {

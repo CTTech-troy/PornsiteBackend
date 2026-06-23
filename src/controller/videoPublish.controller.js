@@ -3,14 +3,31 @@
  * All video metadata, likes, comments, and purchases stored in Supabase.
  * Firebase RTDB dependency removed.
  */
-import { supabase, uploadFileToBucket, getPublicUrl, VIDEO_BUCKET, IMAGE_BUCKET, isConfigured as isSupabaseConfigured } from '../config/supabase.js';
+import {
+  supabase,
+  uploadFileToBucket,
+  getPublicUrl,
+  VIDEO_BUCKET,
+  IMAGE_BUCKET,
+  VIDEO_BUCKET_FILE_SIZE_LIMIT_BYTES,
+  IMAGE_BUCKET_FILE_SIZE_LIMIT_BYTES,
+  ensureStorageBucket,
+  isConfigured as isSupabaseConfigured,
+} from '../config/supabase.js';
 import { getFirebaseDb, getFirebaseRtdb } from '../config/firebase.js';
 import { getCreatorPublicFields, mergeCreatorIntoPublicVideo } from '../utils/creatorProfile.js';
 import { fetchPublishedPublicVideos, fetchPublishedVideoById } from '../utils/platformPublicFeed.js';
 import { writePlatformActivityEvent } from '../services/platformActivity.service.js';
 import { enqueueSearchIndex } from '../services/searchIndex.service.js';
 import { invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
-import { resolveMediaDeliveryUrl, scheduleMediaReplication } from '../services/mediaRedundancy.service.js';
+import {
+  canUseR2MediaDirectUploads,
+  createR2MediaSignedUploadUrl,
+  getR2MediaDeliveryUrl,
+  getR2MediaObject,
+  resolveMediaDeliveryUrl,
+  scheduleMediaReplication,
+} from '../services/mediaRedundancy.service.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { ensureVideoFilenameForStorage, resolveVideoContentType } from '../utils/videoStorage.js';
@@ -48,6 +65,87 @@ async function resolvePlaybackValidation(videoInput) {
 }
 
 const CONSENT_QUESTION = 'Do you confirm you have permission to post this video?';
+const CONTENT_COMPLIANCE_VERSION = '2026-06-23.content-review.v1';
+const CONTENT_COMPLIANCE_ACKNOWLEDGEMENT_KEYS = [
+  'recordsHeld',
+  'participantConsent',
+  'platformUploadConsent',
+  'adultAgeVerified',
+  'recordsDelivery',
+  'legalPolicyCompliance',
+  'reviewPublicationWaiver',
+];
+
+function parseStrictBoolean(value) {
+  if (value === true || value === 'true' || value === 1 || value === '1') return true;
+  return false;
+}
+
+function parseMaybeJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (Array.isArray(value)) {
+    return value.reduce((acc, key) => {
+      acc[String(key)] = true;
+      return acc;
+    }, {});
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parseMaybeJsonObject(parsed);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function normalizeContentComplianceAcknowledgements(body = {}) {
+  const raw = parseMaybeJsonObject(
+    body.contentComplianceAcknowledgements ??
+    body.content_compliance_acknowledgements ??
+    body.legalAcknowledgements ??
+    body.acknowledgements,
+  );
+
+  return CONTENT_COMPLIANCE_ACKNOWLEDGEMENT_KEYS.reduce((acc, key) => {
+    acc[key] =
+      parseStrictBoolean(raw[key]) ||
+      parseStrictBoolean(body[key]) ||
+      parseStrictBoolean(body[`contentCompliance_${key}`]);
+    return acc;
+  }, {});
+}
+
+function buildContentComplianceRecord(body = {}) {
+  const acknowledgements = normalizeContentComplianceAcknowledgements(body);
+  const missing = CONTENT_COMPLIANCE_ACKNOWLEDGEMENT_KEYS.filter((key) => acknowledgements[key] !== true);
+  return {
+    complete: missing.length === 0,
+    missing,
+    version: CONTENT_COMPLIANCE_VERSION,
+    acceptedAt: new Date().toISOString(),
+    acknowledgements,
+  };
+}
+
+function contentComplianceError(res, compliance) {
+  return res.status(400).json({
+    success: false,
+    error: 'CONTENT_COMPLIANCE_REQUIRED',
+    message: 'Check every legal review acknowledgement before uploading this content.',
+    missing: compliance.missing,
+  });
+}
+
+function contentConsentError(res) {
+  return res.status(400).json({
+    success: false,
+    error: 'CONTENT_COMPLIANCE_REQUIRED',
+    message: 'Legal consent acknowledgement is required before uploading this content.',
+  });
+}
 
 function invalidateCreatorLeaderboard() {
   try {
@@ -550,6 +648,59 @@ function parseBodyBoolean(value, fallback = true) {
   return normalizeAllowPeopleToComment(value, fallback);
 }
 
+function normalizeR2CreatorVideoKey(videoPath, uid) {
+  const key = String(videoPath || '').trim().replace(/^r2:/i, '').replace(/^\/+/, '');
+  const ownerPrefix = `creator-videos/${uid}/`;
+  return key.startsWith(ownerPrefix) ? key : '';
+}
+
+function decodeR2MediaKey(encodedKey) {
+  try {
+    const key = Buffer.from(String(encodedKey || ''), 'base64url').toString('utf8').trim();
+    if (!key || key.length > 1024) return '';
+    if (key.includes('..') || key.includes('\\') || key.startsWith('/')) return '';
+    if (!key.startsWith('creator-videos/')) return '';
+    return key;
+  } catch {
+    return '';
+  }
+}
+
+export async function streamR2Media(req, res) {
+  try {
+    const key = decodeR2MediaKey(req.params?.encodedKey);
+    if (!key) return res.status(404).json({ success: false, message: 'Media not found' });
+
+    const object = await getR2MediaObject({ key, range: req.headers.range });
+    if (!object?.body || typeof object.body.pipe !== 'function') {
+      return res.status(404).json({ success: false, message: 'Media not found' });
+    }
+
+    res.status(object.contentRange ? 206 : 200);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Type', object.contentType || 'application/octet-stream');
+    if (object.contentLength != null) res.setHeader('Content-Length', String(object.contentLength));
+    if (object.contentRange) res.setHeader('Content-Range', object.contentRange);
+    if (object.etag) res.setHeader('ETag', object.etag);
+    if (object.lastModified) res.setHeader('Last-Modified', new Date(object.lastModified).toUTCString());
+
+    object.body.on('error', (err) => {
+      console.warn('[streamR2Media] stream error:', err?.message || err);
+      if (!res.headersSent) res.status(500).end();
+      else res.destroy(err);
+    });
+    return object.body.pipe(res);
+  } catch (err) {
+    const code = String(err?.name || err?.Code || err?.code || '');
+    if (/NoSuchKey|NotFound|404/i.test(code) || err?.$metadata?.httpStatusCode === 404) {
+      return res.status(404).json({ success: false, message: 'Media not found' });
+    }
+    console.error('[streamR2Media] error:', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Could not load media' });
+  }
+}
+
 // ── Signed upload URL (direct browser → Supabase) ────────────────────────────
 
 export async function prepareUpload(req, res) {
@@ -566,23 +717,67 @@ export async function prepareUpload(req, res) {
 
     const timestamp  = Date.now();
     const safeName   = ensureVideoFilenameForStorage(videoFilename, videoContentType);
-    const videoPath  = `${uid}/${timestamp}-${safeName}`;
+    let videoPath    = `${uid}/${timestamp}-${safeName}`;
     const thumbExt   = resolveThumbnailExtension(thumbnailFilename, thumbnailContentType);
     const thumbPath  = hasThumbnail ? `${uid}/${timestamp}-thumb.${thumbExt}` : null;
+    let videoUploadUrl = '';
+    let videoUploadProvider = 'supabase';
+    let videoUploadMode = 'supabase-signed';
+    let videoPublicUrl = null;
+    let videoBucket = VIDEO_BUCKET;
 
-    const { data: videoData, error: videoErr } = await supabase.storage
-      .from(VIDEO_BUCKET)
-      .createSignedUploadUrl(videoPath);
-    if (videoErr) {
-      console.error('[prepareUpload] signed URL error:', videoErr.message);
-      return res.status(500).json({ success: false, message: videoErr.message || 'Failed to create upload URL' });
+    if (canUseR2MediaDirectUploads()) {
+      try {
+        const r2Key = `creator-videos/${uid}/${timestamp}-${safeName}`;
+        const r2Upload = await createR2MediaSignedUploadUrl({
+          key: r2Key,
+          contentType: videoContentType || 'application/octet-stream',
+          metadata: {
+            user_id: uid,
+            original_filename: safeName,
+            upload_type: 'creator_video',
+          },
+        });
+        videoPath = r2Upload.key;
+        videoUploadUrl = r2Upload.uploadUrl;
+        videoUploadProvider = r2Upload.provider;
+        videoUploadMode = 'raw-put';
+        videoPublicUrl = r2Upload.publicUrl;
+        videoBucket = r2Upload.bucket;
+      } catch (err) {
+        console.warn('[prepareUpload] R2 signed URL unavailable, falling back to Supabase:', err?.message || err);
+      }
+    }
+
+    await Promise.all([
+      videoUploadUrl ? true : ensureStorageBucket(VIDEO_BUCKET, {
+        public: false,
+        fileSizeLimit: VIDEO_BUCKET_FILE_SIZE_LIMIT_BYTES,
+        allowedMimeTypes: null,
+      }),
+      ensureStorageBucket(IMAGE_BUCKET, {
+        public: true,
+        fileSizeLimit: IMAGE_BUCKET_FILE_SIZE_LIMIT_BYTES,
+        allowedMimeTypes: null,
+      }),
+    ]);
+
+    if (!videoUploadUrl) {
+      const { data: videoData, error: videoErr } = await supabase.storage
+        .from(VIDEO_BUCKET)
+        .createSignedUploadUrl(videoPath, { upsert: false });
+      if (videoErr) {
+        console.error('[prepareUpload] signed URL error:', videoErr.message);
+        return res.status(500).json({ success: false, message: videoErr.message || 'Failed to create upload URL' });
+      }
+      videoUploadUrl = videoData.signedUrl;
     }
 
     let thumbnailUploadUrl = null;
     if (thumbPath) {
       const { data: thumbData, error: thumbError } = await supabase.storage
         .from(IMAGE_BUCKET)
-        .createSignedUploadUrl(thumbPath);
+        .createSignedUploadUrl(thumbPath, { upsert: false });
       if (thumbError) {
         return res.status(500).json({ success: false, message: thumbError.message || 'Failed to create thumbnail upload URL' });
       }
@@ -593,8 +788,13 @@ export async function prepareUpload(req, res) {
 
     return res.json({
       success: true,
-      videoUploadUrl: videoData.signedUrl,
+      videoUploadUrl,
       videoPath,
+      videoUploadProvider,
+      videoUploadMode,
+      videoStorageProvider: videoUploadProvider,
+      videoBucket,
+      videoPublicUrl,
       thumbnailUploadUrl,
       thumbnailPath: thumbPath,
       watermarkRequired: watermarkFields.watermark_required,
@@ -637,10 +837,13 @@ export async function publishFromStoragePath(req, res) {
     const consentGiven           = rawConsent === true || rawConsent === 'true';
     const isPublished            = rawPublished === undefined ? true : parseBodyBoolean(rawPublished, true);
     const tokenPrice             = isPremiumContent ? Math.max(0, parseInt(String(rawTokenPrice || '0'), 10) || 0) : 0;
+    const contentCompliance      = buildContentComplianceRecord(req.body || {});
 
     if (!mainOrientationCategory)
       return res.status(400).json({ success: false, message: 'Main category is required' });
     if (!Array.isArray(tags) || tags.length < 1) tags = [mainOrientationCategory.toLowerCase().replace(/\s+/g, '-')];
+    if (!consentGiven) return contentConsentError(res);
+    if (!contentCompliance.complete) return contentComplianceError(res, contentCompliance);
 
     if (isPremiumContent) {
       const gate = await checkPremiumUploadGate(uid);
@@ -658,9 +861,19 @@ export async function publishFromStoragePath(req, res) {
       if (!Number.isNaN(n) && n >= 0) durationSeconds = Math.min(n, 86400 * 48);
     }
 
+    const requestedVideoProvider = String(req.body?.videoStorageProvider || req.body?.videoUploadProvider || '').trim();
+    const r2VideoKey = requestedVideoProvider === 'cloudflare_r2'
+      ? normalizeR2CreatorVideoKey(videoPath, uid)
+      : '';
+    if (requestedVideoProvider === 'cloudflare_r2' && !r2VideoKey) {
+      return res.status(400).json({ success: false, message: 'Invalid R2 video upload path' });
+    }
+
     const baseUrl      = process.env.SUPABASE_URL?.replace(/\/$/, '');
-    const videoUrl     = getPublicUrl(VIDEO_BUCKET, videoPath)
-      || (baseUrl ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${videoPath.split('/').map(encodeURIComponent).join('/')}` : null);
+    const videoUrl     = r2VideoKey
+      ? getR2MediaDeliveryUrl(r2VideoKey)
+      : (getPublicUrl(VIDEO_BUCKET, videoPath)
+        || (baseUrl ? `${baseUrl}/storage/v1/object/public/${VIDEO_BUCKET}/${videoPath.split('/').map(encodeURIComponent).join('/')}` : null));
     const thumbnailUrl = thumbnailPath
       ? (getPublicUrl(IMAGE_BUCKET, thumbnailPath) || (baseUrl ? `${baseUrl}/storage/v1/object/public/${IMAGE_BUCKET}/${String(thumbnailPath).split('/').map(encodeURIComponent).join('/')}` : null))
       : null;
@@ -693,8 +906,8 @@ export async function publishFromStoragePath(req, res) {
       storage_url:              videoUrl,
       stream_url:               videoUrl,
       primary_url:              videoUrl,
-      storage_provider:         'supabase+r2',
-      replication_status:       'pending',
+      storage_provider:         r2VideoKey ? 'cloudflare_r2' : 'supabase+r2',
+      replication_status:       r2VideoKey ? 'completed' : 'pending',
       title,
       description:              description || getDescriptionFallback(title),
       main_orientation_category: mainOrientationCategory,
@@ -705,6 +918,13 @@ export async function publishFromStoragePath(req, res) {
       is_premium_content:       isPremiumContent,
       token_price:              tokenPrice,
       consent_given:            consentGiven,
+      content_compliance_acknowledged: true,
+      content_compliance_acknowledged_at: contentCompliance.acceptedAt,
+      content_compliance_version: contentCompliance.version,
+      content_compliance_acknowledgements: contentCompliance.acknowledgements,
+      metadata: {
+        contentCompliance,
+      },
       creator_display_name:     creatorDisplayName || null,
       creator_avatar_url:       creatorAvatarUrl   || null,
       status:                   isLive ? 'published' : 'draft',
@@ -716,14 +936,16 @@ export async function publishFromStoragePath(req, res) {
       ...watermarkFields,
     };
     await insertPublishedVideoRow(insertRow, durationSeconds);
-    scheduleMediaReplication({
-      sourceTable: 'tiktok_videos',
-      sourceId: videoId,
-      mediaType: 'video',
-      primaryBucket: VIDEO_BUCKET,
-      primaryPath: videoPath,
-      primaryUrl: videoUrl,
-    });
+    if (!r2VideoKey) {
+      scheduleMediaReplication({
+        sourceTable: 'tiktok_videos',
+        sourceId: videoId,
+        mediaType: 'video',
+        primaryBucket: VIDEO_BUCKET,
+        primaryPath: videoPath,
+        primaryUrl: videoUrl,
+      });
+    }
     if (thumbnailPath && thumbnailUrl) {
       scheduleMediaReplication({
         sourceTable: 'tiktok_video_thumbnails',
@@ -778,6 +1000,7 @@ export async function uploadAndPublish(req, res) {
     const allowPeopleToComment = parseBodyBoolean(req.body?.allowPeopleToComment, true);
     const isPremiumContent     = req.body?.isPremiumContent === 'true' || req.body?.isPremiumContent === true;
     const tokenPrice           = isPremiumContent ? Math.max(0, parseInt(String(req.body?.tokenPrice || '0'), 10) || 0) : 0;
+    const contentCompliance    = buildContentComplianceRecord(req.body || {});
 
     if (!mainOrientationCategory) return res.status(400).json({ success: false, message: 'Main category is required' });
     if (!Array.isArray(tags) || tags.length < 1) tags = [mainOrientationCategory.toLowerCase().replace(/\s+/g, '-')];
@@ -786,6 +1009,8 @@ export async function uploadAndPublish(req, res) {
     if (!file) return res.status(400).json({ success: false, message: 'Video file is required' });
     if (req.body?.consentGiven === undefined && req.body?.consentGiven !== false)
       return res.status(400).json({ success: false, message: 'You must answer the consent question' });
+    if (!consentGiven) return contentConsentError(res);
+    if (!contentCompliance.complete) return contentComplianceError(res, contentCompliance);
 
     if (isPremiumContent) {
       const gate = await checkPremiumUploadGate(uid);
@@ -867,6 +1092,13 @@ export async function uploadAndPublish(req, res) {
       is_premium_content:       isPremiumContent,
       token_price:              tokenPrice,
       consent_given:            consentGiven,
+      content_compliance_acknowledged: true,
+      content_compliance_acknowledged_at: contentCompliance.acceptedAt,
+      content_compliance_version: contentCompliance.version,
+      content_compliance_acknowledgements: contentCompliance.acknowledgements,
+      metadata: {
+        contentCompliance,
+      },
       creator_display_name:     creatorDisplayName || null,
       creator_avatar_url:       creatorAvatarUrl   || null,
       status:                   isLive ? 'published' : 'draft',

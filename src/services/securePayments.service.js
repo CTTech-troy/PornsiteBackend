@@ -1299,6 +1299,215 @@ export async function getPaymentReconciliationReport({ hours = 24 } = {}) {
   };
 }
 
+export async function refreshAndFulfillDirectCoinPayment({ reference, orderKey = null, userId = null, io = null } = {}) {
+  const provider = 'flutterwave';
+  if (!userId) {
+    return {
+      verified: false,
+      fulfilled: false,
+      providerStatus: { error: 'Authentication is required to verify this payment.' },
+    };
+  }
+
+  let verified;
+  try {
+    verified = await verifyProviderTransaction(provider, { reference, orderKey });
+  } catch (error) {
+    logPaymentEvent('warn', 'payment.direct_coin_verification_pending', {
+      provider,
+      reference,
+      orderKey,
+      error: error?.message,
+    });
+    return {
+      verified: false,
+      fulfilled: false,
+      providerStatus: {
+        status: 'pending_or_failed',
+        error: error?.message || 'Provider verification is not complete yet.',
+      },
+    };
+  }
+
+  const directOrderKey = verified.orderKey || orderKey || reference;
+  const productId = String(verified.productId || '').trim();
+  const productType = normalizeProductType(verified.productType, productId);
+  const providerReference = verified.reference || reference;
+  const providerUserId = String(verified.userId || '').trim();
+
+  const suspiciousReason = [
+    !String(directOrderKey || '').startsWith('xsc_') ? 'invalid_direct_coin_order' : '',
+    providerUserId && providerUserId !== userId ? 'provider_user_mismatch' : '',
+    productType !== 'coins' ? 'provider_product_type_mismatch' : '',
+    !productId ? 'provider_product_missing' : '',
+  ].find(Boolean);
+
+  if (suspiciousReason) {
+    await writeFraudLog({
+      userId,
+      provider,
+      providerReference,
+      reason: suspiciousReason,
+      riskScore: 95,
+      riskFlags: ['direct_coin_payment_rejected', suspiciousReason],
+      metadata: { verified, reference, orderKey },
+    });
+    return {
+      verified: true,
+      fulfilled: false,
+      suspicious: true,
+      error: 'Provider metadata mismatch',
+      payment: {
+        id: null,
+        orderKey: directOrderKey,
+        provider,
+        reference: providerReference,
+        productType: productType || null,
+        productId: productId || null,
+        amount: Number(verified.amount || 0),
+        currency: verified.currency,
+        status: 'suspicious',
+        successful: false,
+        source: 'payment-service-direct',
+      },
+      providerStatus: {
+        status: verified.status,
+        amount: verified.amount,
+        currency: verified.currency,
+        reference: providerReference,
+        orderKey: directOrderKey,
+      },
+    };
+  }
+
+  const payment = {
+    id: null,
+    orderKey: directOrderKey,
+    provider,
+    reference: providerReference,
+    productType: 'coins',
+    productId,
+    amount: Number(verified.amount || 0),
+    currency: verified.currency,
+    status: paymentSuccessStatus(),
+    successful: true,
+    expired: false,
+    expiresAt: null,
+    fulfilledAt: new Date().toISOString(),
+    createdAt: null,
+    updatedAt: new Date().toISOString(),
+    source: 'payment-service-direct',
+  };
+
+  try {
+    const result = await fulfillCoinPurchase({
+      userId,
+      packageId: productId,
+      orderKey: directOrderKey,
+      reference: providerReference,
+      provider,
+      amountPaid: verified.amount,
+      currency: verified.currency,
+      metadata: {
+        directPaymentService: true,
+        orderKey: directOrderKey,
+        providerTransactionId: verified.providerTransactionId || null,
+        verification: verified,
+      },
+    });
+    const duplicate = result?.duplicate === true;
+
+    await writeAudit({
+      userId,
+      eventType: 'payment.fulfilled.direct_coin_callback',
+      message: duplicate
+        ? 'Direct payment-service coin purchase already fulfilled'
+        : 'Direct payment-service coin purchase fulfilled after provider verification',
+      metadata: { provider, reference: providerReference, orderKey: directOrderKey, productId, result },
+    });
+
+    if (!duplicate) {
+      await writeFinanceActivityEvent({
+        eventType: 'coins_purchased',
+        userId,
+        productType: 'coins',
+        productId,
+        amountUsd: amountToUsd(verified.amount, verified.currency),
+        amountTokens: result?.package?.totalCoins ?? result?.package?.coins ?? null,
+        provider,
+        reference: providerReference,
+        status: paymentSuccessStatus(),
+        metadata: {
+          source: 'payment-service-direct',
+          currency: verified.currency,
+          providerAmount: verified.amount,
+          orderKey: directOrderKey,
+          result,
+        },
+      }, { io });
+    }
+
+    emitPaymentRealtimeEvent({
+      io,
+      intent: {
+        id: null,
+        user_id: userId,
+        product_type: 'coins',
+        product_id: productId,
+        amount: verified.amount,
+        currency: verified.currency,
+        intent_key: directOrderKey,
+      },
+      result,
+      provider,
+      reference: providerReference,
+      status: paymentSuccessStatus(),
+      source: 'payment-service-direct',
+      verified,
+    });
+
+    return {
+      verified: true,
+      fulfilled: true,
+      duplicate,
+      payment,
+      providerStatus: {
+        status: verified.status,
+        amount: verified.amount,
+        currency: verified.currency,
+        reference: providerReference,
+        orderKey: directOrderKey,
+      },
+      result,
+    };
+  } catch (error) {
+    await writeFraudLog({
+      userId,
+      provider,
+      providerReference,
+      reason: error.code || 'direct_coin_fulfillment_failed',
+      riskScore: error.code === 'PAYMENT_AMOUNT_MISMATCH' ? 95 : 65,
+      riskFlags: ['direct_coin_payment_failed', error.code || 'fulfillment_failed'],
+      metadata: { message: error.message, verified, reference, orderKey },
+    });
+    return {
+      verified: true,
+      fulfilled: false,
+      suspicious: error.code === 'PAYMENT_AMOUNT_MISMATCH',
+      error: error.message,
+      payment: { ...payment, status: error.code === 'PAYMENT_AMOUNT_MISMATCH' ? 'suspicious' : 'failed', successful: false },
+      providerStatus: {
+        status: verified.status,
+        amount: verified.amount,
+        currency: verified.currency,
+        reference: providerReference,
+        orderKey: directOrderKey,
+        error: error.message,
+      },
+    };
+  }
+}
+
 export async function refreshAndFulfillPaymentIntent({ reference, orderKey = null, userId = null, io = null } = {}) {
   const current = await getPaymentIntentStatus({ reference, orderKey, userId });
   if (!current) return null;

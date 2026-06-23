@@ -16,6 +16,27 @@ const SUPABASE_STORAGE_S3_URL =
 const IMAGE_BUCKET = process.env.SUPABASE_IMAGE_BUCKET || 'images';
 const VIDEO_BUCKET = process.env.SUPABASE_VIDEO_BUCKET || 'videos';
 const IMPORT_STAGING_BUCKET = process.env.IMPORT_STAGING_BUCKET || 'imports-staging';
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+
+function readByteLimit(byteEnvName, mbEnvName, fallbackBytes) {
+  const rawBytes = Number(process.env[byteEnvName] || 0);
+  if (Number.isFinite(rawBytes) && rawBytes > 0) return Math.round(rawBytes);
+  const rawMb = Number(process.env[mbEnvName] || 0);
+  if (Number.isFinite(rawMb) && rawMb > 0) return Math.round(rawMb * MB);
+  return fallbackBytes;
+}
+
+const VIDEO_BUCKET_FILE_SIZE_LIMIT_BYTES = readByteLimit(
+  'SUPABASE_VIDEO_BUCKET_FILE_SIZE_LIMIT_BYTES',
+  'SUPABASE_VIDEO_BUCKET_FILE_SIZE_LIMIT_MB',
+  readByteLimit('MAX_VIDEO_UPLOAD_BYTES', 'MAX_VIDEO_UPLOAD_MB', GB),
+);
+const IMAGE_BUCKET_FILE_SIZE_LIMIT_BYTES = readByteLimit(
+  'SUPABASE_IMAGE_BUCKET_FILE_SIZE_LIMIT_BYTES',
+  'SUPABASE_IMAGE_BUCKET_FILE_SIZE_LIMIT_MB',
+  readByteLimit('MAX_THUMBNAIL_UPLOAD_BYTES', 'MAX_THUMBNAIL_UPLOAD_MB', GB),
+);
 
 let supabase = null;
 let supabaseUnavailableUntil = 0;
@@ -222,10 +243,15 @@ function isBucketAlreadyExistsError(error) {
   return /resource already exists|bucket already exists|already exists|duplicate/i.test(String(error?.message || error || ''));
 }
 
-async function ensureStorageBucket(bucket, { public: isPublic = false } = {}) {
+async function ensureStorageBucket(bucket, { public: isPublic = false, fileSizeLimit = null, allowedMimeTypes = undefined } = {}) {
   if (!isConfigured()) return false;
   try {
-    const { error } = await supabase.storage.createBucket(bucket, { public: isPublic });
+    const bucketOptions = {
+      public: isPublic,
+      ...(fileSizeLimit ? { fileSizeLimit } : {}),
+      ...(allowedMimeTypes !== undefined ? { allowedMimeTypes } : {}),
+    };
+    const { error } = await supabase.storage.createBucket(bucket, bucketOptions);
     const alreadyExists = error && isBucketAlreadyExistsError(error);
     if (error && !alreadyExists) {
       const msg = error.message || '';
@@ -234,7 +260,7 @@ async function ensureStorageBucket(bucket, { public: isPublic = false } = {}) {
       }
     }
     if (!error || alreadyExists) {
-      const { error: updateError } = await supabase.storage.updateBucket(bucket, { public: isPublic });
+      const { error: updateError } = await supabase.storage.updateBucket(bucket, bucketOptions);
       if (updateError && !/row-level security|RLS|policy|fetch failed/i.test(updateError.message || '')) {
         console.warn(`Supabase bucket "${bucket}" update:`, updateError.message || updateError);
       }
@@ -252,8 +278,16 @@ async function ensureStorageBucket(bucket, { public: isPublic = false } = {}) {
 
 async function ensureBuckets() {
   if (!isConfigured()) return;
-  await ensureStorageBucket(VIDEO_BUCKET, { public: false });
-  await ensureStorageBucket(IMAGE_BUCKET, { public: true });
+  await ensureStorageBucket(VIDEO_BUCKET, {
+    public: false,
+    fileSizeLimit: VIDEO_BUCKET_FILE_SIZE_LIMIT_BYTES,
+    allowedMimeTypes: null,
+  });
+  await ensureStorageBucket(IMAGE_BUCKET, {
+    public: true,
+    fileSizeLimit: IMAGE_BUCKET_FILE_SIZE_LIMIT_BYTES,
+    allowedMimeTypes: null,
+  });
   await ensureStorageBucket(IMPORT_STAGING_BUCKET, { public: false });
 }
 
@@ -272,5 +306,7 @@ export {
   IMAGE_BUCKET,
   VIDEO_BUCKET,
   IMPORT_STAGING_BUCKET,
+  VIDEO_BUCKET_FILE_SIZE_LIMIT_BYTES,
+  IMAGE_BUCKET_FILE_SIZE_LIMIT_BYTES,
   SUPABASE_STORAGE_S3_URL,
 };

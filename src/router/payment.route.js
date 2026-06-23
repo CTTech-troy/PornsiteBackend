@@ -6,6 +6,7 @@ import { createRateLimitStore } from '../middleware/rateLimitStore.js';
 import {
   getPaymentIntentStatus,
   processProviderWebhook,
+  refreshAndFulfillDirectCoinPayment,
   refreshAndFulfillPaymentIntent,
 } from '../services/securePayments.service.js';
 import { verifyWebhookSignature } from '../services/paymentGateway.service.js';
@@ -65,6 +66,29 @@ router.get('/verify/:reference', requireAuth, async (req, res) => {
     const orderKey = String(req.query.orderKey || req.query.tx_ref || '').trim() || null;
     const status = await getPaymentIntentStatus({ reference, orderKey, userId: req.uid });
     if (!status) {
+      const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
+      if (refresh) {
+        const direct = await refreshAndFulfillDirectCoinPayment({
+          reference,
+          orderKey,
+          userId: req.uid,
+          io: req.app?.get('io') || null,
+        });
+        if (direct?.providerStatus || direct?.verified || direct?.fulfilled || direct?.suspicious) {
+          return res.json({
+            ok: true,
+            verified: direct.verified === true && direct.fulfilled === true,
+            payment: direct.payment || null,
+            providerStatus: direct.providerStatus || null,
+            fulfillment: {
+              fulfilled: direct.fulfilled === true,
+              duplicate: direct.duplicate === true,
+              suspicious: direct.suspicious === true,
+              error: direct.error || null,
+            },
+          });
+        }
+      }
       return res.status(404).json({ ok: false, verified: false, error: 'Payment session not found.' });
     }
 

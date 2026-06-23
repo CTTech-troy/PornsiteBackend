@@ -90,6 +90,7 @@ function attachPublishFiles(req, res, next) {
 router.get('/stream/:id', optionalAuth, streamCtrl.getStreamUrl);
 
 router.post('/playback-events', optionalAuth, playbackAnalytics.recordPlaybackEvent);
+router.get('/media/r2/:encodedKey', optionalAuth, videoPublish.streamR2Media);
 
 router.post('/:id/ad-session', optionalAuth, vastAdCtrl.postAdSession);
 router.post('/:id/ad-events', optionalAuth, vastAdCtrl.postAdEventHandler);
