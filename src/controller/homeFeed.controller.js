@@ -13,8 +13,8 @@ import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platf
 
 const MIN_PAGES = 1;
 const MAX_PAGES = 5;
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 500;
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
 const HOME_FEED_COUNT_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_COUNT_TIMEOUT_MS || 1200));
 const HOME_FEED_LAYOUT_TIMEOUT_MS = Math.max(250, Number(process.env.HOME_FEED_LAYOUT_TIMEOUT_MS || 1200));
 const HOME_FEED_EXTERNAL_TIMEOUT_MS = Math.max(500, Number(process.env.HOME_FEED_EXTERNAL_TIMEOUT_MS || 2500));
@@ -174,6 +174,7 @@ export async function getHomeFeed(req, res) {
       category: category || undefined,
     });
 
+    res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=30, stale-while-revalidate=120');
     return res.json({
       success: true,
       items: sliced,
@@ -197,6 +198,7 @@ export async function getHomeFeed(req, res) {
     });
   } catch (err) {
     console.error('[homeFeed] getHomeFeed error:', err?.message || err);
+    res.set('Cache-Control', 'public, max-age=10, stale-while-revalidate=30');
     return res.status(200).json({
       success: false,
       data: [],

@@ -1,5 +1,4 @@
 import { supabase } from '../config/supabase.js';
-import { getPlatformSettingsMap } from './platformSettings.service.js';
 
 const SAFE_CAMPAIGN_PLACEMENTS = new Set([
   'homepage_banner',
@@ -87,41 +86,7 @@ function isBillableForServe(row) {
 }
 
 export async function listActiveCampaigns(placement, { networkOnly = false } = {}) {
-  if (placement && !SAFE_CAMPAIGN_PLACEMENTS.has(placement)) return [];
-  if (!supabase) return [];
-  const runQuery = async ({ includePriority = true, includeNetwork = true } = {}) => {
-    let query = supabase
-      .from('ad_campaigns')
-      .select('*')
-      .eq('status', 'active')
-      .eq('is_active', true);
-
-    if (placement) query = query.eq('placement', placement);
-    if (networkOnly && includeNetwork) query = query.eq('network_visible', true);
-    if (includePriority) query = query.order('priority', { ascending: false, nullsFirst: false });
-    return query.order('created_at', { ascending: false }).limit(48);
-  };
-
-  let { data, error } = await runQuery();
-  if (error && (error.code === '42703' || error.code === 'PGRST204')) {
-    const retry = await runQuery({ includePriority: false, includeNetwork: !/network_visible/i.test(error.message || '') });
-    data = retry.data;
-    error = retry.error;
-  }
-  if (error) {
-    if (isMissingTable(error)) return [];
-    console.warn('[ads] active campaign lookup failed; returning empty inventory', {
-      placement,
-      networkOnly,
-      message: error.message || String(error),
-      code: error.code,
-    });
-    return [];
-  }
-
-  return filterScheduled(data || [])
-    .filter((row) => SAFE_CAMPAIGN_PLACEMENTS.has(row.placement))
-    .filter(isBillableForServe);
+  return [];
 }
 
 export function pickRotatedCampaign(rows, { seed = '', excludeId = null, rotationSeconds = 90 } = {}) {
@@ -165,10 +130,9 @@ export async function getNetworkCampaign({ seed = '', excludeId = null } = {}) {
 }
 
 export async function getSidebarPoolMeta() {
-  const settings = await getPlatformSettingsMap();
-  const minRequired = Math.max(1, parseInt(settings.sidebar_min_active_ads || '3', 10) || 3);
-  const rotationSeconds = Math.max(30, parseInt(settings.network_rotation_seconds || '90', 10) || 90);
-  const rows = await listActiveCampaigns('sidebar');
+  const minRequired = 3;
+  const rotationSeconds = 90;
+  const rows = [];
   return {
     minRequired,
     rotationSeconds,
@@ -178,11 +142,10 @@ export async function getSidebarPoolMeta() {
 }
 
 export async function getNetworkPricing() {
-  const settings = await getPlatformSettingsMap();
   return {
-    runAdFeeUsd: parseFloat(settings.network_partner_run_ad_fee_usd || '49') || 49,
-    publishFeeUsd: parseFloat(settings.network_partner_publish_fee_usd || '0') || 0,
-    sidebarMinActiveAds: parseInt(settings.sidebar_min_active_ads || '3', 10) || 3,
-    rotationSeconds: parseInt(settings.network_rotation_seconds || '90', 10) || 90,
+    runAdFeeUsd: 49,
+    publishFeeUsd: 0,
+    sidebarMinActiveAds: 3,
+    rotationSeconds: 90,
   };
 }

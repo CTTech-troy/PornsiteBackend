@@ -8,7 +8,7 @@ import { supabase } from '../config/supabase.js';
 import { validateAdForRender } from '../services/safeAdPolicy.service.js';
 import { getPlatformSettingsMap, resolveVastSettingsFromMap } from '../services/platformSettings.service.js';
 
-const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5963164';
 const VAST_PROXY_TIMEOUT_MS = 5000;
 const VAST_PROXY_MAX_BYTES = 1_000_000;
 const TRUSTED_VAST_HOSTS = ['s.magsrv.com', 'magsrv.com', 'vast.yomeno.xyz', 'yomeno.xyz'];
@@ -204,7 +204,7 @@ export async function getNextAd(req, res) {
       durationSeconds: 0,
       clickUrl: null,
       provider: settings.provider,
-      zoneId: settings.provider === 'clickadilla' ? '1492236' : '5932212',
+      zoneId: settings.provider === 'clickadilla' ? '1492236' : '5963164',
     };
     return res.json({ success: true, ad });
   } catch (err) {

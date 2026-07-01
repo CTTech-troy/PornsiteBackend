@@ -996,10 +996,10 @@ function importedVideoCategoryVariants(value) {
   return [...new Set([raw, normalized, spaced, dashed, humanized].map((item) => String(item || '').trim()).filter(Boolean))];
 }
 
-export async function listImportedVideos({ page = 1, limit = 50, category = null } = {}) {
+export async function listImportedVideos({ page = 1, limit = 20, category = null } = {}) {
   ensureSupabase();
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(100, Math.max(1, Number(limit) || 50));
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
   const from = (pageNum - 1) * limitNum;
   const to = from + limitNum - 1;
   const variants = importedVideoCategoryVariants(category);

@@ -81,7 +81,7 @@ export async function getPublicVastSettings(req, res) {
     return res.status(200).json({
       enabled: true,
       provider: 'monetag',
-      url: 'https://s.magsrv.com/v1/vast.php?idz=5932212',
+      url: 'https://s.magsrv.com/v1/vast.php?idz=5963164',
       recoverable: true,
     });
   }

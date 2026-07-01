@@ -94,6 +94,8 @@ const SAFE_AD_DOMAINS = [
   'monetag.com',
   'www.monetag.com',
   'highperformanceformat.com',
+  'effectivecpmnetwork.com',
+  'pl30142051.effectivecpmnetwork.com',
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',

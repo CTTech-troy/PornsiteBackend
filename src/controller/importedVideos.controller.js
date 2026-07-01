@@ -48,9 +48,10 @@ function mapImportedVideo(row = {}) {
 export async function getImportedVideos(req, res) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const category = String(req.query.category || '').trim() || null;
     const rows = await listImportedVideos({ page, limit, category });
+    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
     return res.json({
       success: true,
       data: rows.map(mapImportedVideo),
@@ -69,6 +70,7 @@ export async function getImportedVideoCategories(req, res) {
   try {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
     const rows = await listImportedVideoCategories({ limit });
+    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=1800');
     return res.json({
       success: true,
       data: rows,

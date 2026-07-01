@@ -423,7 +423,7 @@ async function deleteDocuments(indexName, ids) {
 export async function searchPostgres(q, { page = 1, limit = 20, filters = {} } = {}) {
   if (!supabase) return { items: [], total: 0, hasMore: false };
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
   const offset = (pageNum - 1) * limitNum;
   const term = String(q || '').trim();
 
@@ -512,7 +512,7 @@ export async function searchMeilisearch(q, { page = 1, limit = 20, filters = {},
   if (!ms) return null;
   await ensureVideosIndex();
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
   const offset = (pageNum - 1) * limitNum;
   const filterParts = ['deleted = false'];
   if (filters.premium === true) filterParts.push('isPremiumContent = true');

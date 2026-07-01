@@ -1,5 +1,4 @@
 import { supabase } from '../config/supabase.js';
-import { getPlatformSettingsMap } from './platformSettings.service.js';
 import {
   EXOCLICK_DISPLAY_SCRIPT_URL,
   EXOCLICK_DISPLAY_ZONE_ID,
@@ -11,6 +10,34 @@ import { APPROVED_MONETAG_SCRIPT_URL, APPROVED_MONETAG_ZONE_ID } from './safeAdP
 const SLOT_CACHE_MS = 30_000;
 let slotCache = null;
 let slotCacheAt = 0;
+
+const CODE_MANAGED_SLOT_SETTINGS = Object.freeze({
+  sidebar_ads_enabled: 'true',
+  sidebar_custom_ads_enabled: 'true',
+  sidebar_third_party_enabled: 'true',
+  ad_revenue_enabled: 'true',
+  google_ad_manager_enabled: 'false',
+  juicyads_enabled: 'true',
+  juicyads_sidebar_zone_id: '1118510',
+  juicyads_script_url: 'https://poweredby.jads.co/js/jads.js',
+  monetag_enabled: 'true',
+  monetag_native_enabled: 'true',
+  monetag_sidebar_enabled: 'true',
+  monetag_banner_enabled: 'true',
+  monetag_native_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_sidebar_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_banner_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_allowed_pages: '["home","video","creator","feed","search","live"]',
+  monetag_allowed_slots: '["home_feed_native","home_mobile_inline_300x100","category_feed_native","feed_native","mobile_inline","category_feed","home_after_subheader_900x250","home_sidebar","home_bottom_900x250","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","homepage_top","homepage_bottom","leaderboard","banner"]',
+  monetag_allowed_domains: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]',
+});
+
+function codeManagedAdsError() {
+  const err = new Error('Ad slots are managed manually in the codebase.');
+  err.status = 410;
+  err.code = 'ADS_MANAGED_IN_CODE';
+  return err;
+}
 
 const PAGE_ALIASES = {
   home: ['home', 'homepage', 'main'],
@@ -278,13 +305,7 @@ function isSafeAdSlot(slot) {
 }
 
 export async function listAdSlots() {
-  if (!supabase) return getDefaultSlots();
-  const { data, error } = await supabase.from('ad_slots').select('*').order('priority');
-  if (error) {
-    if (isMissingTable(error)) return getDefaultSlots();
-    throw error;
-  }
-  return mergeDefaultSlots(data || []);
+  return getDefaultSlots();
 }
 
 export async function getAdSlotByKey(slotKey) {
@@ -293,94 +314,15 @@ export async function getAdSlotByKey(slotKey) {
 }
 
 export async function upsertAdSlot(slot, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const location = normalizeSlotLocation(slot.location);
-  const isHomeAfterSubheader = isHomeAfterSubheaderSlot(slot, location);
-  const dimensions = normalizeSlotDimensions(slot, location);
-  const row = {
-    slot_key: isHomeAfterSubheader ? HOME_AFTER_SUBHEADER_SLOT_KEY : slot.slot_key,
-    name: isHomeAfterSubheader ? HOME_AFTER_SUBHEADER_BANNER_NAME : slot.name,
-    page: isHomeAfterSubheader ? 'home' : slot.page,
-    location: isHomeAfterSubheader ? 'after_subheader' : location,
-    width: dimensions.width,
-    height: dimensions.height,
-    size_label: isHomeAfterSubheader ? HOME_AFTER_SUBHEADER_BANNER_SIZE : (slot.size_label || `${dimensions.width}x${dimensions.height}`),
-    provider_type: isHomeAfterSubheader ? 'custom' : (slot.provider_type || 'mixed'),
-    provider_id: ['juicyads', 'monetag', 'exoclick', 'google_ad_manager'].includes(String(slot.provider_id || '').toLowerCase())
-      ? String(slot.provider_id).toLowerCase()
-      : (slot.provider_id || 'juicyads'),
-    zone_id: slot.zone_id || null,
-    embed_code: slot.embed_code || null,
-    custom_enabled: slot.custom_enabled !== false,
-    third_party_enabled: isHomeAfterSubheader ? false : slot.third_party_enabled !== false,
-    display_mode: isHomeAfterSubheader ? 'custom_only' : (slot.display_mode || 'custom_first'),
-    is_active: slot.is_active !== false,
-    priority: Number(slot.priority) || 100,
-    device_target: isHomeAfterSubheader ? 'all' : (slot.device_target || 'desktop'),
-    frequency_cap: Number(slot.frequency_cap) || 0,
-    schedule_start: slot.schedule_start || null,
-    schedule_end: slot.schedule_end || null,
-    config: parseSlotConfig(slot),
-    updated_at: new Date().toISOString(),
-  };
-
-  const { data, error } = await supabase
-    .from('ad_slots')
-    .upsert(row, { onConflict: 'slot_key' })
-    .select('*')
-    .maybeSingle();
-  if (error) throw error;
-
-  await supabase.from('ad_provider_audit_log').insert({
-    provider_id: slot.provider_id || 'juicyads',
-    admin_id: admin?.id || null,
-    admin_email: admin?.email || null,
-    action: 'upsert_ad_slot',
-    after_state: data,
-  });
-
-  invalidateSlotCache();
-  invalidateConfigCache();
-  return data;
+  throw codeManagedAdsError();
 }
 
 export async function patchAdSlot(slotKey, patch, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const before = await getAdSlotByKey(slotKey);
-  const { data, error } = await supabase
-    .from('ad_slots')
-    .update({ ...patch, updated_at: new Date().toISOString() })
-    .eq('slot_key', slotKey)
-    .select('*')
-    .maybeSingle();
-  if (error) throw error;
-
-  await supabase.from('ad_provider_audit_log').insert({
-    provider_id: data?.provider_id,
-    admin_id: admin?.id || null,
-    admin_email: admin?.email || null,
-    action: 'patch_ad_slot',
-    before_state: before,
-    after_state: data,
-  });
-
-  invalidateSlotCache();
-  invalidateConfigCache();
-  return data;
+  throw codeManagedAdsError();
 }
 
 export async function deleteAdSlot(slotKey, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const before = await getAdSlotByKey(slotKey);
-  const { error } = await supabase.from('ad_slots').delete().eq('slot_key', slotKey);
-  if (error) throw error;
-  await supabase.from('ad_provider_audit_log').insert({
-    admin_id: admin?.id || null,
-    admin_email: admin?.email || null,
-    action: 'delete_ad_slot',
-    before_state: before,
-  });
-  invalidateSlotCache();
+  throw codeManagedAdsError();
 }
 
 export function invalidateSlotCache() {
@@ -392,11 +334,11 @@ export async function getPublicSlotsConfig({ page = null, device = 'desktop' } =
   const now = Date.now();
   if (!page && slotCache && now - slotCacheAt < SLOT_CACHE_MS) return slotCache;
 
-  const [settings, slots, providerConfig] = await Promise.all([
-    getPlatformSettingsMap(),
+  const [slots, providerConfig] = await Promise.all([
     listAdSlots(),
     getPublicAdConfig(),
   ]);
+  const settings = CODE_MANAGED_SLOT_SETTINGS;
 
   const globalEnabled = settings.sidebar_ads_enabled !== 'false';
   const customEnabled = settings.sidebar_custom_ads_enabled !== 'false';
@@ -418,6 +360,8 @@ export async function getPublicSlotsConfig({ page = null, device = 'desktop' } =
     'monetag.com',
     'www.monetag.com',
     'highperformanceformat.com',
+    'effectivecpmnetwork.com',
+    'pl30142051.effectivecpmnetwork.com',
     'profitablecpmrate.com',
     'profitablecpmgate.com',
     'alwingulla.com',
@@ -533,7 +477,7 @@ export async function resolveSlotRenderPlan(slotKey, { customAd = null } = {}) {
   const slot = await getAdSlotByKey(slotKey);
   if (!slot || !slot.is_active || !isScheduled(slot)) return { type: 'none' };
 
-  const settings = await getPlatformSettingsMap();
+  const settings = CODE_MANAGED_SLOT_SETTINGS;
   if (settings.sidebar_ads_enabled === 'false') return { type: 'none' };
 
   const hasCustom = Boolean(customAd) && slot.custom_enabled && settings.sidebar_custom_ads_enabled !== 'false';

@@ -34,18 +34,20 @@ import {
   rejectCreatorPayout,
   retryPayoutAdmin,
   uploadPayoutProof,
-  getAdCampaigns,
-  createAdCampaign,
-  updateAdCampaign,
-  deleteAdCampaign,
-  uploadAdImage,
   subscribeFinanceEvents,
 } from '../controller/adminFinance.controller.js';
-import * as adNetworkAdmin from '../controller/adNetworkAdmin.controller.js';
 import { getAdminVastAnalytics } from '../controller/vastAd.controller.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } }); // 5 MB cap for finance proofs and ad images.
+
+function adsManagedInCode(_req, res) {
+  return res.status(410).json({
+    success: false,
+    code: 'ADS_MANAGED_IN_CODE',
+    message: 'Ad campaigns and ad network settings are managed manually in the codebase and cannot be changed from the admin panel.',
+  });
+}
 
 router.get('/events', requireAdminAuth, requireFinanceAccess, subscribeFinanceEvents);
 
@@ -95,15 +97,15 @@ router.post('/payouts/:id/proof', upload.single('proof'), uploadPayoutProof);
 router.post('/payouts/:id/reject', rejectCreatorPayout);
 
 // Ad Campaigns — image upload must come before generic :id routes
-router.post('/ads/upload-image', upload.single('image'), uploadAdImage);
-router.get('/ads', getAdCampaigns);
+router.post('/ads/upload-image', adsManagedInCode);
+router.get('/ads', adsManagedInCode);
 router.get('/vast-ads', getAdminVastAnalytics);
-router.post('/ads', createAdCampaign);
-router.put('/ads/:id', updateAdCampaign);
-router.delete('/ads/:id', deleteAdCampaign);
-router.get('/ads/network-settings', adNetworkAdmin.getNetworkSettings);
-router.put('/ads/network-settings', adNetworkAdmin.saveNetworkSettings);
-router.get('/ads/network-orders', adNetworkAdmin.listNetworkOrders);
-router.post('/ads/network-orders/:id/mark-paid', adNetworkAdmin.markOrderPaid);
+router.post('/ads', adsManagedInCode);
+router.put('/ads/:id', adsManagedInCode);
+router.delete('/ads/:id', adsManagedInCode);
+router.get('/ads/network-settings', adsManagedInCode);
+router.put('/ads/network-settings', adsManagedInCode);
+router.get('/ads/network-orders', adsManagedInCode);
+router.post('/ads/network-orders/:id/mark-paid', adsManagedInCode);
 
 export default router;

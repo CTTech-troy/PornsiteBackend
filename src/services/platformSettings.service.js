@@ -11,13 +11,38 @@ const QUALITY_OPTIONS = ['auto', '480p', '720p', '1080p'];
 const STORAGE_OPTIONS = ['supabase', 'firebase', 'cloudinary', 's3', 'mux', 'bunny'];
 const WATERMARK_POSITION_OPTIONS = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
 const WATERMARK_ANIMATION_OPTIONS = ['none', 'pulse', 'fade'];
-const VAST_PROVIDER_OPTIONS = ['monetag', 'clickadilla', 'custom'];
+const VAST_PROVIDER_OPTIONS = ['exoclick', 'clickadilla', 'custom'];
 export const FEED_PAGE_SIZE_OPTIONS = [50, 100, 200, 500];
 
 export const VAST_PROVIDER_URLS = Object.freeze({
-  monetag: 'https://s.magsrv.com/v1/vast.php?idz=5932212',
+  exoclick: 'https://s.magsrv.com/v1/vast.php?idz=5963164',
   clickadilla: 'https://vast.yomeno.xyz/vast?spot_id=1492236',
 });
+
+const CODE_MANAGED_AD_SECTIONS = new Set(['Video Ad Settings', 'Safe Ads', 'Ad Reward Settings']);
+const CODE_MANAGED_AD_KEY_PREFIXES = [
+  'ad_',
+  'vast_',
+  'exoclick_',
+  'juicyads_',
+  'monetag_',
+  'sidebar_',
+  'google_ad_manager_',
+];
+const CODE_MANAGED_AD_KEYS = new Set([
+  'network_partner_run_ad_fee_usd',
+  'network_partner_publish_fee_usd',
+  'network_rotation_seconds',
+  'sidebar_min_active_ads',
+]);
+
+export function isCodeManagedAdSetting(defOrKey) {
+  const def = typeof defOrKey === 'string' ? CATALOG_BY_KEY.get(defOrKey) : defOrKey;
+  const key = String(typeof defOrKey === 'string' ? defOrKey : defOrKey?.key || '');
+  if (def?.section && CODE_MANAGED_AD_SECTIONS.has(def.section)) return true;
+  if (CODE_MANAGED_AD_KEYS.has(key)) return true;
+  return CODE_MANAGED_AD_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
 
 export const PLATFORM_SETTINGS_CATALOG = [
   // Brand and company
@@ -97,9 +122,9 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'ad_reward_max_daily_per_viewer', label: 'Max Rewards per Viewer / Day', section: 'Ad Reward Settings', type: 'number', defaultValue: '100', min: 1, max: 10000 },
   { key: 'ad_reward_min_complete_ms', label: 'Min Complete Duration (ms)', section: 'Ad Reward Settings', type: 'number', defaultValue: '1000', min: 0, max: 30000 },
   { key: 'vast_enabled', label: 'Enable VAST Pre-roll Ads', section: 'Video Ad Settings', type: 'toggle', defaultValue: 'true', public: true },
-  { key: 'vast_provider', label: 'Active VAST Provider', section: 'Video Ad Settings', type: 'select', defaultValue: 'monetag', options: VAST_PROVIDER_OPTIONS, public: true },
+  { key: 'vast_provider', label: 'Active VAST Provider', section: 'Video Ad Settings', type: 'select', defaultValue: 'exoclick', options: VAST_PROVIDER_OPTIONS, public: true },
   { key: 'vast_url_custom', label: 'Custom VAST URL', section: 'Video Ad Settings', type: 'url', defaultValue: '' },
-  { key: 'exoclick_vast_tag_url', label: 'ExoClick VAST Tag URL', section: 'Monetization', type: 'url', defaultValue: 'https://s.magsrv.com/v1/vast.php?idz=5932212', public: true },
+  { key: 'exoclick_vast_tag_url', label: 'ExoClick VAST Tag URL', section: 'Monetization', type: 'url', defaultValue: 'https://s.magsrv.com/v1/vast.php?idz=5963164', public: true },
   { key: 'vast_ad_timeout_sec', label: 'VAST Ad Load Timeout (sec)', section: 'Monetization', type: 'number', defaultValue: '5', min: 3, max: 30 },
   { key: 'vast_skip_after_seconds_default', label: 'Default Ad Skip After (sec)', section: 'Monetization', type: 'number', defaultValue: '5', min: 0, max: 30, public: true },
   { key: 'vast_estimated_cpm_usd', label: 'Estimated VAST CPM (USD) — platform gross', section: 'Ad Reward Settings', type: 'number', defaultValue: '2', min: 0, description: 'Used to estimate platform gross per valid view (CPM ÷ 1000).' },
@@ -126,7 +151,7 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'ad_feed_ads_enabled', label: 'Feed Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'ad_banner_ads_enabled', label: 'Banner Ads Enabled', section: 'Safe Ads', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'ad_allowed_placements', label: 'Allowed Placements (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["video_preroll","feed","native_card","between_content","sidebar","home_after_subheader_900x250","home_sidebar","home_softcore_160x600","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]' },
-  { key: 'ad_allowed_domains', label: 'Allowed Ad Domains (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["juicyads.com","www.juicyads.com","js.juicyads.com","poweredby.jads.co","jads.co","exoclick.com","magsrv.com","a.magsrv.com","s.magsrv.com","vast.yomeno.xyz","yomeno.xyz","googleads.g.doubleclick.net","securepubads.g.doubleclick.net","googlesyndication.com","adtng.com","a.adtng.com","quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]' },
+  { key: 'ad_allowed_domains', label: 'Allowed Ad Domains (JSON)', section: 'Safe Ads', type: 'json', defaultValue: '["juicyads.com","www.juicyads.com","js.juicyads.com","poweredby.jads.co","jads.co","exoclick.com","magsrv.com","a.magsrv.com","s.magsrv.com","vast.yomeno.xyz","yomeno.xyz","googleads.g.doubleclick.net","securepubads.g.doubleclick.net","googlesyndication.com","adtng.com","a.adtng.com","quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]' },
   { key: 'juicyads_enabled', label: 'JuicyAds Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'true', public: true },
   { key: 'juicyads_script_url', label: 'JuicyAds Script URL', section: 'Monetization', type: 'url', defaultValue: 'https://poweredby.jads.co/js/jads.js' },
   { key: 'juicyads_sidebar_zone_id', label: 'JuicyAds Sidebar Zone ID', section: 'Monetization', type: 'text', defaultValue: '1118510' },
@@ -143,7 +168,7 @@ export const PLATFORM_SETTINGS_CATALOG = [
   { key: 'monetag_banner_zone_id', label: 'Monetag Banner Zone ID', section: 'Monetization', type: 'text', defaultValue: '242279' },
   { key: 'monetag_allowed_pages', label: 'Monetag Allowed Pages (JSON)', section: 'Monetization', type: 'json', defaultValue: '["home","video","creator","feed","search","live"]' },
   { key: 'monetag_allowed_slots', label: 'Monetag Allowed Slots (JSON)', section: 'Monetization', type: 'json', defaultValue: '["home_feed_native","home_mobile_inline_300x100","category_feed_native","feed_native","mobile_inline","category_feed","home_after_subheader_900x250","home_sidebar","home_bottom_900x250","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","homepage_top","homepage_bottom","leaderboard","banner"]' },
-  { key: 'monetag_allowed_domains', label: 'Monetag Allowed Domains (JSON)', section: 'Monetization', type: 'json', defaultValue: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]' },
+  { key: 'monetag_allowed_domains', label: 'Monetag Allowed Domains (JSON)', section: 'Monetization', type: 'json', defaultValue: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]' },
   { key: 'google_ad_manager_enabled', label: 'Google Ad Manager Enabled', section: 'Monetization', type: 'toggle', defaultValue: 'false' },
   { key: 'coin_to_usd_rate', label: 'Coin to USD Rate', section: 'Monetization', type: 'number', defaultValue: '0.01', min: 0 },
   { key: 'video_purchase_creator_percent', label: 'Premium Video Creator Share (%)', section: 'Monetization', type: 'number', defaultValue: '70', min: 0, max: 100 },
@@ -331,7 +356,8 @@ export async function getPlatformSettingsMap(force = false) {
   try {
     const { rows } = await readStoredSettings();
     for (const row of rows) {
-      if (row?.key && CATALOG_BY_KEY.has(row.key) && !CATALOG_BY_KEY.get(row.key).sensitive) {
+      const def = row?.key ? CATALOG_BY_KEY.get(row.key) : null;
+      if (row?.key && def && !def.sensitive && !isCodeManagedAdSetting(def)) {
         defaults[row.key] = String(row.value ?? '');
       }
     }
@@ -358,7 +384,7 @@ export async function getAdminSettingsPayload() {
 
   return {
     tableMissing,
-    settings: PLATFORM_SETTINGS_CATALOG.map((def) => {
+    settings: PLATFORM_SETTINGS_CATALOG.filter((def) => !isCodeManagedAdSetting(def)).map((def) => {
       const row = stored.get(def.key);
       const envConfigured = def.envKey ? Boolean(process.env[def.envKey]) : undefined;
       return {
@@ -401,6 +427,10 @@ export async function saveAdminSettings(settings, admin = 'Admin') {
     const def = CATALOG_BY_KEY.get(key);
     if (!def) {
       errors.push({ key, message: 'Unknown setting key.' });
+      continue;
+    }
+    if (isCodeManagedAdSetting(def)) {
+      errors.push({ key, message: 'Advertising settings are managed manually in the codebase.' });
       continue;
     }
     try {
@@ -457,7 +487,8 @@ export async function getRevenueSettingsPayload() {
   const { settings, tableMissing } = await getAdminSettingsPayload();
   const revenueKeys = new Set(
     PLATFORM_SETTINGS_CATALOG.filter((d) =>
-      d.section === 'Revenue Settings' || d.section === 'Creator Payouts' || d.section === 'Monetization' || d.section === 'Ad Reward Settings',
+      !isCodeManagedAdSetting(d)
+      && (d.section === 'Revenue Settings' || d.section === 'Creator Payouts' || d.section === 'Monetization' || d.section === 'Ad Reward Settings'),
     )
       .map((d) => d.key),
   );
@@ -491,8 +522,8 @@ function normalizeVastPlaybackUrl(value) {
 }
 
 export function resolveVastSettingsFromMap(map = {}) {
-  const rawProvider = String(map.vast_provider || 'monetag').trim().toLowerCase();
-  const provider = VAST_PROVIDER_OPTIONS.includes(rawProvider) ? rawProvider : 'monetag';
+  const rawProvider = String(map.vast_provider || 'exoclick').trim().toLowerCase();
+  const provider = VAST_PROVIDER_OPTIONS.includes(rawProvider) ? rawProvider : 'exoclick';
   const url = provider === 'custom'
     ? normalizeVastPlaybackUrl(map.vast_url_custom)
     : VAST_PROVIDER_URLS[provider];

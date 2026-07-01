@@ -3,11 +3,6 @@ import { requireAdminAuth, requireFinanceAccess } from '../middleware/adminAuth.
 import {
   getPublicAdConfigHandler,
   postAdMonitoringEvent,
-  getAdminProviders,
-  patchAdminProvider,
-  putAdminPriorityOrder,
-  postAdminZone,
-  deleteAdminZone,
   getAdminMonitoringOverview,
   getAdminSessionTimeline,
   getAdminAnalytics,
@@ -18,14 +13,7 @@ import {
   postAdminFallback,
   getAdminAuditLog,
   getPublicSlotsConfigHandler,
-  getAdminSlots,
-  postAdminSlot,
-  patchAdminSlot,
-  deleteAdminSlot,
-  saveJuicyAdsSettings,
   getPublicSafeAdPolicyHandler,
-  getAdminSafeAdSettings,
-  saveAdminSafeAdSettings,
 } from '../controller/adProvider.controller.js';
 
 const router = Router();
@@ -64,11 +52,19 @@ const adminRouter = Router();
 adminRouter.use(requireAdminAuth);
 adminRouter.use(requireFinanceAccess);
 
-adminRouter.get('/providers', getAdminProviders);
-adminRouter.patch('/providers/:id', patchAdminProvider);
-adminRouter.put('/providers/priority', putAdminPriorityOrder);
-adminRouter.post('/zones', postAdminZone);
-adminRouter.delete('/zones/:id', deleteAdminZone);
+function adsManagedInCode(_req, res) {
+  return res.status(410).json({
+    success: false,
+    code: 'ADS_MANAGED_IN_CODE',
+    message: 'Ad configuration is managed manually in the codebase and cannot be changed from the admin panel.',
+  });
+}
+
+adminRouter.get('/providers', adsManagedInCode);
+adminRouter.patch('/providers/:id', adsManagedInCode);
+adminRouter.put('/providers/priority', adsManagedInCode);
+adminRouter.post('/zones', adsManagedInCode);
+adminRouter.delete('/zones/:id', adsManagedInCode);
 adminRouter.get('/monitoring', getAdminMonitoringOverview);
 adminRouter.get('/monitoring/sessions/:sessionId', getAdminSessionTimeline);
 adminRouter.get('/analytics', getAdminAnalytics);
@@ -78,13 +74,13 @@ adminRouter.get('/health/juicy-diagnostics', getAdminJuicyDiagnostics);
 adminRouter.post('/health/probe-vast', postAdminProbeVast);
 adminRouter.post('/health/fallback', postAdminFallback);
 adminRouter.get('/audit', getAdminAuditLog);
-adminRouter.get('/slots', getAdminSlots);
-adminRouter.post('/slots', postAdminSlot);
-adminRouter.patch('/slots/:slotKey', patchAdminSlot);
-adminRouter.delete('/slots/:slotKey', deleteAdminSlot);
-adminRouter.put('/juicyads/settings', saveJuicyAdsSettings);
-adminRouter.get('/safe-settings', getAdminSafeAdSettings);
-adminRouter.put('/safe-settings', saveAdminSafeAdSettings);
+adminRouter.get('/slots', adsManagedInCode);
+adminRouter.post('/slots', adsManagedInCode);
+adminRouter.patch('/slots/:slotKey', adsManagedInCode);
+adminRouter.delete('/slots/:slotKey', adsManagedInCode);
+adminRouter.put('/juicyads/settings', adsManagedInCode);
+adminRouter.get('/safe-settings', adsManagedInCode);
+adminRouter.put('/safe-settings', adsManagedInCode);
 
 router.use('/admin', adminRouter);
 

@@ -1657,7 +1657,7 @@ async function resolvePurchasablePublicVideo(videoId) {
     }
   }
 
-  const rows = await fetchPublishedPublicVideos({ page: 1, limit: 500, premiumOnly: false });
+  const rows = await fetchPublishedPublicVideos({ page: 1, limit: 100, premiumOnly: false });
   const match = rows.find((row) => {
     const id = getPurchaseVideoId(row);
     return id === lookup || getPathSafeVideoId(id) === lookup;

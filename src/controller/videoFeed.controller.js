@@ -15,8 +15,8 @@ import { getFeedPageSizeSetting, normalizeFeedPageSize } from '../services/platf
 
 const CACHE_MAX_ITEMS = 500;
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 500;
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
 const PER_PAGE_HINT = 10;
 
 let cache = { items: [], ts: 0 };
@@ -204,7 +204,7 @@ export function decodeFeedCursor(cursor) {
 }
 
 export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, options = {}) {
-  const { viewerUid = null, cursor = null, category = null } = options;
+  const { viewerUid = null, cursor = null, category = null, lean = false } = options;
   const cursorPage = decodeFeedCursor(cursor)?.page;
   const pageNum = cursorPage || Math.max(1, parseInt(String(page), 10) || 1);
   const limitNum = Math.min(MAX_LIMIT, Math.max(1, parseInt(String(limit), 10) || DEFAULT_LIMIT));
@@ -262,7 +262,7 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
   const total = await countPublishedPublicVideos({ category }).catch(() => sliced.length);
   const totalPages = total > 0 ? Math.max(1, Math.ceil(total / limitNum)) : 0;
   const hasMore = totalPages > 0 ? pageNum < totalPages : (sliced.length >= limitNum || sliced.length >= PER_PAGE_HINT);
-  return await withRtdbMerge({
+  const result = {
     data: sliced,
     total: Math.max(Number(total) || 0, sliced.length),
     page: pageNum,
@@ -271,7 +271,17 @@ export async function getVideosPaginated(page = 1, limit = DEFAULT_LIMIT, option
     nextCursor: hasMore ? encodeFeedCursor(pageNum + 1) : null,
     limit: limitNum,
     batchSize: sliced.length,
-  });
+  };
+
+  if (lean) {
+    result.data.forEach((item) => {
+      item.totalLikes = item.totalLikes ?? 0;
+      item.totalComments = item.totalComments ?? 0;
+    });
+    return result;
+  }
+
+  return await withRtdbMerge(result);
 }
 
 export async function getLatestVideos(req, res) {
@@ -284,6 +294,7 @@ export async function getLatestVideos(req, res) {
     const result = await getVideosPaginated(page, limit, {
       viewerUid: req.uid || null,
       cursor: req.query.cursor || null,
+      lean: req.query.lean === '1',
     });
     res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=20, stale-while-revalidate=60');
     return res.json(result);
@@ -315,6 +326,7 @@ export async function getCategoryVideos(req, res) {
       viewerUid: req.uid || null,
       cursor: req.query.cursor || null,
       category,
+      lean: req.query.lean === '1',
     });
     res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=20, stale-while-revalidate=60');
     return res.json({ ...result, category: category || null });

@@ -9,6 +9,7 @@ import { fetchPublishedPublicVideos } from '../utils/platformPublicFeed.js';
 import { enqueueSearchDocument } from '../services/searchIndex.service.js';
 import { getTopCreatorsLeaderboard, invalidateTopCreatorsCache } from '../services/creatorLeaderboard.service.js';
 import { ensureOfficialCompanyAccount, isOfficialCompanyIdentifier } from '../services/officialCompany.service.js';
+import { getFirebaseAuth } from '../config/firebase.js';
 
 const SCRAPER_CACHE = new Map();
 const SCRAPER_CACHE_TTL = 10 * 60 * 1000; // 10 min
@@ -34,9 +35,50 @@ function isUuidLike(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(String(value || ''));
 }
 
+// Firebase Auth UIDs: 20-36 alphanumeric characters, no dashes
+function isFirebaseUid(value) {
+  return /^[A-Za-z0-9]{20,36}$/.test(String(value || ''));
+}
+
 function isColumnMissingError(error) {
   const msg = String(error?.message || '');
   return error?.code === '42703' || error?.code === 'PGRST204' || /column|schema cache|Could not find/i.test(msg);
+}
+
+const DICEBEAR_HOST = 'api.dicebear.com';
+
+/**
+ * Returns the best available avatar URL for a platform user.
+ * If Supabase has only a DiceBear placeholder (set at signup), checks Firebase Auth
+ * for a real photoURL and lazily backfills Supabase so subsequent calls are fast.
+ */
+async function resolveAvatar(uid, supabaseAvatar) {
+  const url = String(supabaseAvatar || '').trim();
+  // If we already have a real URL (not DiceBear, not empty), use it
+  if (url && !url.includes(DICEBEAR_HOST)) return url;
+
+  // Attempt Firebase Auth photoURL lookup
+  try {
+    const auth = getFirebaseAuth();
+    if (!auth) return url;
+    const userRecord = await auth.getUser(uid);
+    const photoURL = String(userRecord?.photoURL || '').trim();
+    if (photoURL && !photoURL.includes(DICEBEAR_HOST)) {
+      // Lazily backfill Supabase so future lookups skip this step
+      if (supabase && isConfigured()) {
+        supabase
+          .from('users')
+          .update({ avatar: photoURL, avatar_url: photoURL })
+          .eq('id', uid)
+          .then(() => {})
+          .catch(() => {});
+      }
+      return photoURL;
+    }
+  } catch {
+    // Firebase lookup failed — return whatever Supabase has
+  }
+  return url;
 }
 
 /**
@@ -143,9 +185,8 @@ async function getPlatformCreatorByIdentifier(identifier) {
   if (!raw) return null;
   if (isOfficialCompanyIdentifier(raw)) {
     const company = await ensureOfficialCompanyAccount();
-    const allVideos = await fetchPublishedPublicVideos({ page: 1, limit: 500 }).catch(() => []);
-    const videos = (Array.isArray(allVideos) ? allVideos : [])
-      .filter((v) => String(v.userId || v.user_id || v.creatorId || v.creator_id || '') === String(company.id))
+    const creatorVideos = await fetchPublishedPublicVideos({ page: 1, limit: 100, creatorId: company.id }).catch(() => []);
+    const videos = (Array.isArray(creatorVideos) ? creatorVideos : [])
       .map(mapPlatformVideoToCreatorVideo)
       .sort((a, b) => {
         const left = Date.parse(String(a.createdAt || '')) || 0;
@@ -175,7 +216,102 @@ async function getPlatformCreatorByIdentifier(identifier) {
       _source: 'official_company',
     };
   }
-  if (!isUuidLike(raw)) return null;
+  // ── Username / non-UUID lookup ─────────────────────────────
+  if (!isUuidLike(raw)) {
+    // Try to find a platform user by username so we never fall through to the external scraper
+    const { data: userByName } = await supabase
+      .from('users')
+      .select('id, username, display_name, full_name, avatar, avatar_url, followers, following, verified')
+      .eq('username', raw)
+      .maybeSingle();
+
+    if (userByName?.id) {
+      const { data: creatorByUser } = await supabase
+        .from('creators')
+        .select('id, user_id, display_name, bio, creator_type, active, status, social_links, banner_url, cover_image, verified, created_at')
+        .eq('user_id', userByName.id)
+        .maybeSingle();
+
+      const creatorVideos = await fetchPublishedPublicVideos({ page: 1, limit: 100, creatorId: userByName.id }).catch(() => []);
+      const videos = (Array.isArray(creatorVideos) ? creatorVideos : []).map(mapPlatformVideoToCreatorVideo);
+      const name = creatorByUser?.display_name || userByName.display_name || userByName.full_name || userByName.username || 'Creator';
+      const avatar = await resolveAvatar(userByName.id, userByName.avatar_url || userByName.avatar);
+
+      return {
+        id: userByName.id,
+        slug: userByName.id,
+        userId: userByName.id,
+        creatorId: creatorByUser?.id || null,
+        name,
+        displayName: name,
+        username: userByName.username || null,
+        avatar,
+        avatar_url: avatar,
+        banner: creatorByUser?.banner_url || creatorByUser?.cover_image || '',
+        bannerUrl: creatorByUser?.banner_url || creatorByUser?.cover_image || '',
+        bio: creatorByUser?.bio || '',
+        socialLinks: creatorByUser?.social_links || {},
+        social_links: creatorByUser?.social_links || {},
+        creatorType: creatorByUser?.creator_type || 'pstar',
+        followers: Number(userByName.followers || 0),
+        following: Number(userByName.following || 0),
+        verified: creatorByUser?.verified === true || userByName.verified === true,
+        videosCount: videos.length,
+        totalViews: videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views ?? 0) || 0), 0),
+        videos,
+        _source: 'platform_username',
+      };
+    }
+    // Could be a Firebase UID passed as slug (looks like a username but is actually an internal ID)
+    if (isFirebaseUid(raw)) {
+      const { data: userById } = await supabase
+        .from('users')
+        .select('id, username, display_name, full_name, avatar, avatar_url, followers, following, verified')
+        .eq('id', raw)
+        .maybeSingle();
+
+      if (userById?.id) {
+        const { data: creatorByUser } = await supabase
+          .from('creators')
+          .select('id, user_id, display_name, bio, creator_type, active, status, social_links, banner_url, cover_image, verified, created_at')
+          .eq('user_id', userById.id)
+          .maybeSingle();
+
+        const creatorVideos = await fetchPublishedPublicVideos({ page: 1, limit: 100, creatorId: userById.id }).catch(() => []);
+        const videos = (Array.isArray(creatorVideos) ? creatorVideos : []).map(mapPlatformVideoToCreatorVideo);
+        const name = creatorByUser?.display_name || userById.display_name || userById.full_name || userById.username || 'Creator';
+        const avatar = await resolveAvatar(userById.id, userById.avatar_url || userById.avatar);
+
+        return {
+          id: userById.id,
+          slug: userById.id,
+          userId: userById.id,
+          creatorId: creatorByUser?.id || null,
+          name,
+          displayName: name,
+          username: userById.username || null,
+          avatar,
+          avatar_url: avatar,
+          banner: creatorByUser?.banner_url || creatorByUser?.cover_image || '',
+          bannerUrl: creatorByUser?.banner_url || creatorByUser?.cover_image || '',
+          bio: creatorByUser?.bio || '',
+          socialLinks: creatorByUser?.social_links || {},
+          social_links: creatorByUser?.social_links || {},
+          creatorType: creatorByUser?.creator_type || 'pstar',
+          followers: Number(userById.followers || 0),
+          following: Number(userById.following || 0),
+          verified: creatorByUser?.verified === true || userById.verified === true,
+          videosCount: videos.length,
+          totalViews: videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views ?? 0) || 0), 0),
+          videos,
+          _source: 'platform_firebase_uid',
+        };
+      }
+    }
+
+    // Not a platform user and not a recognisable internal ID — let the caller decide whether to use the scraper
+    return null;
+  }
 
   let { data: creator, error } = await supabase
     .from('creators')
@@ -207,7 +343,41 @@ async function getPlatformCreatorByIdentifier(identifier) {
     if (error) throw error;
   }
 
-  if (!creator?.user_id) return null;
+  // No creator row found — try users table directly so we don't fall through to the external scraper
+  if (!creator?.user_id) {
+    const { data: userDirect } = await supabase
+      .from('users')
+      .select('id, username, display_name, full_name, avatar, avatar_url, followers, following, verified')
+      .eq('id', raw)
+      .maybeSingle();
+
+    if (userDirect?.id) {
+      const creatorVideos = await fetchPublishedPublicVideos({ page: 1, limit: 100, creatorId: userDirect.id }).catch(() => []);
+      const videos = (Array.isArray(creatorVideos) ? creatorVideos : []).map(mapPlatformVideoToCreatorVideo);
+      const name = userDirect.display_name || userDirect.full_name || userDirect.username || 'Creator';
+      const avatar = await resolveAvatar(userDirect.id, userDirect.avatar_url || userDirect.avatar);
+      return {
+        id: userDirect.id,
+        slug: userDirect.id,
+        userId: userDirect.id,
+        name,
+        displayName: name,
+        username: userDirect.username || null,
+        avatar,
+        avatar_url: avatar,
+        bio: '',
+        followers: Number(userDirect.followers || 0),
+        following: Number(userDirect.following || 0),
+        verified: userDirect.verified === true,
+        videosCount: videos.length,
+        totalViews: videos.reduce((s, v) => s + (Number(v.totalViews ?? v.views ?? 0) || 0), 0),
+        videos,
+        _source: 'platform_user_direct',
+      };
+    }
+    return null;
+  }
+
   const status = String(creator.status || 'active').toLowerCase();
   if (creator.active === false || ['banned', 'suspended', 'removed'].includes(status)) return null;
 
@@ -217,9 +387,8 @@ async function getPlatformCreatorByIdentifier(identifier) {
     .eq('id', creator.user_id)
     .maybeSingle();
 
-  const allVideos = await fetchPublishedPublicVideos({ page: 1, limit: 500 }).catch(() => []);
-  const videos = (Array.isArray(allVideos) ? allVideos : [])
-    .filter((v) => String(v.userId || v.user_id || v.creatorId || v.creator_id || '') === String(creator.user_id))
+  const creatorVideos = await fetchPublishedPublicVideos({ page: 1, limit: 100, creatorId: creator.user_id }).catch(() => []);
+  const videos = (Array.isArray(creatorVideos) ? creatorVideos : [])
     .map(mapPlatformVideoToCreatorVideo)
     .sort((a, b) => {
       const left = Date.parse(String(a.createdAt || '')) || 0;
@@ -234,6 +403,8 @@ async function getPlatformCreatorByIdentifier(identifier) {
     user?.username ||
     'Creator';
 
+  const avatar = await resolveAvatar(creator.user_id, user?.avatar_url || user?.avatar);
+
   return {
     id: creator.user_id,
     slug: creator.user_id,
@@ -242,8 +413,8 @@ async function getPlatformCreatorByIdentifier(identifier) {
     name,
     displayName: name,
     username: user?.username || null,
-    avatar: user?.avatar_url || user?.avatar || '',
-    avatar_url: user?.avatar_url || user?.avatar || '',
+    avatar,
+    avatar_url: avatar,
     banner: creator.banner_url || creator.cover_image || '',
     bannerUrl: creator.banner_url || creator.cover_image || '',
     banner_url: creator.banner_url || creator.cover_image || '',
@@ -283,6 +454,17 @@ export async function getCreatorBySlug(req, res) {
     }
   } catch (platformErr) {
     console.warn('creators.platformDetail', platformErr?.message || platformErr);
+  }
+
+  // Never send internal IDs (UUID, Firebase UID, numeric) to the external scraper.
+  // Platform creators that weren't found above simply don't have a public profile.
+  const decodedSlug = decodeURIComponent(slug);
+  if (
+    isUuidLike(slug) || isUuidLike(decodedSlug) ||
+    isFirebaseUid(slug) || isFirebaseUid(decodedSlug) ||
+    /^\d+$/.test(slug)
+  ) {
+    return res.status(404).json({ success: false, error: 'Creator not found' });
   }
 
   const key = process.env.RAPIDAPI_SCRAPER_KEY;

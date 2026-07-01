@@ -1,5 +1,4 @@
 import { supabase } from '../config/supabase.js';
-import { getPlatformSettingsMap } from './platformSettings.service.js';
 import {
   APPROVED_MONETAG_SCRIPT_URL,
   APPROVED_MONETAG_ZONE_ID,
@@ -21,10 +20,12 @@ const QUGE5_HOST_PATTERN = /quge5\.com/i;
 export const EXOCLICK_DISPLAY_SCRIPT_URL = 'https://a.magsrv.com/ad-provider.js';
 export const EXOCLICK_DISPLAY_ZONE_ID = '5933054';
 export const EXOCLICK_DISPLAY_INS_CLASS = 'eas6a97888e6';
-export const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
-export const EXOCLICK_VAST_ZONE_ID = '5932212';
+export const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5963164';
+export const EXOCLICK_VAST_ZONE_ID = '5963164';
 const LEGACY_EXOCLICK_VAST_ZONE_IDS = new Set(['5932212', '5933056']);
 const LEGACY_EXOCLICK_VAST_TAG_URLS = new Set([
+  'https://s.magsrv.com/v1/vast.php?idz=5932212',
+  'https://s.magsrv.com/v1/vast.php?idz=5933056',
   'https://s.magsrv.com/v1/vast.php?idzone=5932212',
   'https://s.magsrv.com/v1/vast.php?idzone=5933056',
 ]);
@@ -45,6 +46,32 @@ const EXOCLICK_DISPLAY_ZONE_SPECS = [
   { placement: 'sidebar', width: 300, height: 250 },
 ];
 const EXOCLICK_DISPLAY_PLACEMENTS = new Set(EXOCLICK_DISPLAY_ZONE_SPECS.map((z) => z.placement));
+const CODE_MANAGED_AD_SETTINGS = Object.freeze({
+  ad_auto_fallback_enabled: 'true',
+  ad_revenue_enabled: 'true',
+  google_ad_manager_enabled: 'false',
+  juicyads_enabled: 'true',
+  juicyads_script_url: 'https://poweredby.jads.co/js/jads.js',
+  juicyads_sidebar_zone_id: '1118510',
+  monetag_enabled: 'true',
+  monetag_native_enabled: 'true',
+  monetag_sidebar_enabled: 'true',
+  monetag_banner_enabled: 'true',
+  monetag_script_url: APPROVED_MONETAG_SCRIPT_URL,
+  monetag_native_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_sidebar_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_banner_zone_id: APPROVED_MONETAG_ZONE_ID,
+  vast_ad_timeout_sec: '5',
+  vast_skip_after_seconds_default: '5',
+  vast_estimated_cpm_usd: '2',
+});
+
+function codeManagedAdsError() {
+  const err = new Error('Ad configuration is managed manually in the codebase.');
+  err.status = 410;
+  err.code = 'ADS_MANAGED_IN_CODE';
+  return err;
+}
 
 function isMissingTable(err) {
   const msg = String(err?.message || err?.code || '');
@@ -60,16 +87,7 @@ function isMissingTable(err) {
 }
 
 export async function listProviders() {
-  if (!supabase) return getDefaultProviders();
-  const { data, error } = await supabase
-    .from('ad_providers')
-    .select('*')
-    .order('priority', { ascending: true });
-  if (error) {
-    if (isMissingTable(error)) return getDefaultProviders();
-    throw error;
-  }
-  return data?.length ? mergeBuiltinProviders(data) : getDefaultProviders();
+  return getDefaultProviders();
 }
 
 export async function getProviderById(id) {
@@ -78,136 +96,27 @@ export async function getProviderById(id) {
 }
 
 export async function updateProvider(id, patch, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const before = await getProviderById(id);
-  const payload = {
-  ...patch,
-    updated_at: new Date().toISOString(),
-  };
-  const { data, error } = await supabase
-    .from('ad_providers')
-    .update(payload)
-    .eq('id', id)
-    .select('*')
-    .maybeSingle();
-  if (error) throw error;
-  if (!data) {
-    const builtIn = getDefaultProviders().find((p) => p.id === id);
-    if (builtIn) {
-      const { data: inserted, error: upsertError } = await supabase
-        .from('ad_providers')
-        .upsert({ ...builtIn, ...payload }, { onConflict: 'id' })
-        .select('*')
-        .maybeSingle();
-      if (upsertError) throw upsertError;
-      await logAudit({
-        providerId: id,
-        admin,
-        action: 'upsert_provider',
-        before,
-        after: inserted,
-      });
-      invalidateConfigCache();
-      return inserted;
-    }
-  }
-  await logAudit({
-    providerId: id,
-    admin,
-    action: 'update_provider',
-    before,
-    after: data,
-  });
-  invalidateConfigCache();
-  return data;
+  throw codeManagedAdsError();
 }
 
 export async function listZones(providerId = null) {
-  if (!supabase) return getDefaultZones(providerId);
-  let query = supabase.from('ad_zones').select('*').order('placement');
-  if (providerId) query = query.eq('provider_id', providerId);
-  const { data, error } = await query;
-  if (error) {
-    if (isMissingTable(error)) return getDefaultZones(providerId);
-    throw error;
-  }
-  return mergeBuiltinZones(data || [], providerId);
+  return getDefaultZones(providerId);
 }
 
 export async function upsertZone(zone, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const row = {
-    provider_id: zone.provider_id,
-    placement: zone.placement,
-    zone_id: zone.zone_id,
-    tag_url: zone.tag_url || null,
-    width: zone.width ?? null,
-    height: zone.height ?? null,
-    is_active: zone.is_active !== false,
-    config: zone.config || {},
-    updated_at: new Date().toISOString(),
-  };
-  const { data, error } = await supabase
-    .from('ad_zones')
-    .upsert(row, { onConflict: 'provider_id,placement,zone_id' })
-    .select('*')
-    .maybeSingle();
-  if (error) throw error;
-  await logAudit({
-    providerId: zone.provider_id,
-    admin,
-    action: zone.id ? 'update_zone' : 'create_zone',
-    before: null,
-    after: data,
-  });
-  invalidateConfigCache();
-  return data;
+  throw codeManagedAdsError();
 }
 
 export async function deleteZone(id, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const { data: before } = await supabase.from('ad_zones').select('*').eq('id', id).maybeSingle();
-  const { error } = await supabase.from('ad_zones').delete().eq('id', id);
-  if (error) throw error;
-  await logAudit({
-    providerId: before?.provider_id,
-    admin,
-    action: 'delete_zone',
-    before,
-    after: null,
-  });
-  invalidateConfigCache();
+  throw codeManagedAdsError();
 }
 
 export async function getPriorityOrder() {
-  const settings = await getPlatformSettingsMap();
-  try {
-    const parsed = JSON.parse(settings.ad_provider_priority_order || '[]');
-    if (Array.isArray(parsed) && parsed.length) {
-      const order = parsed.map(String).filter((slug) => !HARD_BLOCKED_PROVIDERS.has(slug));
-      if (samePriorityOrder(order, LEGACY_SAFE_PRIORITY)) return SAFE_PRIORITY;
-      return order;
-    }
-  } catch { /* ignore */ }
   return SAFE_PRIORITY;
 }
 
 export async function savePriorityOrder(order, admin = null) {
-  if (!supabase) throw new Error('Database unavailable');
-  const value = JSON.stringify((Array.isArray(order) ? order : []).map(String).filter((slug) => !HARD_BLOCKED_PROVIDERS.has(slug)));
-  const { error } = await supabase
-    .from('platform_settings')
-    .upsert({ key: 'ad_provider_priority_order', value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-  if (error) throw error;
-  await logAudit({
-    providerId: null,
-    admin,
-    action: 'update_priority_order',
-    before: null,
-    after: { order: value },
-  });
-  invalidateConfigCache();
-  return value;
+  throw codeManagedAdsError();
 }
 
 function resolveSafeMonetagScriptUrl(url) {
@@ -279,14 +188,14 @@ function normalizeExoClickZone(zone) {
 }
 
 export async function resolveActiveProviders({ type = null, placement = null } = {}) {
-  const [providers, zones, settings, priority] = await Promise.all([
+  const [providers, zones, priority] = await Promise.all([
     listProviders(),
     listZones(),
-    getPlatformSettingsMap(),
     getPriorityOrder(),
   ]);
 
-  const autoFallback = settings.ad_auto_fallback_enabled !== 'false';
+  const settings = CODE_MANAGED_AD_SETTINGS;
+  const autoFallback = true;
   const enabledSlugs = {
     juicyads: settings.juicyads_enabled !== 'false',
     monetag: settings.monetag_enabled === 'true',
@@ -318,7 +227,7 @@ export async function getPublicAdConfig() {
   const now = Date.now();
   if (configCache && now - configCacheAt < CONFIG_CACHE_MS) return configCache;
 
-  const settings = await getPlatformSettingsMap();
+  const settings = CODE_MANAGED_AD_SETTINGS;
   const resolved = await resolveActiveProviders();
   const safePolicy = await getPublicSafeAdPolicy();
   const juicyScript = settings.juicyads_script_url || 'https://poweredby.jads.co/js/jads.js';

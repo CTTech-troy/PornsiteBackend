@@ -1,7 +1,6 @@
 import crypto from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
-import { getPlatformSettingsMap, resolveVastSettingsFromMap } from './platformSettings.service.js';
 import { resolveActiveProviders } from './adProvider.service.js';
 import { isMissingDbFeature } from './revenueCalculation.service.js';
 import { creditValidAdView } from './creatorAdReward.service.js';
@@ -12,8 +11,10 @@ const UNLOCK_TTL_SEC = Number(process.env.VAST_AD_UNLOCK_TTL_SEC) || 600;
 const AD_METADATA_READ_TIMEOUT_MS = Number(process.env.AD_METADATA_READ_TIMEOUT_MS) || 3500;
 const VAST_PROBE_TIMEOUT_MS = Number(process.env.VAST_PROBE_TIMEOUT_MS) || 4500;
 const VAST_PROBE_CACHE_MS = Number(process.env.VAST_PROBE_CACHE_MS) || 60_000;
-const APPROVED_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+const APPROVED_DEFAULT_VAST_TAG = 'https://s.magsrv.com/v1/vast.php?idz=5963164';
 const LEGACY_DEFAULT_VAST_TAGS = new Set([
+  'https://s.magsrv.com/v1/vast.php?idz=5932212',
+  'https://s.magsrv.com/v1/vast.php?idz=5933056',
   'https://s.magsrv.com/v1/vast.php?idzone=5932212',
   'https://s.magsrv.com/v1/vast.php?idzone=5933056',
 ]);
@@ -388,46 +389,37 @@ async function countViewerPlaysSince({ userId, fingerprint, sinceIso }) {
 }
 
 async function getVastSettings() {
-  let map = {};
-  try {
-    map = await withTimeout(getPlatformSettingsMap(), AD_METADATA_READ_TIMEOUT_MS, 'platform ad settings');
-  } catch (err) {
-    console.warn('[vastAd] using default ad settings:', err?.message || err);
-  }
-  const resolvedVast = resolveVastSettingsFromMap(map);
-  const enabled = resolvedVast.enabled;
-  const skipAfterSeconds = Math.max(0, Number(map.vast_skip_after_seconds_default) || 5);
-  const timeoutSec = Math.max(3, Number(map.vast_ad_timeout_sec) || 5);
-  const estimatedCpmUsd = Math.max(0, Number(map.vast_estimated_cpm_usd) || 2);
-  const frequencyVideos = Math.max(1, Number(map.ad_preroll_frequency_videos) || 3);
-  const cooldownSec = Math.max(0, Number(map.ad_preroll_cooldown_seconds) || 600);
-  const probability = clampProbability(map.ad_preroll_probability ?? 1);
+  const enabled = true;
+  const skipAfterSeconds = 5;
+  const timeoutSec = 5;
+  const estimatedCpmUsd = 2;
+  const frequencyVideos = 3;
+  const cooldownSec = 600;
+  const probability = 1;
 
-  let vastTagUrl = normalizeVastTagUrl(resolvedVast.url || map.exoclick_vast_tag_url || DEFAULT_VAST_TAG);
+  let vastTagUrl = normalizeVastTagUrl(DEFAULT_VAST_TAG);
   let fallbackVastTags = [];
 
-  if (!resolvedVast.url) {
-    try {
-      const { providers } = await withTimeout(
-        resolveActiveProviders({ type: 'vast', placement: 'video_preroll' }),
-        AD_METADATA_READ_TIMEOUT_MS,
-        'active VAST providers',
-      );
-      const tags = providers
-        .flatMap((p) => (p.zones || []).map((z) => z.tag_url).filter(Boolean))
-        .filter(Boolean);
-      if (tags.length) {
-        vastTagUrl = normalizeVastTagUrl(tags[0]);
-        fallbackVastTags = tags.slice(1).map(normalizeVastTagUrl);
-      }
-    } catch {
-      /* use platform default */
+  try {
+    const { providers } = await withTimeout(
+      resolveActiveProviders({ type: 'vast', placement: 'video_preroll' }),
+      AD_METADATA_READ_TIMEOUT_MS,
+      'code-managed VAST providers',
+    );
+    const tags = providers
+      .flatMap((p) => (p.zones || []).map((z) => z.tag_url).filter(Boolean))
+      .filter(Boolean);
+    if (tags.length) {
+      vastTagUrl = normalizeVastTagUrl(tags[0]);
+      fallbackVastTags = tags.slice(1).map(normalizeVastTagUrl);
     }
+  } catch {
+    /* use code default */
   }
 
   return {
     enabled,
-    provider: resolvedVast.provider,
+    provider: 'exoclick',
     vastTagUrl,
     fallbackVastTags,
     skipAfterSeconds,
@@ -623,7 +615,7 @@ export async function recordAdEvent({ sessionId, event, metadata = {}, userId, f
   }
 
   const normalized = String(event || '').toLowerCase();
-  const allowed = ['impression', 'started', 'complete', 'skip', 'error', 'click', 'watch_progress', 'unsupported'];
+  const allowed = ['requested', 'loaded', 'impression', 'started', 'complete', 'skip', 'error', 'click', 'clicked', 'main_video_started', 'watch_progress', 'unsupported'];
   if (!allowed.includes(normalized)) {
     const err = new Error('Invalid ad event');
     err.statusCode = 400;

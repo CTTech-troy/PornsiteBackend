@@ -914,6 +914,16 @@ export async function uploadMedia(req, res) {
           console.warn('RTDB avatar update failed:', err?.message || err);
         }
       }
+      if (supabase && isConfigured()) {
+        try {
+          await supabase
+            .from('users')
+            .update({ avatar: publicUrl, avatar_url: publicUrl, updated_at: new Date().toISOString() })
+            .eq('id', uid);
+        } catch (err) {
+          console.warn('Supabase avatar update failed:', err?.message || err);
+        }
+      }
     }
 
     // store media metadata in Supabase or RTDB fallback

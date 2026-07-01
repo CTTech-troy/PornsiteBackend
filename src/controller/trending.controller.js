@@ -16,7 +16,7 @@ function creatorPriorityRank(card = {}) {
 export async function getTrending(req, res) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const adminPageSize = await getFeedPageSizeSetting(100);
+    const adminPageSize = await getFeedPageSizeSetting(20);
     const limit = req.query.limit == null
       ? adminPageSize
       : normalizeFeedPageSize(parseInt(req.query.limit, 10), adminPageSize);
@@ -45,6 +45,7 @@ export async function getTrending(req, res) {
     const data = merged.slice(0, limit);
     ingestHomeFeedVideos(data);
 
+    res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=30, stale-while-revalidate=120');
     return res.json({
       success: true,
       data,

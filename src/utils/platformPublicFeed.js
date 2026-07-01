@@ -393,6 +393,17 @@ function publicVideoMatchesCategory(video = {}, category) {
   return candidates.some((value) => normalizeCategoryFilter(value) === wanted);
 }
 
+function publicVideoMatchesCreator(video = {}, creatorId = null) {
+  const wanted = String(creatorId || '').trim();
+  if (!wanted) return true;
+  return [
+    video.userId,
+    video.user_id,
+    video.creatorId,
+    video.creator_id,
+  ].some((value) => String(value || '').trim() === wanted);
+}
+
 function looksLikeVideoUrl(value) {
   const url = String(value || '').trim();
   if (!/^https?:\/\//i.test(url)) return false;
@@ -933,12 +944,12 @@ function uniquePublicVideos(rows) {
   });
 }
 
-async function fetchSupabaseTiktokPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
+async function fetchSupabaseTiktokPublicVideos({ page = 1, limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   if (!isConfigured() || !supabase) return [];
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
-  const from = 0;
-  const to = (pageNum * limitNum) - 1;
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const from = (pageNum - 1) * limitNum;
+  const to = from + limitNum - 1;
   const categoryFilter = normalizeCategoryFilter(category);
 
   const { data, error } = await runSelectWithColumnFallback(
@@ -946,8 +957,10 @@ async function fetchSupabaseTiktokPublicVideos({ page = 1, limit = 100, premiumO
     (selectColumns) => timedDelivery('supabase.tiktok_videos.feed', () => runPublicListingQuery((filterPublicRows) => {
       let query = filterPublicRows(supabase.from('tiktok_videos').select(selectColumns));
       if (premiumOnly) query = query.eq('is_premium_content', true);
+      if (categoryFilter) query = applyCategoryFilter(query, 'main_orientation_category', categoryFilter);
+      if (creatorId) query = query.eq('user_id', String(creatorId));
       return query.order('created_at', { ascending: false }).range(from, to);
-    }), { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined }),
+    }), { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined, creatorId: creatorId || undefined }),
     'supabase.tiktok_videos.feed',
   );
 
@@ -956,12 +969,12 @@ async function fetchSupabaseTiktokPublicVideos({ page = 1, limit = 100, premiumO
   return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
 }
 
-async function fetchSupabaseImportedPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
+async function fetchSupabaseImportedPublicVideos({ page = 1, limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   if (premiumOnly || !isConfigured() || !supabase) return [];
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
-  const from = 0;
-  const to = (pageNum * limitNum) - 1;
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const from = (pageNum - 1) * limitNum;
+  const to = from + limitNum - 1;
   const categoryFilter = normalizeCategoryFilter(category);
 
   const { data, error } = await runSelectWithColumnFallback(
@@ -971,10 +984,11 @@ async function fetchSupabaseImportedPublicVideos({ page = 1, limit = 100, premiu
         .from('videos')
         .select(selectColumns);
       if (categoryFilter) query = applyCategoryFilter(query, 'category', categoryFilter);
+      if (creatorId) query = query.eq('creator_id', String(creatorId));
       return query
         .order('created_at', { ascending: false })
         .range(from, to);
-    }, { page: pageNum, limit: limitNum, category: categoryFilter || undefined }),
+    }, { page: pageNum, limit: limitNum, category: categoryFilter || undefined, creatorId: creatorId || undefined }),
     'supabase.videos.imported_feed',
   );
   if (error) {
@@ -984,19 +998,22 @@ async function fetchSupabaseImportedPublicVideos({ page = 1, limit = 100, premiu
   return (data || []).map(mapImportedVideoRowToPublicVideo).filter(Boolean);
 }
 
-async function fetchSupabaseMediaPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
+async function fetchSupabaseMediaPublicVideos({ page = 1, limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   if (!isConfigured() || !supabase) return [];
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
-  const to = (pageNum * limitNum) - 1;
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const from = (pageNum - 1) * limitNum;
+  const to = from + limitNum - 1;
   const categoryFilter = normalizeCategoryFilter(category);
   try {
     const { data, error } = await runSelectWithColumnFallback(
       MEDIA_PUBLIC_SELECT_COLUMNS,
       (selectColumns) => {
-        let query = supabase.from('media').select(selectColumns).order('created_at', { ascending: false }).range(0, to);
+        let query = supabase.from('media').select(selectColumns).order('created_at', { ascending: false }).range(from, to);
         if (!premiumOnly) query = query.eq('type', 'video');
-        return timedDelivery('supabase.media.feed', () => query, { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined });
+        if (categoryFilter) query = applyCategoryFilter(query, 'category', categoryFilter);
+        if (creatorId) query = query.eq('user_id', String(creatorId));
+        return timedDelivery('supabase.media.feed', () => query, { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined, creatorId: creatorId || undefined });
       },
       'supabase.media.feed',
     );
@@ -1010,8 +1027,8 @@ async function fetchSupabaseMediaPublicVideos({ page = 1, limit = 100, premiumOn
             .select(selectColumns);
           return retryQuery
             .order('created_at', { ascending: false })
-            .range(0, to);
-        }, { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined }),
+            .range(from, to);
+        }, { page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter || undefined, creatorId: creatorId || undefined }),
         'supabase.media.feed_fallback',
       );
       if (retry.error) return [];
@@ -1029,12 +1046,12 @@ async function fetchSupabaseMediaPublicVideos({ page = 1, limit = 100, premiumOn
   }
 }
 
-async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false, category = null } = {}) {
+async function fetchRtdbPublicVideos({ limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   const rtdb = getFirebaseRtdb();
   if (!rtdb) return [];
   const categoryFilter = normalizeCategoryFilter(category);
   try {
-    const limitNum = Math.min(500, Math.max(1, Number(limit) || 500));
+    const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
     const snap = await rtdb.ref('videos').orderByKey().limitToLast(limitNum).once('value');
     const val = snap.val();
     if (!val || typeof val !== 'object') return [];
@@ -1043,6 +1060,7 @@ async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false, categor
       .filter(Boolean)
       .filter((v) => !premiumOnly || v.isPremiumContent === true)
       .filter((v) => publicVideoMatchesCategory(v, categoryFilter))
+      .filter((v) => publicVideoMatchesCreator(v, creatorId))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
       .slice(0, limitNum);
     return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
@@ -1051,12 +1069,12 @@ async function fetchRtdbPublicVideos({ limit = 500, premiumOnly = false, categor
   }
 }
 
-async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false, category = null } = {}) {
+async function fetchRtdbMediaPublicVideos({ limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   const rtdb = getFirebaseRtdb();
   if (!rtdb) return [];
   const categoryFilter = normalizeCategoryFilter(category);
   try {
-    const limitNum = Math.min(500, Math.max(1, Number(limit) || 500));
+    const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
     const snap = await rtdb.ref('media').orderByKey().limitToLast(limitNum).once('value');
     const val = snap.val();
     if (!val || typeof val !== 'object') return [];
@@ -1065,6 +1083,7 @@ async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false, ca
       .filter(Boolean)
       .filter((v) => !premiumOnly || v.isPremiumContent === true)
       .filter((v) => publicVideoMatchesCategory(v, categoryFilter))
+      .filter((v) => publicVideoMatchesCreator(v, creatorId))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
       .slice(0, limitNum);
     return Promise.all(mapped.map((m) => mergeCreatorIntoPublicVideo(m)));
@@ -1073,30 +1092,31 @@ async function fetchRtdbMediaPublicVideos({ limit = 500, premiumOnly = false, ca
   }
 }
 
-async function fetchAllCreatorPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
+async function fetchAllCreatorPublicVideos({ page = 1, limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
-  const fetchLimit = Math.min(500, pageNum * limitNum);
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const fetchLimit = Math.min(100, limitNum);
   const categoryFilter = normalizeCategoryFilter(category);
   const [tiktokRows, importedRows, mediaRows, rtdbRows, rtdbMediaRows] = await Promise.all([
-    withDeliveryTimeout('public-feed.tiktok', fetchSupabaseTiktokPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter })),
-    withDeliveryTimeout('public-feed.imported', fetchSupabaseImportedPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter })),
-    withDeliveryTimeout('public-feed.media', fetchSupabaseMediaPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter })),
-    withDeliveryTimeout('public-feed.rtdb-videos', fetchRtdbPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter })),
-    withDeliveryTimeout('public-feed.rtdb-media', fetchRtdbMediaPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter })),
+    withDeliveryTimeout('public-feed.tiktok', fetchSupabaseTiktokPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter, creatorId })),
+    withDeliveryTimeout('public-feed.imported', fetchSupabaseImportedPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter, creatorId })),
+    withDeliveryTimeout('public-feed.media', fetchSupabaseMediaPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter, creatorId })),
+    withDeliveryTimeout('public-feed.rtdb-videos', fetchRtdbPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter, creatorId })),
+    withDeliveryTimeout('public-feed.rtdb-media', fetchRtdbMediaPublicVideos({ limit: fetchLimit, premiumOnly, category: categoryFilter, creatorId })),
   ]);
   return uniquePublicVideos([...tiktokRows, ...importedRows, ...mediaRows, ...rtdbRows, ...rtdbMediaRows]);
 }
 
-export async function fetchPublishedPublicVideos({ page = 1, limit = 100, premiumOnly = false, category = null } = {}) {
+export async function fetchPublishedPublicVideos({ page = 1, limit = 20, premiumOnly = false, category = null, creatorId = null } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
-  const from = (pageNum - 1) * limitNum;
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
+  const from = 0;
   const categoryFilter = normalizeCategoryFilter(category);
-  const cacheKey = `published:${pageNum}:${limitNum}:${premiumOnly ? 'premium' : 'all'}:${categoryFilter || 'all-categories'}`;
+  const creatorKey = String(creatorId || '').trim() || 'all-creators';
+  const cacheKey = `published:${pageNum}:${limitNum}:${premiumOnly ? 'premium' : 'all'}:${categoryFilter || 'all-categories'}:${creatorKey}`;
   const cached = getCachedFeed(cacheKey);
   if (cached) return cached;
-  const rows = await fetchAllCreatorPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter });
+  const rows = await fetchAllCreatorPublicVideos({ page: pageNum, limit: limitNum, premiumOnly, category: categoryFilter, creatorId: creatorKey === 'all-creators' ? null : creatorKey });
   const sliced = rows.slice(from, from + limitNum);
   setCachedFeed(cacheKey, sliced);
   return cloneRows(sliced);
@@ -1173,7 +1193,7 @@ export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = nu
   const pageNum = Math.max(1, Number(page) || 1);
   const pages = Math.min(5, Math.max(1, Number(pagesCount) || 1));
   const requestedLimit = Number(limit);
-  const pageSize = Math.min(500, Math.max(20 * pages, Number.isFinite(requestedLimit) ? requestedLimit : 20 * pages));
+  const pageSize = Math.min(100, Math.max(20 * pages, Number.isFinite(requestedLimit) ? requestedLimit : 20 * pages));
   const rows = await fetchPublishedPublicVideos({ page: pageNum, limit: pageSize, category });
   return rows.map((v, i) => publicVideoToHomeCard(v, i)).filter(Boolean);
 }
@@ -1184,7 +1204,7 @@ export async function fetchPublishedHomeCards({ page, pagesCount, viewerUid = nu
  */
 export async function fetchPublishedFeedPage({ page, limit, viewerUid = null }) {
   const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(500, Math.max(1, Number(limit) || 100));
+  const limitNum = Math.min(100, Math.max(1, Number(limit) || 20));
   const rows = await fetchPublishedPublicVideos({ page: pageNum, limit: limitNum });
   return rows.map((v, i) => publicVideoToFeedItem(v, i)).filter(Boolean);
 }
@@ -1229,7 +1249,7 @@ export async function fetchPublishedVideoById(videoId, viewerUid = null) {
     }
   }
 
-  const rows = await fetchAllCreatorPublicVideos({ page: 1, limit: 500 });
+  const rows = await fetchAllCreatorPublicVideos({ page: 1, limit: 100 });
   const v = rows.find((row) => {
     const id = String(row.id || row.videoId || '').trim();
     return id === lookup || getPathSafeVideoId(id) === lookup;

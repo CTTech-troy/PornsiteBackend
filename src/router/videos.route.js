@@ -99,11 +99,12 @@ router.get('/:id/ad-status', optionalAuth, vastAdCtrl.getAdStatus);
 // Public feed. Auth is optional so logged-in viewers can still get personalized flags later.
 router.get('/', optionalAuth, async (req, res) => {
   const page = req.query.page || 1;
-  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
   try {
     const result = await getVideosPaginated(page, limit, {
       viewerUid: req.uid || null,
       cursor: req.query.cursor || null,
+      lean: req.query.lean === '1',
     });
     res.set('Cache-Control', req.uid ? 'private, max-age=15' : 'public, max-age=20, stale-while-revalidate=60');
     res.json(result);

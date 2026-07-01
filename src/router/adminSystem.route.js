@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { requireAdminAuth, requireSuperAdmin } from '../middleware/adminAuth.js';
 import {
   getSettings,
@@ -51,9 +52,36 @@ import {
   restoreAdminLegalPolicyVersion,
   updateAdminLegalPolicy,
 } from '../controller/legalDocument.controller.js';
+import {
+  archiveAdminBlogPostEntry,
+  createAdminBlogPostEntry,
+  deleteAdminBlogPostEntry,
+  getAdminBlogPostEntry,
+  listAdminBlogPostEntries,
+  publishAdminBlogPostEntry,
+  updateAdminBlogPostEntry,
+  uploadAdminBlogPostImage,
+} from '../controller/blogPost.controller.js';
 
 const router = Router();
 router.use(requireAdminAuth);
+
+const blogImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: Math.max(1, Number(process.env.BLOG_IMAGE_MAX_MB || 8) || 8) * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/^image\/(jpe?g|png|webp|gif)$/i.test(file.mimetype || '')) return cb(null, true);
+    return cb(new Error('Blog images must be JPG, PNG, WebP, or GIF files.'));
+  },
+});
+
+function handleBlogImageUpload(req, res, next) {
+  blogImageUpload.single('image')(req, res, (err) => {
+    if (!err) return next();
+    const status = err?.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    return res.status(status).json({ success: false, message: err.message || 'Image upload failed.' });
+  });
+}
 
 function requireTermsPolicyPermission(req, res, next) {
   if (req.admin?.is_super_admin || req.admin?.isSuperAdmin) return next();
@@ -67,6 +95,21 @@ function requireTermsPolicyPermission(req, res, next) {
   ));
   if (hasPermission) return next();
   return res.status(403).json({ success: false, message: 'Terms & Policy permission is required.' });
+}
+
+function requireBlogPermission(req, res, next) {
+  if (req.admin?.is_super_admin || req.admin?.isSuperAdmin) return next();
+  const permissions = Array.isArray(req.admin?.permissions) ? req.admin.permissions : [];
+  const hasPermission = permissions.some((permission) => (
+    permission === '*' ||
+    permission === 'blog' ||
+    permission === 'blog_manager' ||
+    permission === '/blog' ||
+    permission?.key === 'blog' ||
+    permission?.path === '/blog'
+  ));
+  if (hasPermission) return next();
+  return res.status(403).json({ success: false, message: 'Blog permission is required.' });
 }
 
 router.get('/stats', getStats);
@@ -98,6 +141,15 @@ router.post('/legal-policies/:id/archive', requireTermsPolicyPermission, archive
 router.delete('/legal-policies/:id', requireSuperAdmin, deleteAdminLegalPolicy);
 router.post('/legal-policies/:id/versions/:versionId/restore', requireTermsPolicyPermission, restoreAdminLegalPolicyVersion);
 router.get('/legal-policies/:id/versions/compare', requireTermsPolicyPermission, compareAdminLegalPolicyVersions);
+
+router.get('/blog-posts', requireBlogPermission, listAdminBlogPostEntries);
+router.post('/blog-posts/media', requireBlogPermission, handleBlogImageUpload, uploadAdminBlogPostImage);
+router.post('/blog-posts', requireBlogPermission, createAdminBlogPostEntry);
+router.get('/blog-posts/:id', requireBlogPermission, getAdminBlogPostEntry);
+router.put('/blog-posts/:id', requireBlogPermission, updateAdminBlogPostEntry);
+router.post('/blog-posts/:id/publish', requireBlogPermission, publishAdminBlogPostEntry);
+router.post('/blog-posts/:id/archive', requireBlogPermission, archiveAdminBlogPostEntry);
+router.delete('/blog-posts/:id', requireSuperAdmin, deleteAdminBlogPostEntry);
 
 router.get('/observability/overview', getObservabilityOverview);
 router.get('/observability/apis', getObservedApis);

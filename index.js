@@ -32,6 +32,7 @@ import adminContentRouter from './src/router/adminContent.route.js';
 import adminModerationRouter from './src/router/adminModeration.route.js';
 import adminSystemRouter from './src/router/adminSystem.route.js';
 import adminAnalyticsRouter from './src/router/adminAnalytics.route.js';
+import adsAnalyticsRouter from './src/router/adsAnalytics.route.js';
 import adminCoinsRouter from './src/router/adminCoins.route.js';
 import analyticsRouter from './src/router/analytics.route.js';
 import promotionsRouter from './src/router/promotions.route.js';
@@ -39,6 +40,7 @@ import adminPromotionsRouter from './src/router/adminPromotions.route.js';
 import adminStorageMonitoringRouter from './src/router/adminStorageMonitoring.route.js';
 import creatorsMainApplicationRouter from './src/router/creatorsMainApplication.route.js';
 import legalRouter from './src/router/legal.route.js';
+import blogRouter from './src/router/blog.route.js';
 import { getPublicSettings, getPublicVastSettings } from './src/controller/adminSystem.controller.js';
 import * as liveCtrl from './src/controller/live.controller.js';
 import { creditLiveEarnings } from './src/controller/earnings.controller.js';
@@ -558,6 +560,7 @@ app.use('/api/admin/content', adminContentRouter);
 app.use('/api/admin/moderation', adminModerationRouter);
 app.use('/api/admin/system', adminSystemRouter);
 app.use('/api/admin/analytics', adminAnalyticsRouter);
+app.use('/api/admin/ads-management', adsAnalyticsRouter);
 app.use('/api/admin/coins', adminCoinsRouter);
 app.use('/api/admin/promotions', adminPromotionsRouter);
 app.use('/api/admin/storage', adminStorageMonitoringRouter);
@@ -583,6 +586,7 @@ app.use('/api/ads', adsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/promotions', promotionsRouter);
 app.use('/api/legal', legalRouter);
+app.use('/api/blog', blogRouter);
 console.info('[startup] Mounting ad provider routes at /api/ad-providers', {
   routes: [
     'GET /api/ad-providers/config',

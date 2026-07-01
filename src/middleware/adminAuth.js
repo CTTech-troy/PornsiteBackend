@@ -162,6 +162,22 @@ export function requireFinanceAccess(req, res, next) {
   return next();
 }
 
+export function requireAdsManagementAccess(req, res, next) {
+  const role = String(req.admin?.role || '').toLowerCase();
+  const permissions = Array.isArray(req.admin?.permissions) ? req.admin.permissions : [];
+  const allowed = req.admin?.is_super_admin ||
+    ['admin', 'finance', 'operations'].includes(role) ||
+    permissions.includes('ads_management') ||
+    permissions.includes('/ads-management') ||
+    permissions.includes('finance_hub');
+
+  if (!allowed) {
+    return res.status(403).json({ error: 'Ads management access required' });
+  }
+
+  return next();
+}
+
 export function requireAiModerationAccess(req, res, next) {
   const role = String(req.admin?.role || '').toLowerCase();
   const permissions = Array.isArray(req.admin?.permissions) ? req.admin.permissions : [];

@@ -13,6 +13,7 @@ router.get('/top', async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '5', 10) || 5, 1), 100);
     const page = Math.max(parseInt(req.query.page || '1', 10) || 1, 1);
     const result = await getTopPlatformCreators({ limit, page });
+    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=1800');
     return res.json({
       success: true,
       data: result.creators || [],
@@ -47,6 +48,7 @@ router.get('/platform', async (req, res) => {
     const type = req.query.type === 'channel' ? 'channel' : 'pstar';
     const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10) || 100, 1), 500);
     const data = await getCreatorsByType(type, limit);
+    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=1800');
     return res.json({ success: true, data });
   } catch (err) {
     console.error('creators.platform', err?.message || err);

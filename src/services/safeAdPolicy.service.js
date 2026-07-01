@@ -1,5 +1,3 @@
-import { getPlatformSettingsMap } from './platformSettings.service.js';
-
 export const APPROVED_PLACEMENTS = {
   sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   home_after_subheader_900x250: { maxWidth: 728, maxHeight: 90, formats: ['banner', 'display'] },
@@ -40,6 +38,8 @@ export const MONETAG_SAFE_DOMAINS = [
   'monetag.com',
   'www.monetag.com',
   'highperformanceformat.com',
+  'effectivecpmnetwork.com',
+  'pl30142051.effectivecpmnetwork.com',
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
@@ -141,8 +141,32 @@ const MONETAG_SIDEBAR_PLACEMENTS = new Set([
 ]);
 const MONETAG_BANNER_PLACEMENTS = new Set(['homepage_banner', 'homepage_top', 'homepage_bottom', 'sticky_banner', 'leaderboard', 'banner', 'before_footer', 'home_after_subheader_900x250']);
 
+const CODE_MANAGED_SAFE_AD_SETTINGS = Object.freeze({
+  ad_allowed_placements: JSON.stringify(Object.keys(APPROVED_PLACEMENTS)),
+  ad_allowed_domains: JSON.stringify(ALLOWED_AD_DOMAINS),
+  ad_allowed_formats: JSON.stringify(SAFE_DISPLAY_FORMATS),
+  ad_preroll_enabled: 'true',
+  ad_feed_ads_enabled: 'true',
+  ad_banner_ads_enabled: 'true',
+  ad_max_width_px: '970',
+  ad_max_height_px: '600',
+  sidebar_ads_enabled: 'true',
+  juicyads_script_url: APPROVED_JUICYADS_SCRIPT_URL,
+  monetag_enabled: 'true',
+  monetag_native_enabled: 'true',
+  monetag_sidebar_enabled: 'true',
+  monetag_banner_enabled: 'true',
+  monetag_script_url: APPROVED_MONETAG_SCRIPT_URL,
+  monetag_native_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_sidebar_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_banner_zone_id: APPROVED_MONETAG_ZONE_ID,
+  monetag_allowed_pages: '["home","video","creator","feed","search","live"]',
+  monetag_allowed_slots: '["feed_native","home_after_subheader_900x250","home_sidebar","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]',
+  monetag_allowed_domains: JSON.stringify(MONETAG_SAFE_DOMAINS),
+});
+
 export async function getSafeAdPolicySettings() {
-  const map = await getPlatformSettingsMap();
+  const map = CODE_MANAGED_SAFE_AD_SETTINGS;
   const strict = true;
   const safeFormatsOnly = true;
   const allowedPlacements = uniqueList([

@@ -1,7 +1,6 @@
 import { supabase } from '../config/supabase.js';
 import {
   listProviders,
-  updateProvider,
   getPriorityOrder,
   invalidateConfigCache,
 } from './adProvider.service.js';
@@ -24,6 +23,8 @@ const ALLOWED_SCRIPT_HOSTS = [
   'quge5.com',
   'monetag.com',
   'highperformanceformat.com',
+  'effectivecpmnetwork.com',
+  'pl30142051.effectivecpmnetwork.com',
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
@@ -31,8 +32,10 @@ const ALLOWED_SCRIPT_HOSTS = [
 ];
 const BLOCKED_SCRIPT_PATTERN =
   /adserver\.juicyads\.com|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|window\.open|top\.location|betway|casino|popads|popcash|propellerads|onclickads/i;
-const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5932212';
+const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5963164';
 const LEGACY_EXOCLICK_VAST_TAG_URLS = new Set([
+  'https://s.magsrv.com/v1/vast.php?idz=5932212',
+  'https://s.magsrv.com/v1/vast.php?idz=5933056',
   'https://s.magsrv.com/v1/vast.php?idzone=5932212',
   'https://s.magsrv.com/v1/vast.php?idzone=5933056',
 ]);
@@ -183,11 +186,6 @@ export async function scanProvider(provider, checkType = 'scheduled') {
       diagnostics: result.diagnostics || {},
     });
   }
-
-  await updateProvider(provider.id, {
-    last_health_status: result.status,
-    ...(result.status === 'healthy' ? { last_success_at: new Date().toISOString() } : { last_failure_at: new Date().toISOString() }),
-  });
 
   return { providerId: provider.id, ...result };
 }
