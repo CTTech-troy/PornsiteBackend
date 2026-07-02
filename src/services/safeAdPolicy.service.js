@@ -50,6 +50,7 @@ export const MONETAG_SAFE_DOMAINS = [
   'cloudvideosa.com',
   'protrafficinspector.com',
   '5gvci.com',
+  'spendsdetachment.com',
 ];
 
 export const BLOCKED_SCRIPT_HOSTS_STRICT = [
@@ -97,6 +98,8 @@ const ALLOWED_AD_DOMAINS = [
   'magsrv.com',
   'a.magsrv.com',
   's.magsrv.com',
+  'bkcdn.net',
+  'bxcdn.net',
   'vast.yomeno.xyz',
   'yomeno.xyz',
   'googleads.g.doubleclick.net',

@@ -29,7 +29,7 @@ const CODE_MANAGED_SLOT_SETTINGS = Object.freeze({
   monetag_banner_zone_id: APPROVED_MONETAG_ZONE_ID,
   monetag_allowed_pages: '["home","video","creator","feed","search","live"]',
   monetag_allowed_slots: '["home_feed_native","home_mobile_inline_300x100","category_feed_native","feed_native","mobile_inline","category_feed","home_after_subheader_900x250","home_sidebar","home_bottom_900x250","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","homepage_top","homepage_bottom","leaderboard","banner"]',
-  monetag_allowed_domains: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","kettledroopingcontinuation.com","sleepoverlimitprofound.com","fizzyacerbitymellow.com","cloudvideosa.com","protrafficinspector.com","5gvci.com"]',
+  monetag_allowed_domains: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","kettledroopingcontinuation.com","sleepoverlimitprofound.com","fizzyacerbitymellow.com","cloudvideosa.com","protrafficinspector.com","5gvci.com","spendsdetachment.com"]',
 });
 
 function codeManagedAdsError() {

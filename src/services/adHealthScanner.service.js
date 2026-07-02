@@ -34,6 +34,9 @@ const ALLOWED_SCRIPT_HOSTS = [
   'cloudvideosa.com',
   'protrafficinspector.com',
   '5gvci.com',
+  'spendsdetachment.com',
+  'bkcdn.net',
+  'bxcdn.net',
 ];
 const BLOCKED_SCRIPT_PATTERN =
   /adserver\.juicyads\.com|popunder|clickunder|interstitial|popup|auto.?redirect|direct.?link|social.?bar|window\.open|top\.location|betway|casino|popads|popcash|propellerads|onclickads/i;
