@@ -22,6 +22,8 @@ export const EXOCLICK_DISPLAY_ZONE_ID = '5933054';
 export const EXOCLICK_DISPLAY_INS_CLASS = 'eas6a97888e6';
 export const EXOCLICK_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5963164';
 export const EXOCLICK_VAST_ZONE_ID = '5963164';
+export const EXOCLICK_IN_VIDEO_BANNER_VAST_TAG_URL = 'https://s.magsrv.com/v1/vast.php?idz=5964216';
+export const EXOCLICK_IN_VIDEO_BANNER_ZONE_ID = '5964216';
 const LEGACY_EXOCLICK_VAST_ZONE_IDS = new Set(['5932212', '5933056']);
 const LEGACY_EXOCLICK_VAST_TAG_URLS = new Set([
   'https://s.magsrv.com/v1/vast.php?idz=5932212',
@@ -44,6 +46,7 @@ const EXOCLICK_DISPLAY_ZONE_SPECS = [
   { placement: 'native_card', width: 640, height: 360 },
   { placement: 'between_content', width: 728, height: 90 },
   { placement: 'sidebar', width: 300, height: 250 },
+  { placement: 'video_slider', width: 300, height: 250 },
 ];
 const EXOCLICK_DISPLAY_PLACEMENTS = new Set(EXOCLICK_DISPLAY_ZONE_SPECS.map((z) => z.placement));
 const CODE_MANAGED_AD_SETTINGS = Object.freeze({
@@ -64,6 +67,25 @@ const CODE_MANAGED_AD_SETTINGS = Object.freeze({
   vast_ad_timeout_sec: '5',
   vast_skip_after_seconds_default: '5',
   vast_estimated_cpm_usd: '2',
+  vast_in_video_banner_enabled: 'true',
+  vast_in_video_banner_tag_url: EXOCLICK_IN_VIDEO_BANNER_VAST_TAG_URL,
+  vast_in_video_banner_triggers: JSON.stringify({
+    preroll: true,
+    pause: true,
+    postroll: true,
+    custom: true,
+  }),
+  vast_in_video_banner_alignment: 'bottom',
+  vast_in_video_banner_mobile_alignment: 'bottom',
+  vast_in_video_banner_size_preference: 'auto',
+  vast_in_video_banner_auto_hide_ms: '12000',
+  vast_in_video_banner_pause_auto_hide_ms: '0',
+  vast_in_video_banner_postroll_auto_hide_ms: '0',
+  vast_in_video_banner_retry_limit: '1',
+  vast_in_video_banner_retry_delay_ms: '750',
+  vast_in_video_banner_refresh_interval_ms: '0',
+  vast_in_video_banner_hide_in_fullscreen: 'false',
+  vast_in_video_banner_leaderboard_min_width: '760',
 });
 
 function codeManagedAdsError() {
@@ -159,6 +181,30 @@ function isAllowedPublicAdUrl(url, allowedDomains = []) {
     });
   } catch {
     return false;
+  }
+}
+
+function settingsBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function settingsNumber(value, fallback, min = null, max = null) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  const withMin = min == null ? numeric : Math.max(min, numeric);
+  return max == null ? withMin : Math.min(max, withMin);
+}
+
+function settingsJson(value, fallback) {
+  if (value && typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value || ''));
+  } catch {
+    return fallback;
   }
 }
 
@@ -320,6 +366,42 @@ export async function getPublicAdConfig() {
       timeoutSec: Number(settings.vast_ad_timeout_sec || 5),
       skipAfterSeconds: Number(settings.vast_skip_after_seconds_default || 5),
       estimatedCpmUsd: Number(settings.vast_estimated_cpm_usd || 2),
+      inVideoBanner: {
+        enabled: settingsBoolean(settings.vast_in_video_banner_enabled, true),
+        vastTagUrl: settings.vast_in_video_banner_tag_url || EXOCLICK_IN_VIDEO_BANNER_VAST_TAG_URL,
+        zoneId: EXOCLICK_IN_VIDEO_BANNER_ZONE_ID,
+        triggers: settingsJson(settings.vast_in_video_banner_triggers, {
+          preroll: true,
+          pause: true,
+          postroll: true,
+          custom: true,
+        }),
+        verticalAlignment: settings.vast_in_video_banner_alignment || 'bottom',
+        mobileVerticalAlignment: settings.vast_in_video_banner_mobile_alignment || 'bottom',
+        sizePreference: settings.vast_in_video_banner_size_preference || 'auto',
+        timeoutMs: settingsNumber(settings.vast_ad_timeout_sec, 5, 1, 15) * 1000,
+        retry: {
+          enabled: true,
+          maxRetries: Math.round(settingsNumber(settings.vast_in_video_banner_retry_limit, 1, 0, 1)),
+          delayMs: settingsNumber(settings.vast_in_video_banner_retry_delay_ms, 750, 250, 2000),
+        },
+        autoHide: {
+          enabled: true,
+          ms: settingsNumber(settings.vast_in_video_banner_auto_hide_ms, 12000, 0, 60000),
+          pauseMs: settingsNumber(settings.vast_in_video_banner_pause_auto_hide_ms, 0, 0, 60000),
+          postrollMs: settingsNumber(settings.vast_in_video_banner_postroll_auto_hide_ms, 0, 0, 60000),
+        },
+        refreshIntervalMs: settingsNumber(settings.vast_in_video_banner_refresh_interval_ms, 0, 0, 300000),
+        hideInFullscreen: settingsBoolean(settings.vast_in_video_banner_hide_in_fullscreen, false),
+        breakpoints: {
+          mobileMaxWidth: 767,
+          leaderboardMinWidth: settingsNumber(settings.vast_in_video_banner_leaderboard_min_width, 760, 320, 1600),
+        },
+        sizes: [
+          { key: 'leaderboard', width: 728, height: 90 },
+          { key: 'mpu', width: 300, height: 250 },
+        ],
+      },
     },
     safePolicy,
   };

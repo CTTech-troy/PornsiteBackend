@@ -20,6 +20,7 @@ const SAFE_CAMPAIGN_PLACEMENTS = {
   mobile_inline: { width: 300, height: 100, format: 'native' },
   category_feed: { width: 300, height: 250, format: 'native' },
   video_page: { width: 300, height: 250, format: 'banner' },
+  video_slider: { width: 300, height: 250, format: 'video' },
   sticky_banner: { width: 728, height: 90, format: 'banner' },
   native_card: { width: 300, height: 250, format: 'native' },
   before_footer: { width: 900, height: 250, format: 'banner' },

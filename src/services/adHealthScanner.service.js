@@ -28,6 +28,11 @@ const ALLOWED_SCRIPT_HOSTS = [
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
+  'kettledroopingcontinuation.com',
+  'sleepoverlimitprofound.com',
+  'fizzyacerbitymellow.com',
+  'cloudvideosa.com',
+  'protrafficinspector.com',
   '5gvci.com',
 ];
 const BLOCKED_SCRIPT_PATTERN =

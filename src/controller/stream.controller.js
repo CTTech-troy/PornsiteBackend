@@ -94,6 +94,16 @@ async function resolveUploadedVideoCandidate(videoId, requesterUid = null) {
 }
 
 const SIGNED_STREAM_TTL_SEC = Math.max(30, Number(process.env.STREAM_SIGNED_URL_TTL_SEC || 120));
+const STREAM_MIME_BY_EXT = new Map([
+  ['mp4', 'video/mp4'],
+  ['m4v', 'video/mp4'],
+  ['mov', 'video/mp4'],
+  ['webm', 'video/webm'],
+  ['ogg', 'video/ogg'],
+  ['ogv', 'video/ogg'],
+  ['m3u8', 'application/x-mpegURL'],
+  ['mpd', 'application/dash+xml'],
+]);
 
 function parseSupabaseObjectUrl(url) {
   if (!url || typeof url !== 'string') return null;
@@ -127,6 +137,22 @@ function isPlatformStorageUrl(url) {
   } catch {
     return false;
   }
+}
+
+function contentTypeForStreamUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  const match = raw.toLowerCase().match(/\.([a-z0-9]+)(?:$|[?#&])/i);
+  if (match && STREAM_MIME_BY_EXT.has(match[1])) return STREAM_MIME_BY_EXT.get(match[1]);
+  try {
+    const parsed = new URL(raw);
+    const path = decodeURIComponent(parsed.pathname || '').toLowerCase();
+    const pathMatch = path.match(/\.([a-z0-9]+)$/i);
+    if (pathMatch && STREAM_MIME_BY_EXT.has(pathMatch[1])) return STREAM_MIME_BY_EXT.get(pathMatch[1]);
+  } catch {
+    /* ignore */
+  }
+  return '';
 }
 
 async function createSignedStreamUrl(candidate) {
@@ -292,8 +318,11 @@ export async function getStreamUrl(req, res) {
     }
 
     const signedStream = await createSignedStreamUrl(candidate);
+    const contentType = contentTypeForStreamUrl(candidate) || contentTypeForStreamUrl(signedStream.url);
     const payload = {
       url: signedStream.url,
+      contentType,
+      sourceType: contentType || 'native_stream',
       expiresAt: signedStream.expiresAt,
       signed: signedStream.signed,
       delivery: signedStream.signed || isPlatformStorageUrl(candidate) ? 'signed_url' : 'source_url',

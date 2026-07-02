@@ -54,6 +54,8 @@ import {
 const SAFE_JUICY_SCRIPT_URL = 'https://poweredby.jads.co/js/jads.js';
 const EXOCLICK_DISPLAY_SCRIPT_URL = 'https://a.magsrv.com/ad-provider.js';
 const EXOCLICK_DISPLAY_ZONE_ID = '5933054';
+const EXOCLICK_IN_VIDEO_BANNER_ZONE_ID = '5964216';
+const EXOCLICK_IN_VIDEO_BANNER_VAST_TAG_URL = `https://s.magsrv.com/v1/vast.php?idz=${EXOCLICK_IN_VIDEO_BANNER_ZONE_ID}`;
 const EXOCLICK_DISPLAY_CONFIG = {
   insClass: 'eas6a97888e6',
   keywords: 'keywords',
@@ -72,6 +74,7 @@ const EXOCLICK_DISPLAY_ZONES = [
   { placement: 'native_card', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 640, height: 360, config: EXOCLICK_DISPLAY_CONFIG },
   { placement: 'between_content', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 728, height: 90, config: EXOCLICK_DISPLAY_CONFIG },
   { placement: 'sidebar', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 300, height: 250, config: EXOCLICK_DISPLAY_CONFIG },
+  { placement: 'video_slider', zoneId: EXOCLICK_DISPLAY_ZONE_ID, tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL, width: 300, height: 250, config: EXOCLICK_DISPLAY_CONFIG },
 ];
 const SAFE_AD_DOMAINS = [
   'juicyads.com',
@@ -99,6 +102,11 @@ const SAFE_AD_DOMAINS = [
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
+  'kettledroopingcontinuation.com',
+  'sleepoverlimitprofound.com',
+  'fizzyacerbitymellow.com',
+  'cloudvideosa.com',
+  'protrafficinspector.com',
   '5gvci.com',
 ];
 const SAFE_AD_DOMAINS_JSON = JSON.stringify(SAFE_AD_DOMAINS);
@@ -156,6 +164,7 @@ function defaultZoneDimensions(placement) {
     sticky_banner: { width: 728, height: 90 },
     before_footer: { width: 900, height: 250 },
     video_sidebar: { width: 300, height: 250 },
+    video_slider: { width: 300, height: 250 },
     video_recommended: { width: 300, height: 250 },
     creator_sidebar: { width: 300, height: 250 },
     live_sidebar: { width: 300, height: 250 },
@@ -173,6 +182,7 @@ function defaultZoneDimensions(placement) {
 
 function inferSafeFormat(providerSlug, placement) {
   if (providerSlug === 'exoclick' && placement === 'video_preroll') return 'vast';
+  if (providerSlug === 'exoclick' && placement === 'video_slider') return 'video';
   if (['feed', 'feed_native', 'category_feed', 'mobile_inline', 'native_card', 'between_content'].includes(String(placement || ''))) return 'native';
   return 'banner';
 }
@@ -354,6 +364,42 @@ function fallbackAdConfig() {
       timeoutSec: 8,
       skipAfterSeconds: 5,
       estimatedCpmUsd: 2,
+      inVideoBanner: {
+        enabled: true,
+        vastTagUrl: EXOCLICK_IN_VIDEO_BANNER_VAST_TAG_URL,
+        zoneId: EXOCLICK_IN_VIDEO_BANNER_ZONE_ID,
+        triggers: {
+          preroll: true,
+          pause: true,
+          postroll: true,
+          custom: true,
+        },
+        verticalAlignment: 'bottom',
+        mobileVerticalAlignment: 'bottom',
+        sizePreference: 'auto',
+        timeoutMs: 8000,
+        retry: {
+          enabled: true,
+          maxRetries: 1,
+          delayMs: 750,
+        },
+        autoHide: {
+          enabled: true,
+          ms: 12000,
+          pauseMs: 0,
+          postrollMs: 0,
+        },
+        refreshIntervalMs: 0,
+        hideInFullscreen: false,
+        breakpoints: {
+          mobileMaxWidth: 767,
+          leaderboardMinWidth: 760,
+        },
+        sizes: [
+          { key: 'leaderboard', width: 728, height: 90 },
+          { key: 'mpu', width: 300, height: 250 },
+        ],
+      },
     },
     safePolicy,
   };
@@ -799,7 +845,7 @@ export async function saveAdminSafeAdSettings(req, res) {
       { key: 'ad_click_isolation', value: 'true' },
       { key: 'ad_safe_formats_only', value: 'true' },
       { key: 'ad_allowed_formats', value: '["banner","display","native","vast","video"]' },
-      { key: 'ad_allowed_placements', value: '["video_preroll","feed","native_card","between_content","sidebar","home_after_subheader_900x250","home_sidebar","home_softcore_160x600","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]' },
+      { key: 'ad_allowed_placements', value: '["video_preroll","feed","native_card","between_content","sidebar","home_after_subheader_900x250","home_sidebar","home_softcore_160x600","video_sidebar","video_slider","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","leaderboard","banner"]' },
       { key: 'ad_allowed_domains', value: SAFE_AD_DOMAINS_JSON },
       { key: 'ad_provider_priority_order', value: SAFE_PROVIDER_PRIORITY_JSON },
       { key: 'juicyads_script_url', value: SAFE_JUICY_SCRIPT_URL },

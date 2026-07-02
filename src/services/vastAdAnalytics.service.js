@@ -27,7 +27,7 @@ function aggregateEvents(sessions, events, earningsRows) {
     if (ev.event_type === 'impression') metrics.impressions += 1;
     if (ev.event_type === 'complete') metrics.completions += 1;
     if (ev.event_type === 'skip') metrics.skips += 1;
-    if (ev.event_type === 'error' || ev.event_type === 'unsupported') metrics.errors += 1;
+    if (ev.event_type === 'error' || ev.event_type === 'unsupported' || ev.event_type === 'no_fill') metrics.errors += 1;
     if (ev.event_type === 'click') metrics.clicks += 1;
     if (ev.event_type === 'watch_progress') {
       metrics.watchTimeSeconds += Number(ev.metadata?.watchedSeconds || 0);

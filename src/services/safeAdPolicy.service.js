@@ -7,6 +7,7 @@ export const APPROVED_PLACEMENTS = {
   home_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   home_softcore_160x600: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   video_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
+  video_slider: { maxWidth: 336, maxHeight: 600, formats: ['display', 'video'] },
   video_recommended: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   creator_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
   live_sidebar: { maxWidth: 336, maxHeight: 600, formats: ['banner', 'display', 'native'] },
@@ -43,6 +44,11 @@ export const MONETAG_SAFE_DOMAINS = [
   'profitablecpmrate.com',
   'profitablecpmgate.com',
   'alwingulla.com',
+  'kettledroopingcontinuation.com',
+  'sleepoverlimitprofound.com',
+  'fizzyacerbitymellow.com',
+  'cloudvideosa.com',
+  'protrafficinspector.com',
   '5gvci.com',
 ];
 
@@ -66,6 +72,7 @@ const PLACEMENT_ALIASES = {
   home_softcore_160x600: 'sidebar',
   before_footer: 'banner',
   video_sidebar: 'sidebar',
+  video_slider: 'sidebar',
   creator_sidebar: 'sidebar',
   live_sidebar: 'sidebar',
   feed_sidebar: 'sidebar',

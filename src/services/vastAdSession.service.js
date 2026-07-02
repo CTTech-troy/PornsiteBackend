@@ -1,7 +1,6 @@
 import crypto from 'crypto';
 import { supabase } from '../config/supabase.js';
 import { getFirebaseRtdb } from '../config/firebase.js';
-import { resolveActiveProviders } from './adProvider.service.js';
 import { isMissingDbFeature } from './revenueCalculation.service.js';
 import { creditValidAdView } from './creatorAdReward.service.js';
 import { userHasPremiumAccess } from './playbackAccess.service.js';
@@ -21,6 +20,7 @@ const LEGACY_DEFAULT_VAST_TAGS = new Set([
 const DEFAULT_VAST_TAG = process.env.EXOCLICK_VAST_TAG_URL
   || APPROVED_DEFAULT_VAST_TAG;
 const vastProbeCache = new Map();
+const memoryAdSessions = new Map();
 
 function normalizeVastTagUrl(url) {
   const value = String(url || '').trim();
@@ -42,7 +42,7 @@ function withTimeout(promise, timeoutMs, label) {
 }
 
 function shouldProbeVastTags() {
-  return String(process.env.VAST_AD_PROBE_ENABLED ?? 'true').toLowerCase() !== 'false';
+  return String(process.env.VAST_AD_PROBE_ENABLED ?? 'false').toLowerCase() === 'true';
 }
 
 function safeVastDiagnostics(result) {
@@ -54,8 +54,15 @@ function safeVastDiagnostics(result) {
     contentType: result.contentType || null,
     bytes: result.bytes || 0,
     hasAd: Boolean(result.hasAd),
+    noFill: Boolean(result.noFill),
     hasWrapper: Boolean(result.hasWrapper),
+    wrapperCount: result.wrapperCount || 0,
+    inlineCount: result.inlineCount || 0,
+    linearCount: result.linearCount || 0,
+    vastAdTagUriCount: result.vastAdTagUriCount || 0,
+    hasPlayableWrapper: Boolean(result.hasPlayableWrapper),
     hasMediaFile: Boolean(result.hasMediaFile),
+    mediaFileCount: result.mediaFileCount || 0,
     tagUrl: result.tagUrl,
     cached: Boolean(result.cached),
   };
@@ -64,17 +71,42 @@ function safeVastDiagnostics(result) {
 function analyzeVastXml(xml) {
   const body = String(xml || '');
   const hasVast = /<VAST(?=[\s>])/i.test(body);
-  const hasAd = /<Ad(?=[\s>])/i.test(body);
-  const hasWrapper = /<Wrapper(?=[\s>])/i.test(body);
-  const hasInline = /<InLine(?=[\s>])/i.test(body);
-  const hasMediaFile = /<MediaFile(?=[\s>])/i.test(body);
-  if (!body.trim() || !hasVast) {
-    return { ok: false, reason: 'malformed_vast', hasAd, hasWrapper, hasMediaFile };
+  const adCount = (body.match(/<Ad(?=[\s>])/gi) || []).length;
+  const wrapperCount = (body.match(/<Wrapper\b/gi) || []).length;
+  const inlineCount = (body.match(/<InLine\b/gi) || []).length;
+  const linearCount = (body.match(/<Linear\b/gi) || []).length;
+  const vastAdTagUriCount = (body.match(/<VASTAdTagURI\b/gi) || []).length;
+  const mediaFileCount = (body.match(/<MediaFile\b/gi) || []).length;
+  const hasAd = adCount > 0;
+  const hasWrapper = wrapperCount > 0;
+  const hasMediaFile = mediaFileCount > 0;
+  const hasPlayableWrapper = hasWrapper && vastAdTagUriCount > 0;
+  const summary = {
+    hasVast,
+    hasAd,
+    adCount,
+    hasWrapper,
+    wrapperCount,
+    inlineCount,
+    linearCount,
+    vastAdTagUriCount,
+    hasPlayableWrapper,
+    hasMediaFile,
+    mediaFileCount,
+  };
+  if (!body.trim()) {
+    return { ok: false, reason: 'empty_response', ...summary };
+  }
+  if (!hasVast) {
+    return { ok: false, reason: 'malformed_vast', ...summary };
   }
   if (!hasAd) {
-    return { ok: false, reason: 'empty_vast', hasAd, hasWrapper, hasMediaFile };
+    return { ok: false, reason: 'no_fill', legacyReason: 'empty_vast', noFill: true, ...summary };
   }
-  return { ok: true, reason: null, hasAd, hasWrapper, hasMediaFile };
+  if (!hasMediaFile && !hasPlayableWrapper) {
+    return { ok: false, reason: 'missing_media_file', ...summary };
+  }
+  return { ok: true, reason: null, ...summary };
 }
 
 async function probeVastTagAvailability(tagUrl) {
@@ -169,6 +201,15 @@ function hashToken(raw) {
   return crypto.createHash('sha256').update(String(raw)).digest('hex');
 }
 
+function pruneMemoryAdSessions() {
+  const now = Date.now();
+  for (const [sessionId, session] of memoryAdSessions.entries()) {
+    if (!session?.expires_at || new Date(session.expires_at).getTime() < now) {
+      memoryAdSessions.delete(sessionId);
+    }
+  }
+}
+
 function b64url(buf) {
   return Buffer.from(buf).toString('base64url');
 }
@@ -203,6 +244,27 @@ export function verifyStreamUnlockToken(token, videoId, viewerKey) {
   } catch {
     return false;
   }
+}
+
+function isRecoverableNoFillDiagnostic(item) {
+  if (!item) return false;
+  const reason = String(item.reason || '').toLowerCase();
+  if (reason === 'no_fill' || item.noFill === true) return true;
+  return reason === 'empty_response' && Number(item.status) === 200;
+}
+
+function canBypassForNoFill(diagnostics = []) {
+  const concrete = (diagnostics || []).filter(Boolean);
+  return concrete.length > 0 && concrete.every(isRecoverableNoFillDiagnostic);
+}
+
+function createAdUnavailableUnlock({ videoId, userId, fingerprint }) {
+  const viewerKey = userId || fingerprint || 'anon';
+  return signStreamUnlockToken({
+    sessionId: `ad_unavailable_${crypto.randomUUID()}`,
+    videoId,
+    viewerKey,
+  });
 }
 
 async function resolveVideoMeta(videoId) {
@@ -326,96 +388,17 @@ async function markPlayHistoryAdSeen(videoId, userId, fingerprint) {
   }
 }
 
-function clampProbability(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 1;
-  return Math.max(0, Math.min(1, n));
-}
-
-async function hasSeenAdForVideo(videoId, userId, fingerprint) {
-  if (!supabase || !videoId) return false;
-  try {
-    let query = supabase
-      .from('video_play_history')
-      .select('has_seen_ad')
-      .eq('video_id', videoId);
-    if (userId) query = query.eq('user_id', userId);
-    else if (fingerprint) query = query.eq('session_id', fingerprint);
-    else return false;
-    const { data, error } = await withTimeout(query.maybeSingle(), AD_METADATA_READ_TIMEOUT_MS, 'video ad history');
-    if (error && isMissingDbFeature(error)) return false;
-    if (error) return false;
-    return data?.has_seen_ad === true;
-  } catch {
-    return false;
-  }
-}
-
-async function getLastViewerAdSession(userId, fingerprint) {
-  if (!supabase || (!userId && !fingerprint)) return null;
-  try {
-    let query = supabase
-      .from('vast_ad_sessions')
-      .select('id, video_id, started_at, completed_at, status')
-      .order('started_at', { ascending: false })
-      .limit(1);
-    if (userId) query = query.eq('user_id', userId);
-    else query = query.eq('fingerprint', fingerprint);
-    const { data, error } = await withTimeout(query.maybeSingle(), AD_METADATA_READ_TIMEOUT_MS, 'last ad session');
-    if (error && isMissingDbFeature(error)) return null;
-    if (error) return null;
-    return data || null;
-  } catch {
-    return null;
-  }
-}
-
-async function countViewerPlaysSince({ userId, fingerprint, sinceIso }) {
-  if (!supabase || !sinceIso || (!userId && !fingerprint)) return null;
-  try {
-    let query = supabase
-      .from('video_play_history')
-      .select('video_id', { count: 'exact', head: true })
-      .gte('updated_at', sinceIso);
-    if (userId) query = query.eq('user_id', userId);
-    else query = query.eq('session_id', fingerprint);
-    const { count, error } = await withTimeout(query, AD_METADATA_READ_TIMEOUT_MS, 'viewer play count');
-    if (error && isMissingDbFeature(error)) return null;
-    if (error) return null;
-    return Number(count) || 0;
-  } catch {
-    return null;
-  }
-}
-
 async function getVastSettings() {
   const enabled = true;
   const skipAfterSeconds = 5;
   const timeoutSec = 5;
   const estimatedCpmUsd = 2;
-  const frequencyVideos = 3;
-  const cooldownSec = 600;
+  const frequencyVideos = 1;
+  const cooldownSec = 0;
   const probability = 1;
 
-  let vastTagUrl = normalizeVastTagUrl(DEFAULT_VAST_TAG);
-  let fallbackVastTags = [];
-
-  try {
-    const { providers } = await withTimeout(
-      resolveActiveProviders({ type: 'vast', placement: 'video_preroll' }),
-      AD_METADATA_READ_TIMEOUT_MS,
-      'code-managed VAST providers',
-    );
-    const tags = providers
-      .flatMap((p) => (p.zones || []).map((z) => z.tag_url).filter(Boolean))
-      .filter(Boolean);
-    if (tags.length) {
-      vastTagUrl = normalizeVastTagUrl(tags[0]);
-      fallbackVastTags = tags.slice(1).map(normalizeVastTagUrl);
-    }
-  } catch {
-    /* use code default */
-  }
+  const vastTagUrl = normalizeVastTagUrl(DEFAULT_VAST_TAG) || APPROVED_DEFAULT_VAST_TAG;
+  const fallbackVastTags = [];
 
   return {
     enabled,
@@ -450,33 +433,6 @@ export async function shouldRequireAd({
     if (hasAccess) return false;
   }
 
-  if (await hasActiveUnlock(videoId, userId, fingerprint)) return false;
-
-  if (await hasSeenAdForVideo(videoId, userId, fingerprint)) return false;
-
-  if (settings.probability <= 0) return false;
-  if (settings.probability < 1 && Math.random() > settings.probability) return false;
-
-  const lastSession = await getLastViewerAdSession(userId, fingerprint);
-  if (!lastSession) return true;
-
-  const lastAt = new Date(lastSession.completed_at || lastSession.started_at).getTime();
-  const hasCooldownRule = settings.cooldownSec > 0;
-  const cooldownReady = hasCooldownRule && Number.isFinite(lastAt)
-    ? ((Date.now() - lastAt) / 1000) >= settings.cooldownSec
-    : false;
-
-  const playsSince = await countViewerPlaysSince({
-    userId,
-    fingerprint,
-    sinceIso: lastSession.completed_at || lastSession.started_at,
-  });
-  const frequencyReady = playsSince == null ? false : playsSince >= settings.frequencyVideos;
-  if (!cooldownReady && !frequencyReady) {
-    if (playsSince == null && !hasCooldownRule) return true;
-    return false;
-  }
-
   return true;
 }
 
@@ -486,19 +442,9 @@ export async function createAdSession({ videoId, userId, fingerprint, skipAds = 
   const requireAd = await shouldRequireAd({ videoId, userId, fingerprint, skipAds, meta, settings });
 
   if (!requireAd) {
-    let streamUnlockToken = null;
-    if (!skipAds) {
-      const viewerKey = userId || fingerprint || 'anon';
-      const signed = signStreamUnlockToken({
-        sessionId: 'bypass',
-        videoId,
-        viewerKey,
-      });
-      streamUnlockToken = signed.token;
-    }
     return {
       requireAd: false,
-      streamUnlockToken,
+      streamUnlockToken: null,
       skipAfterSeconds: settings.skipAfterSeconds,
       timeoutSec: settings.timeoutSec,
       adPolicy: {
@@ -511,36 +457,58 @@ export async function createAdSession({ videoId, userId, fingerprint, skipAds = 
 
   const availableVast = await resolveAvailableVastTags(settings);
   if (!availableVast.vastTagUrl) {
-    const viewerKey = userId || fingerprint || 'anon';
-    const signed = signStreamUnlockToken({
-      sessionId: 'vast-unavailable',
-      videoId,
-      viewerKey,
-    });
+    if (canBypassForNoFill(availableVast.diagnostics)) {
+      const signed = createAdUnavailableUnlock({ videoId, userId, fingerprint });
+      console.info('[vastAd] no VAST fill; issuing temporary playback unlock', {
+        videoId,
+        diagnostics: availableVast.diagnostics,
+      });
+      return {
+        requireAd: false,
+        adUnavailable: true,
+        adUnavailableReason: 'no_fill',
+        streamUnlockToken: signed.token,
+        streamUnlockExpiresAt: signed.expiresAt,
+        skipAfterSeconds: settings.skipAfterSeconds,
+        timeoutSec: settings.timeoutSec,
+        vastDiagnostics: availableVast.diagnostics,
+        adPolicy: {
+          frequencyVideos: settings.frequencyVideos,
+          cooldownSec: settings.cooldownSec,
+          probability: settings.probability,
+        },
+      };
+    }
     if ((availableVast.diagnostics || []).some((item) => item && item.cached !== true)) {
-      console.warn('[vastAd] no playable VAST inventory; failing open to content', {
+      console.warn('[vastAd] no playable VAST inventory; stream unlock withheld', {
         videoId,
         diagnostics: availableVast.diagnostics,
       });
     }
-    return {
-      requireAd: false,
-      adUnavailable: true,
-      streamUnlockToken: signed.token,
-      skipAfterSeconds: settings.skipAfterSeconds,
-      timeoutSec: settings.timeoutSec,
-      vastDiagnostics: availableVast.diagnostics,
-      adPolicy: {
-        frequencyVideos: settings.frequencyVideos,
-        cooldownSec: settings.cooldownSec,
-        probability: settings.probability,
-      },
-    };
+    const err = new Error('Advertisement unavailable. Please try again.');
+    err.statusCode = 503;
+    err.code = 'AD_INVENTORY_UNAVAILABLE';
+    err.diagnostics = availableVast.diagnostics;
+    throw err;
   }
 
   const sessionId = crypto.randomUUID();
   const sessionToken = crypto.randomBytes(24).toString('hex');
   const expiresAt = new Date(Date.now() + SESSION_TTL_SEC * 1000).toISOString();
+  pruneMemoryAdSessions();
+  memoryAdSessions.set(sessionId, {
+    id: sessionId,
+    video_id: videoId,
+    user_id: userId || null,
+    creator_id: meta.creatorId,
+    fingerprint: fingerprint || null,
+    session_token_hash: hashToken(sessionToken),
+    status: 'pending',
+    vast_tag_url: availableVast.vastTagUrl,
+    skip_after_seconds: settings.skipAfterSeconds,
+    expires_at: expiresAt,
+    started_at: new Date().toISOString(),
+  });
 
   if (supabase) {
     const { error } = await withTimeout(
@@ -585,27 +553,31 @@ export async function createAdSession({ videoId, userId, fingerprint, skipAds = 
 }
 
 async function loadSession(sessionId) {
-  if (!supabase || !sessionId) return null;
-  const { data, error } = await withTimeout(
-    supabase
-      .from('vast_ad_sessions')
-      .select('*')
-      .eq('id', sessionId)
-      .maybeSingle(),
-    AD_METADATA_READ_TIMEOUT_MS,
-    'load ad session',
-  );
-  if (error && isMissingDbFeature(error)) return null;
-  if (error) throw error;
-  return data;
+  if (!sessionId) return null;
+  pruneMemoryAdSessions();
+  if (supabase) {
+    const { data, error } = await withTimeout(
+      supabase
+        .from('vast_ad_sessions')
+        .select('*')
+        .eq('id', sessionId)
+        .maybeSingle(),
+      AD_METADATA_READ_TIMEOUT_MS,
+      'load ad session',
+    );
+    if (data) return data;
+    if (error && !isMissingDbFeature(error)) throw error;
+  }
+  return memoryAdSessions.get(sessionId) || null;
 }
 
 export async function recordAdEvent({ sessionId, event, metadata = {}, userId, fingerprint }) {
   const session = await loadSession(sessionId);
   if (!session) {
-    const viewerKey = userId || fingerprint || 'anon';
-    const signed = signStreamUnlockToken({ sessionId: sessionId || 'fallback', videoId: metadata.videoId || '', viewerKey });
-    return { streamUnlockToken: signed.token, credited: false };
+    const err = new Error('Ad session not found');
+    err.statusCode = 404;
+    err.code = 'AD_SESSION_NOT_FOUND';
+    throw err;
   }
 
   if (new Date(session.expires_at).getTime() < Date.now()) {
@@ -615,7 +587,7 @@ export async function recordAdEvent({ sessionId, event, metadata = {}, userId, f
   }
 
   const normalized = String(event || '').toLowerCase();
-  const allowed = ['requested', 'loaded', 'impression', 'started', 'complete', 'skip', 'error', 'click', 'clicked', 'main_video_started', 'watch_progress', 'unsupported'];
+  const allowed = ['requested', 'loaded', 'impression', 'started', 'complete', 'skip', 'no_fill', 'error', 'click', 'clicked', 'main_video_started', 'watch_progress', 'unsupported'];
   if (!allowed.includes(normalized)) {
     const err = new Error('Invalid ad event');
     err.statusCode = 400;
@@ -635,7 +607,7 @@ export async function recordAdEvent({ sessionId, event, metadata = {}, userId, f
   }
 
   let streamUnlockToken = null;
-  const unlockEvents = ['complete', 'skip', 'error', 'unsupported'];
+  const unlockEvents = ['complete', 'skip', 'no_fill'];
   if (unlockEvents.includes(normalized)) {
     const viewerKey = session.user_id || session.fingerprint || fingerprint || userId || 'anon';
     const signed = signStreamUnlockToken({
@@ -644,6 +616,11 @@ export async function recordAdEvent({ sessionId, event, metadata = {}, userId, f
       viewerKey,
     });
     streamUnlockToken = signed.token;
+    const finalStatus = normalized === 'complete'
+      ? 'completed'
+      : normalized === 'skip'
+        ? 'skipped'
+        : 'failed';
 
     if (supabase) {
       await withTimeout(
@@ -660,15 +637,25 @@ export async function recordAdEvent({ sessionId, event, metadata = {}, userId, f
       ).catch((err) => console.warn('[vastAd] unlock write skipped:', err?.message || err));
       await withTimeout(
         supabase.from('vast_ad_sessions').update({
-          status: normalized === 'complete' ? 'completed' : normalized === 'skip' ? 'skipped' : 'failed',
+          status: finalStatus,
           completed_at: new Date().toISOString(),
         }).eq('id', sessionId),
         AD_METADATA_READ_TIMEOUT_MS,
         'update VAST session',
       ).catch((err) => console.warn('[vastAd] session update skipped:', err?.message || err));
     }
+    const memorySession = memoryAdSessions.get(sessionId);
+    if (memorySession) {
+      memoryAdSessions.set(sessionId, {
+        ...memorySession,
+        status: finalStatus,
+        completed_at: new Date().toISOString(),
+      });
+    }
 
-    await markPlayHistoryAdSeen(session.video_id, session.user_id || userId, session.fingerprint || fingerprint);
+    if (normalized === 'complete' || normalized === 'skip') {
+      await markPlayHistoryAdSeen(session.video_id, session.user_id || userId, session.fingerprint || fingerprint);
+    }
 
     let rewardResult = { credited: false };
     if (normalized === 'complete' || normalized === 'skip') {
@@ -691,6 +678,27 @@ export async function recordAdEvent({ sessionId, event, metadata = {}, userId, f
       rewardUsd: rewardResult.rewardUsd,
       validation: rewardResult.validation,
     };
+  }
+
+  if ((normalized === 'error' || normalized === 'unsupported') && supabase) {
+    await withTimeout(
+      supabase.from('vast_ad_sessions').update({
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+      }).eq('id', sessionId),
+      AD_METADATA_READ_TIMEOUT_MS,
+      'mark VAST session failed',
+    ).catch((err) => console.warn('[vastAd] session failed update skipped:', err?.message || err));
+  }
+  if (normalized === 'error' || normalized === 'unsupported') {
+    const memorySession = memoryAdSessions.get(sessionId);
+    if (memorySession) {
+      memoryAdSessions.set(sessionId, {
+        ...memorySession,
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+      });
+    }
   }
 
   if (normalized === 'started' && supabase) {

@@ -29,12 +29,12 @@ const CODE_MANAGED_ADSTERRA_ZONES = [
   {
     id: 'adsterra-highperformance-after-header-728x90',
     zoneId: '8af10b683371ed20d23f25c00177c8e8',
-    zoneName: 'After Header Leaderboard',
+    zoneName: 'After Subheader Leaderboard',
     platform: PLATFORM_ADSTERRA,
     adFormat: 'Banner',
     width: 728,
     height: 90,
-    placement: 'leaderboard',
+    placement: 'home_after_subheader_900x250',
     status: 'active',
     source: 'code',
   },
@@ -506,8 +506,9 @@ function detectFormat(row = {}, fallback = 'Banner') {
     'Banner',
   ).replace(/[_-]+/g, ' ').trim();
   if (!value) return fallback;
+  if (/video\s*slider|slider\s*video|out\s*stream|outstream/i.test(value)) return 'Video Slider';
   if (/smart/i.test(value)) return 'Smartlink';
-  if (/pre.?roll|vast|in.?stream|video/i.test(value)) return 'In-Stream';
+  if (/pre.?roll|vast|in.?stream/i.test(value)) return 'In-Stream';
   if (/native/i.test(value)) return 'Native';
   if (/pop/i.test(value)) return 'Popunder';
   if (/social/i.test(value)) return 'Social Bar';
@@ -833,6 +834,19 @@ function getCodeManagedExoZones() {
       width: 728,
       height: 90,
       placement: 'leaderboard',
+      source: 'code',
+      tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL,
+    },
+    {
+      id: 'exoclick-video-slider-5933054',
+      zoneName: 'Video Slider Display',
+      zoneId: EXOCLICK_DISPLAY_ZONE_ID,
+      platform: PLATFORM_EXOCLICK,
+      adFormat: 'Video Slider',
+      status: 'active',
+      width: 300,
+      height: 250,
+      placement: 'video_slider',
       source: 'code',
       tagUrl: EXOCLICK_DISPLAY_SCRIPT_URL,
     },

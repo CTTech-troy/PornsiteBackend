@@ -12,7 +12,7 @@ export const STATIC_COIN_PACKAGES = [
 ];
 
 const NGN_PER_USD = Number(process.env.NGN_PER_USD || 1600);
-const FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT = Math.max(0, Number(process.env.FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT || 2.99));
+const FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT = Math.max(0, Number(process.env.FLUTTERWAVE_MIN_USD_CHECKOUT_AMOUNT || 0));
 
 function isMissingDbFeature(error) {
   const message = String(error?.message || '');

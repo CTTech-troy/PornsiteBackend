@@ -55,30 +55,117 @@ function analyzeVastXml(xml) {
   const body = String(xml || '');
   const hasVast = /<VAST(?=[\s>/])/i.test(body);
   const adMatches = body.match(/<Ad(?=[\s>])/gi) || [];
-  if (!body.trim()) return { ok: false, reason: 'empty_response', hasAd: false, adCount: 0 };
-  if (!hasVast) return { ok: false, reason: 'malformed_vast', hasAd: false, adCount: 0 };
-  if (!adMatches.length) return { ok: false, reason: 'empty_vast', hasAd: false, adCount: 0 };
-  return { ok: true, reason: null, hasAd: true, adCount: adMatches.length };
+  const wrapperMatches = body.match(/<Wrapper\b/gi) || [];
+  const inlineMatches = body.match(/<InLine\b/gi) || [];
+  const linearMatches = body.match(/<Linear\b/gi) || [];
+  const nonLinearMatches = body.match(/<NonLinear\b/gi) || [];
+  const companionMatches = body.match(/<Companion\b/gi) || [];
+  const vastAdTagUriMatches = body.match(/<VASTAdTagURI\b/gi) || [];
+  const mediaFileMatches = body.match(/<MediaFile\b/gi) || [];
+  const staticResourceMatches = body.match(/<StaticResource\b/gi) || [];
+  const iframeResourceMatches = body.match(/<IFrameResource\b/gi) || [];
+  const htmlResourceMatches = body.match(/<HTMLResource\b/gi) || [];
+  const impressionMatches = body.match(/<Impression\b/gi) || [];
+  const clickThroughMatches = body.match(/<ClickThrough\b/gi) || [];
+  const duration = body.match(/<Duration>\s*([^<]+)\s*<\/Duration>/i)?.[1]?.trim() || '';
+  const skipOffset = body.match(/<Linear\b[^>]*\bskipoffset=["']([^"']+)["']/i)?.[1]?.trim() || '';
+  const hasPlayableWrapper = wrapperMatches.length > 0 && vastAdTagUriMatches.length > 0;
+  const bannerResourceCount = staticResourceMatches.length + iframeResourceMatches.length + htmlResourceMatches.length;
+  const hasBannerCreative = (nonLinearMatches.length > 0 || companionMatches.length > 0) && bannerResourceCount > 0;
+  const missing = [
+    !hasVast ? 'VAST root' : '',
+    !adMatches.length ? 'Ad' : '',
+    !mediaFileMatches.length && !hasPlayableWrapper && !hasBannerCreative ? 'MediaFile, banner creative, or Wrapper VASTAdTagURI' : '',
+    !impressionMatches.length ? 'Impression' : '',
+    !duration ? 'Duration' : '',
+    !clickThroughMatches.length ? 'ClickThrough' : '',
+  ].filter(Boolean);
+  const summary = {
+    hasVast,
+    hasAd: adMatches.length > 0,
+    adCount: adMatches.length,
+    hasWrapper: wrapperMatches.length > 0,
+    wrapperCount: wrapperMatches.length,
+    inlineCount: inlineMatches.length,
+    linearCount: linearMatches.length,
+    nonLinearCount: nonLinearMatches.length,
+    companionCount: companionMatches.length,
+    vastAdTagUriCount: vastAdTagUriMatches.length,
+    hasPlayableWrapper,
+    hasBannerCreative,
+    bannerResourceCount,
+    mediaFileCount: mediaFileMatches.length,
+    staticResourceCount: staticResourceMatches.length,
+    iframeResourceCount: iframeResourceMatches.length,
+    htmlResourceCount: htmlResourceMatches.length,
+    impressionCount: impressionMatches.length,
+    clickThroughCount: clickThroughMatches.length,
+    duration,
+    skipOffset,
+    missing,
+  };
+  if (!body.trim()) return { ok: false, reason: 'empty_response', ...summary };
+  if (!hasVast) return { ok: false, reason: 'malformed_vast', ...summary };
+  if (!adMatches.length) return { ok: false, reason: 'no_fill', legacyReason: 'empty_vast', noFill: true, ...summary };
+  if (!mediaFileMatches.length && !hasPlayableWrapper && !hasBannerCreative) return { ok: false, reason: 'missing_media_or_banner_creative', ...summary };
+  return { ok: true, reason: null, ...summary };
 }
 
-async function fetchVastXml(tagUrl) {
+function headersToObject(headers) {
+  const out = {};
+  try {
+    headers?.forEach?.((value, key) => {
+      out[key] = value;
+    });
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+function safeClientHeader(value, fallback, maxLength = 240) {
+  const text = String(value || '').replace(/[\r\n]/g, ' ').trim();
+  return text ? text.slice(0, maxLength) : fallback;
+}
+
+async function fetchVastXml(tagUrl, { clientUserAgent = '', clientAcceptLanguage = '' } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VAST_PROXY_TIMEOUT_MS);
+  const startedAt = Date.now();
+  const requestHeaders = {
+    Accept: 'application/xml,text/xml,*/*',
+    'User-Agent': safeClientHeader(clientUserAgent, 'Mozilla/5.0 (compatible; XStreamVideos-VASTProxy/1.0)'),
+  };
+  const acceptLanguage = safeClientHeader(clientAcceptLanguage, '', 160);
+  if (acceptLanguage) requestHeaders['Accept-Language'] = acceptLanguage;
   try {
     const response = await fetch(tagUrl, {
       signal: controller.signal,
-      headers: {
-        Accept: 'application/xml,text/xml,*/*',
-        'User-Agent': 'Mozilla/5.0 (compatible; XStreamVideos-VASTProxy/1.0)',
-      },
+      headers: requestHeaders,
     });
     const xml = await response.text();
+    const responseTimeMs = Date.now() - startedAt;
+    const responseHeaders = headersToObject(response.headers);
+    const bodyBytes = Buffer.byteLength(xml || '', 'utf8');
+    const debug = {
+      requestUrl: tagUrl,
+      requestHeaders,
+      responseUrl: response.url,
+      redirected: response.redirected,
+      status: response.status,
+      statusText: response.statusText,
+      responseHeaders,
+      responseTimeMs,
+      bodyBytes,
+      bodyPreview: String(xml || '').slice(0, 2000),
+    };
     if (Buffer.byteLength(xml || '', 'utf8') > VAST_PROXY_MAX_BYTES) {
       return {
         ok: false,
         status: response.status,
         reason: 'vast_too_large',
         xml: '',
+        debug,
       };
     }
     if (!response.ok) {
@@ -87,6 +174,7 @@ async function fetchVastXml(tagUrl) {
         status: response.status,
         reason: `http_${response.status}`,
         xml,
+        debug,
       };
     }
     const analysis = analyzeVastXml(xml);
@@ -94,8 +182,13 @@ async function fetchVastXml(tagUrl) {
       ...analysis,
       status: response.status,
       contentType: response.headers.get('content-type') || null,
-      bytes: Buffer.byteLength(xml || '', 'utf8'),
+      bytes: bodyBytes,
       xml: analysis.ok ? xml : '',
+      rawXml: xml,
+      debug: {
+        ...debug,
+        validation: analysis,
+      },
     };
   } catch (err) {
     return {
@@ -103,6 +196,16 @@ async function fetchVastXml(tagUrl) {
       reason: err?.name === 'AbortError' ? 'vast_timeout' : 'vast_fetch_failed',
       message: err?.message || String(err),
       xml: '',
+      debug: {
+        requestUrl: tagUrl,
+        requestHeaders,
+        responseTimeMs: Date.now() - startedAt,
+        error: {
+          name: err?.name || '',
+          message: err?.message || String(err),
+          stack: err?.stack || '',
+        },
+      },
     };
   } finally {
     clearTimeout(timer);
@@ -215,6 +318,7 @@ export async function getNextAd(req, res) {
 export async function getVastXml(req, res) {
   const requestedUrl = String(req.query.url || '').trim();
   const tagUrl = requestedUrl || await resolvePublicVastUrl();
+  const debugEnabled = req.query.debug === '1' || req.query.debug === 'true';
   res.setHeader('Cache-Control', 'no-store');
 
   if (!await isTrustedVastUrl(tagUrl)) {
@@ -225,7 +329,10 @@ export async function getVastXml(req, res) {
     });
   }
 
-  const result = await fetchVastXml(tagUrl);
+  const result = await fetchVastXml(tagUrl, {
+    clientUserAgent: req.get('user-agent') || '',
+    clientAcceptLanguage: req.get('accept-language') || '',
+  });
   if (!result.ok) {
     return res.status(200).json({
       ok: false,
@@ -235,7 +342,29 @@ export async function getVastXml(req, res) {
         bytes: result.bytes || 0,
         contentType: result.contentType || null,
         hasAd: Boolean(result.hasAd),
+        adCount: result.adCount || 0,
+        noFill: Boolean(result.noFill),
+        hasWrapper: Boolean(result.hasWrapper),
+        wrapperCount: result.wrapperCount || 0,
+        inlineCount: result.inlineCount || 0,
+        linearCount: result.linearCount || 0,
+        nonLinearCount: result.nonLinearCount || 0,
+        companionCount: result.companionCount || 0,
+        vastAdTagUriCount: result.vastAdTagUriCount || 0,
+        hasPlayableWrapper: Boolean(result.hasPlayableWrapper),
+        hasBannerCreative: Boolean(result.hasBannerCreative),
+        bannerResourceCount: result.bannerResourceCount || 0,
+        mediaFileCount: result.mediaFileCount || 0,
+        staticResourceCount: result.staticResourceCount || 0,
+        iframeResourceCount: result.iframeResourceCount || 0,
+        htmlResourceCount: result.htmlResourceCount || 0,
+        impressionCount: result.impressionCount || 0,
+        clickThroughCount: result.clickThroughCount || 0,
+        duration: result.duration || '',
+        skipOffset: result.skipOffset || '',
+        missing: result.missing || [],
       },
+      debug: debugEnabled ? { ...result.debug, responseBody: result.rawXml || '' } : undefined,
       xml: '',
     });
   }
@@ -248,7 +377,28 @@ export async function getVastXml(req, res) {
       bytes: result.bytes,
       contentType: result.contentType,
       adCount: result.adCount,
+      noFill: Boolean(result.noFill),
+      hasWrapper: Boolean(result.hasWrapper),
+      wrapperCount: result.wrapperCount || 0,
+      inlineCount: result.inlineCount || 0,
+      linearCount: result.linearCount || 0,
+      nonLinearCount: result.nonLinearCount || 0,
+      companionCount: result.companionCount || 0,
+      vastAdTagUriCount: result.vastAdTagUriCount || 0,
+      hasPlayableWrapper: Boolean(result.hasPlayableWrapper),
+      hasBannerCreative: Boolean(result.hasBannerCreative),
+      bannerResourceCount: result.bannerResourceCount || 0,
+      mediaFileCount: result.mediaFileCount,
+      staticResourceCount: result.staticResourceCount || 0,
+      iframeResourceCount: result.iframeResourceCount || 0,
+      htmlResourceCount: result.htmlResourceCount || 0,
+      impressionCount: result.impressionCount,
+      clickThroughCount: result.clickThroughCount,
+      duration: result.duration,
+      skipOffset: result.skipOffset,
+      missing: result.missing || [],
     },
+    debug: debugEnabled ? { ...result.debug, responseBody: result.rawXml || result.xml || '' } : undefined,
   });
 }
 

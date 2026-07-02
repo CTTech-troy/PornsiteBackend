@@ -230,7 +230,7 @@ export async function getMonitoringOverview(range = '24h') {
     if (e.event_type === 'click') counts.clicks += 1;
     if (e.event_type === 'error') counts.errors += 1;
     if (e.event_type === 'adblock') counts.adblock += 1;
-    if (e.event_type === 'empty_vast') counts.emptyInventory += 1;
+    if (e.event_type === 'empty_vast' || e.event_type === 'no_fill') counts.emptyInventory += 1;
     if (e.event_type === 'timeout') counts.timeouts += 1;
   }
 
@@ -240,6 +240,7 @@ export async function getMonitoringOverview(range = '24h') {
     if (e.event_type === 'skip') counts.skips += 1;
     if (e.event_type === 'click') counts.clicks += 1;
     if (e.event_type === 'error') counts.errors += 1;
+    if (e.event_type === 'no_fill') counts.emptyInventory += 1;
   }
 
   counts.sessions = vastSessions.length + new Set(events.map((e) => e.session_id).filter(Boolean)).size;
@@ -318,7 +319,7 @@ export async function getProviderAnalytics(range = '30d') {
     const pe = (events || []).filter((e) => e.provider_id === p.id);
     const impressions = pe.filter((e) => ['impression', 'started', 'request'].includes(e.event_type)).length;
     const clicks = pe.filter((e) => e.event_type === 'click').length;
-    const errors = pe.filter((e) => ['error', 'timeout', 'empty_vast', 'blocked'].includes(e.event_type)).length;
+    const errors = pe.filter((e) => ['error', 'timeout', 'empty_vast', 'no_fill', 'blocked'].includes(e.event_type)).length;
     const revenue = pe.reduce((s, e) => s + Number(e.revenue_usd || 0), 0) + Number(p.revenue_usd || 0);
     const requests = impressions + errors;
     return {

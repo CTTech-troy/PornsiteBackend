@@ -2,7 +2,6 @@ import {
   createAdSession,
   recordAdEvent,
   getAdStatusForVideo,
-  signStreamUnlockToken,
 } from '../services/vastAdSession.service.js';
 import { getVastAdMetrics } from '../services/vastAdAnalytics.service.js';
 import { resolveRange } from '../services/revenueCalculation.service.js';
@@ -23,24 +22,17 @@ export async function postAdSession(req, res) {
     return res.json({ success: true, ...data });
   } catch (err) {
     console.error('[vastAd] postAdSession:', err.message);
-    const videoId = String(req.params.id || '').trim();
-    if (videoId) {
-      const viewerKey = req.uid || req.body?.fingerprint || 'anon';
-      const signed = signStreamUnlockToken({ sessionId: 'session-error', videoId, viewerKey });
-      return res.status(200).json({
-        success: true,
-        requireAd: false,
-        adUnavailable: true,
-        recoverable: true,
-        streamUnlockToken: signed.token,
-        message: 'Ad session unavailable; starting content.',
-        diagnostics: {
-          requestId: req.requestId,
-          reason: process.env.NODE_ENV === 'production' ? 'ad_session_unavailable' : err.message,
-        },
-      });
-    }
-    return res.status(err.statusCode || 500).json({ success: false, message: err.message || 'Failed to create ad session' });
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      recoverable: true,
+      code: err.code || 'AD_SESSION_UNAVAILABLE',
+      message: err.message || 'Failed to create ad session',
+      diagnostics: {
+        requestId: req.requestId,
+        reason: process.env.NODE_ENV === 'production' ? 'ad_session_unavailable' : err.message,
+        vastDiagnostics: err.diagnostics || undefined,
+      },
+    });
   }
 }
 
@@ -63,22 +55,17 @@ export async function postAdEventHandler(req, res) {
     return res.json({ success: true, ...result });
   } catch (err) {
     console.error('[vastAd] postAdEvent:', err.message);
-    const videoId = String(req.params.id || '').trim();
-    if (videoId) {
-      const viewerKey = req.uid || req.body?.fingerprint || 'anon';
-      const signed = signStreamUnlockToken({ sessionId: req.body?.sessionId || 'event-error', videoId, viewerKey });
-      return res.status(202).json({
-        success: true,
-        recoverable: true,
-        streamUnlockToken: signed.token,
-        credited: false,
-        diagnostics: {
-          requestId: req.requestId,
-          reason: process.env.NODE_ENV === 'production' ? 'ad_event_unavailable' : err.message,
-        },
-      });
-    }
-    return res.status(err.statusCode || 500).json({ success: false, message: err.message || 'Failed to record ad event' });
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      recoverable: true,
+      code: err.code || 'AD_EVENT_REJECTED',
+      message: err.message || 'Failed to record ad event',
+      credited: false,
+      diagnostics: {
+        requestId: req.requestId,
+        reason: process.env.NODE_ENV === 'production' ? 'ad_event_rejected' : err.message,
+      },
+    });
   }
 }
 

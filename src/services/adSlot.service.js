@@ -29,7 +29,7 @@ const CODE_MANAGED_SLOT_SETTINGS = Object.freeze({
   monetag_banner_zone_id: APPROVED_MONETAG_ZONE_ID,
   monetag_allowed_pages: '["home","video","creator","feed","search","live"]',
   monetag_allowed_slots: '["home_feed_native","home_mobile_inline_300x100","category_feed_native","feed_native","mobile_inline","category_feed","home_after_subheader_900x250","home_sidebar","home_bottom_900x250","video_sidebar","video_recommended","creator_sidebar","live_sidebar","feed_sidebar","search_sidebar","before_footer","homepage_banner","homepage_top","homepage_bottom","leaderboard","banner"]',
-  monetag_allowed_domains: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","5gvci.com"]',
+  monetag_allowed_domains: '["quge5.com","monetag.com","www.monetag.com","highperformanceformat.com","effectivecpmnetwork.com","pl30142051.effectivecpmnetwork.com","profitablecpmrate.com","profitablecpmgate.com","alwingulla.com","kettledroopingcontinuation.com","sleepoverlimitprofound.com","fizzyacerbitymellow.com","cloudvideosa.com","protrafficinspector.com","5gvci.com"]',
 });
 
 function codeManagedAdsError() {
@@ -109,6 +109,17 @@ const HOME_AFTER_SUBHEADER_BANNER_NAME = 'Home After Subheader Banner 728x90';
 const HOME_AFTER_SUBHEADER_BANNER_WIDTH = 728;
 const HOME_AFTER_SUBHEADER_BANNER_HEIGHT = 90;
 const HOME_AFTER_SUBHEADER_BANNER_SIZE = '728x90';
+const HOME_AFTER_SUBHEADER_ADSTERRA_KEY = '8af10b683371ed20d23f25c00177c8e8';
+const HOME_AFTER_SUBHEADER_ADSTERRA_EMBED_CODE = `<script>
+  atOptions = {
+    'key' : '${HOME_AFTER_SUBHEADER_ADSTERRA_KEY}',
+    'format' : 'iframe',
+    'height' : 90,
+    'width' : 728,
+    'params' : {}
+  };
+</script>
+<script src="https://www.highperformanceformat.com/${HOME_AFTER_SUBHEADER_ADSTERRA_KEY}/invoke.js"></script>`;
 const SLOT_LOCATIONS = new Set([
   'sidebar',
   'recommended',
@@ -157,9 +168,13 @@ function normalizeHomeAfterSubheaderSlot(slot = {}) {
     width: HOME_AFTER_SUBHEADER_BANNER_WIDTH,
     height: HOME_AFTER_SUBHEADER_BANNER_HEIGHT,
     size_label: HOME_AFTER_SUBHEADER_BANNER_SIZE,
-    provider_type: slot.provider_type || 'custom',
-    provider_id: slot.provider_id || 'juicyads',
-    display_mode: slot.display_mode || 'custom_only',
+    provider_type: 'custom',
+    provider_id: 'highperformanceformat',
+    zone_id: HOME_AFTER_SUBHEADER_ADSTERRA_KEY,
+    embed_code: HOME_AFTER_SUBHEADER_ADSTERRA_EMBED_CODE,
+    display_mode: 'custom_only',
+    custom_enabled: true,
+    third_party_enabled: false,
     device_target: slot.device_target || 'all',
   };
 }
@@ -365,6 +380,11 @@ export async function getPublicSlotsConfig({ page = null, device = 'desktop' } =
     'profitablecpmrate.com',
     'profitablecpmgate.com',
     'alwingulla.com',
+    'kettledroopingcontinuation.com',
+    'sleepoverlimitprofound.com',
+    'fizzyacerbitymellow.com',
+    'cloudvideosa.com',
+    'protrafficinspector.com',
   ]).map(String);
 
   const filterSlots = (inputSlots) => inputSlots
@@ -509,7 +529,7 @@ export async function incrementSlotStats(slotKey, { impressions = 0, clicks = 0 
 
 function getDefaultSlots() {
   return [
-    { slot_key: HOME_AFTER_SUBHEADER_SLOT_KEY, name: HOME_AFTER_SUBHEADER_BANNER_NAME, page: 'home', location: 'after_subheader', width: HOME_AFTER_SUBHEADER_BANNER_WIDTH, height: HOME_AFTER_SUBHEADER_BANNER_HEIGHT, size_label: HOME_AFTER_SUBHEADER_BANNER_SIZE, provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: true, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_only', device_target: 'all', priority: 8, impressions: 0, clicks: 0, config: {} },
+    { slot_key: HOME_AFTER_SUBHEADER_SLOT_KEY, name: HOME_AFTER_SUBHEADER_BANNER_NAME, page: 'home', location: 'after_subheader', width: HOME_AFTER_SUBHEADER_BANNER_WIDTH, height: HOME_AFTER_SUBHEADER_BANNER_HEIGHT, size_label: HOME_AFTER_SUBHEADER_BANNER_SIZE, provider_type: 'custom', provider_id: 'highperformanceformat', zone_id: HOME_AFTER_SUBHEADER_ADSTERRA_KEY, embed_code: HOME_AFTER_SUBHEADER_ADSTERRA_EMBED_CODE, is_active: true, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_only', device_target: 'all', priority: 8, impressions: 0, clicks: 0, config: { placement_type: HOME_AFTER_SUBHEADER_SLOT_KEY } },
     { slot_key: 'home_feed_native', name: 'Home Feed Native Card', page: 'home', location: 'feed_native', width: 300, height: 250, size_label: '300x250', provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: true, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_first', device_target: 'all', priority: 9, frequency_cap: 6, impressions: 0, clicks: 0, config: { placement_type: 'feed_native', insertion_frequency: 6, start_after: 6, max_per_page: 4, card_size: '300x250' } },
     { slot_key: 'home_sidebar', name: 'Home Sidebar MPU', page: 'home', location: 'sidebar', width: 300, height: 250, size_label: '300x250', provider_type: 'mixed', provider_id: 'monetag', zone_id: APPROVED_MONETAG_ZONE_ID, is_active: true, custom_enabled: true, third_party_enabled: true, display_mode: 'third_party_first', device_target: 'all', priority: 10, impressions: 0, clicks: 0, config: {} },
     { slot_key: 'home_right_leaderboard_728x90', name: 'Home Right Rail Leaderboard 728x90', page: 'home', location: 'sidebar', width: 728, height: 90, size_label: '728x90', provider_type: 'custom', provider_id: 'juicyads', zone_id: null, embed_code: null, is_active: false, custom_enabled: true, third_party_enabled: false, display_mode: 'custom_only', device_target: 'desktop', priority: 11, impressions: 0, clicks: 0, config: { placement_type: 'homepage_banner' } },
